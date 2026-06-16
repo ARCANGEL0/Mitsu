@@ -820,6 +820,8 @@ def _query_openai(history):
             messages=history,
             response_format={"type": "json_object"},
         )
+        if not completion.choices or completion.choices[0].message is None:
+            raise ValueError("LLM returned empty or filtered response")
         return completion.choices[0].message.content
     except Exception as e:
         try:
@@ -828,6 +830,8 @@ def _query_openai(history):
                 messages=history,
                 response_format={"type": "json_object"},
             )
+            if not completion.choices or completion.choices[0].message is None:
+                raise ValueError("LLM returned empty or filtered response")
             return completion.choices[0].message.content
         except Exception:
             print(Fore.RED + f"⚠️ Error querying OpenAI GPTX: {e}")
