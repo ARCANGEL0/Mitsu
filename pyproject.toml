@@ -3,27 +3,29 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "eva-exploit"
-version = "3.5"
-description = "Exploit Vector Agent"
+name = "mitsu"
+version = "0.1.0"
+description = "A terminal-native coding and security companion"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [
-  { name = "ARCANGEL0" }
-]
+authors = [{ name = "ARCANGEL0" }]
 dependencies = [
-  "colorama>=0.4.6",
-  "openai>=1.0.0",
-  "requests>=2.31.0"
+  "Pillow>=10.0.0",
+  "mcp>=2.3,<3",
+  "rich>=13.7.0",
+  "textual>=1.0.0",
 ]
 
 [project.scripts]
-eva = "eva:cli"
+mitsu = "mitsu.__main__:main"
 
 [tool.setuptools]
-py-modules = ["eva", "config"]
+package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["utils*", "modules*", "sessions*"]
+where = ["src"]
+include = ["mitsu*"]
+
+[tool.setuptools.package-data]
+mitsu = ["assets/companions/*.webp"]
