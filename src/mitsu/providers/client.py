@@ -233,3 +233,199 @@ def _openai_response_info(
         # Record only the fact that reasoning was present; never expose its text.
         info["reasoning_only"] = True
     return info
+
+
+def _request_openai_stream(
+    endpoint: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    on_event: StreamCallback,
+    cancellation: RequestCancellation | None,
+    include_usage: bool = True,
+) -> ProviderTurn | None:
+    streamed_payload = {**payload, "stream": True}
+    if include_usage:
+        streamed_payload["stream_options"] = {"include_usage": True}
+    request = Request(
+        endpoint,
+        data=json.dumps(streamed_payload).encode("utf-8"),
+        headers={**headers, "Accept": "text/event-stream"},
+        method="POST",
+    )
+    try:
+        response = urlopen(request, timeout=120)
+    except HTTPError as error:
+        message = _http_error_message(error)
+        normalized = message.casefold()
+        if include_usage and error.code in {400, 422, 501} and "stream_options" in normalized:
+            return _request_openai_stream(
+                endpoint, headers, payload, on_event, cancellation, include_usage=False
+            )
+        if error.code in {400, 422, 501} and ("stream" in normalized or "unsupported" in normalized):
+            return None
+        raise ProviderRequestError(f"Provider request failed ({error.code}): {message}") from error
+    except (URLError, TimeoutError, OSError) as error:
+        if cancellation is not None and cancellation.cancelled():
+            return ProviderTurn("", {"role": "assistant", "content": ""}, [])
+        raise ProviderRequestError(f"Could not reach the provider: {error}") from error
+
+    if cancellation is not None:
+        cancellation.attach(response)
+    content_type = response.headers.get_content_type()
+    if content_type in {"application/json", "application/problem+json"} or content_type.endswith("+json"):
+        try:
+            decoded = json.loads(response.read().decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            if cancellation is not None:
+                cancellation.detach(response)
+            response.close()
+            raise ProviderRequestError("The provider returned an unreadable streamed response.") from error
+        finally:
+            if cancellation is not None:
+                cancellation.detach(response)
+            response.close()
+        if not isinstance(decoded, dict):
+            raise ProviderRequestError("The provider returned an unexpected response.")
+        return _openai_turn_from_response(decoded, on_event)
+    text_parts: list[str] = []
+    tool_calls: dict[int, dict[str, Any]] = {}
+    legacy_function_call: dict[str, str] = {"name": "", "arguments": ""}
+    usage: dict[str, Any] = {}
+    response_info: dict[str, Any] = {}
+    saw_choice = False
+    try:
+        for raw_line in response:
+            if cancellation is not None and cancellation.cancelled():
+                break
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line or line.startswith(":") or not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(chunk, dict):
+                continue
+            response_id = chunk.get("id")
+            if isinstance(response_id, str) and response_id:
+                response_info["response_id"] = response_id
+            response_model = chunk.get("model")
+            if isinstance(response_model, str) and response_model:
+                response_info["model"] = response_model
+            chunk_usage = chunk.get("usage")
+            if isinstance(chunk_usage, dict):
+                usage.update(chunk_usage)
+            choices = chunk.get("choices")
+            if not isinstance(choices, list) or not choices:
+                continue
+            choice = choices[0]
+            if not isinstance(choice, dict):
+                continue
+            saw_choice = True
+            finish_reason = choice.get("finish_reason")
+            if isinstance(finish_reason, str) and finish_reason:
+                response_info["finish_reason"] = finish_reason
+            delta = choice.get("delta")
+            if not isinstance(delta, dict) and isinstance(choice.get("message"), dict):
+                delta = choice["message"]
+            if not isinstance(delta, dict):
+                completion_text = choice.get("text")
+                if isinstance(completion_text, str) and completion_text:
+                    text_parts.append(completion_text)
+                    on_event("delta", {"text": completion_text})
+                continue
+            content = delta.get("content")
+            content_text = _openai_content_text(content)
+            if not content_text and isinstance(delta.get("refusal"), str):
+                content_text = delta["refusal"]
+            if content_text:
+                text_parts.append(content_text)
+                on_event("delta", {"text": content_text})
+            chunks = delta.get("tool_calls")
+            if not isinstance(chunks, list):
+                chunks = []
+            for call in chunks:
+                if not isinstance(call, dict):
+                    continue
+                try:
+                    index = int(call.get("index", 0))
+                except (TypeError, ValueError):
+                    continue
+                current = tool_calls.setdefault(
+                    index,
+                    {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+                )
+                if call.get("id"):
+                    current["id"] = str(call["id"])
+                function = call.get("function")
+                if isinstance(function, dict):
+                    if isinstance(function.get("name"), str):
+                        current["function"]["name"] += function["name"]
+                    if isinstance(function.get("arguments"), str):
+                        current["function"]["arguments"] += function["arguments"]
+                    elif isinstance(function.get("arguments"), (dict, list)):
+                        current["function"]["arguments"] += json.dumps(
+                            function["arguments"], ensure_ascii=False
+                        )
+            legacy = delta.get("function_call")
+            if isinstance(legacy, dict):
+                if isinstance(legacy.get("name"), str):
+                    legacy_function_call["name"] += legacy["name"]
+                if isinstance(legacy.get("arguments"), str):
+                    legacy_function_call["arguments"] += legacy["arguments"]
+            reasoning = delta.get("reasoning_content", delta.get("reasoning"))
+            if reasoning and not content_text:
+                response_info["reasoning_only"] = True
+        if cancellation is not None and cancellation.cancelled():
+            return ProviderTurn("", {"role": "assistant", "content": ""}, [], usage)
+    except (OSError, TimeoutError) as error:
+        if cancellation is not None and cancellation.cancelled():
+            return ProviderTurn("", {"role": "assistant", "content": ""}, [], usage)
+        raise ProviderRequestError(f"Provider stream ended unexpectedly: {error}") from error
+    finally:
+        if cancellation is not None:
+            cancellation.detach(response)
+        response.close()
+
+    if not saw_choice:
+        # Some OpenAI-compatible gateways label a non-SSE response as an event
+        # stream, or return an SSE envelope this parser cannot recognize. Let
+        # the caller retry once using the ordinary JSON response path.
+        return None
+
+    if legacy_function_call["name"]:
+        raw = {
+            "id": f"call_{uuid.uuid4().hex}",
+            "type": "function",
+            "function": {
+                "name": legacy_function_call["name"],
+                "arguments": legacy_function_call["arguments"] or "{}",
+            },
+        }
+        tool_calls.setdefault(-1, raw)
+
+    normalized_calls: list[dict[str, Any]] = []
+    invocations: list[ToolInvocation] = []
+    for _index, raw in sorted(tool_calls.items()):
+        name = raw["function"]["name"]
+        if not name:
+            raise ProviderRequestError("The provider returned a malformed streamed tool call.")
+        call_id = raw["id"] or f"call_{uuid.uuid4().hex}"
+        arguments_text = raw["function"]["arguments"] or "{}"
+        try:
+            arguments = json.loads(arguments_text)
+        except json.JSONDecodeError:
+            arguments = arguments_text
+        raw["id"] = call_id
+        normalized_calls.append(raw)
+        invocations.append(ToolInvocation(call_id, name, arguments))
+    content = "".join(text_parts)
+    assistant_message: dict[str, Any] = {"role": "assistant", "content": content or ""}
+    if normalized_calls:
+        assistant_message["tool_calls"] = normalized_calls
+    if not content and not invocations:
+        response_info.setdefault("empty", True)
+    return ProviderTurn(content, assistant_message, invocations, usage, response_info)
