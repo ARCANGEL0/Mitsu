@@ -429,3 +429,77 @@ def _request_openai_stream(
     if not content and not invocations:
         response_info.setdefault("empty", True)
     return ProviderTurn(content, assistant_message, invocations, usage, response_info)
+
+
+def _request_anthropic_turn(
+    base_url: str,
+    model: str,
+    api_key: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    on_event: StreamCallback | None = None,
+    cancellation: RequestCancellation | None = None,
+) -> ProviderTurn:
+    endpoint = f"{base_url}/messages" if base_url.endswith("/v1") else f"{base_url}/v1/messages"
+    headers = {"Content-Type": "application/json", "anthropic-version": "2023-06-01"}
+    if api_key:
+        headers["x-api-key"] = api_key
+    system_messages = [str(message["content"]) for message in messages if message.get("role") == "system"]
+    conversation = [message for message in messages if message.get("role") != "system"]
+    payload: dict[str, Any] = {
+        "model": model,
+        "max_tokens": 8192,
+        "messages": conversation,
+        "tools": [
+            {
+                "name": tool["name"],
+                "description": tool["description"],
+                "input_schema": tool["parameters"],
+            }
+            for tool in tools
+        ],
+    }
+    if system_messages:
+        payload["system"] = "\n\n".join(system_messages)
+    if on_event is not None:
+        streamed = _request_anthropic_stream(endpoint, headers, payload, on_event, cancellation)
+        if streamed is not None:
+            return streamed
+    if cancellation is not None and cancellation.cancelled():
+        return ProviderTurn("", {"role": "assistant", "content": []}, [])
+    response = _request_json(endpoint, headers, payload, cancellation)
+    return _anthropic_turn_from_response(response, on_event)
+
+
+def _anthropic_turn_from_response(
+    response: dict[str, Any], on_event: StreamCallback | None = None
+) -> ProviderTurn:
+    raw_content = response.get("content")
+    if not isinstance(raw_content, list):
+        raise ProviderRequestError("The provider returned a response Mitsu could not read.")
+    calls = []
+    normalized_content = []
+    for block in raw_content:
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            normalized_content.append(block)
+            continue
+        name = block.get("name")
+        if not isinstance(name, str) or not name:
+            raise ProviderRequestError("The provider returned a malformed tool call.")
+        call_id = str(block.get("id") or f"toolu_{uuid.uuid4().hex}")
+        calls.append(ToolInvocation(call_id, name, block.get("input", {})))
+        normalized_content.append({**block, "id": call_id})
+    text = "\n".join(
+        str(block.get("text", ""))
+        for block in normalized_content
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
+    if text and on_event is not None:
+        on_event("delta", {"text": text})
+    usage = response.get("usage")
+    return ProviderTurn(
+        text,
+        {"role": "assistant", "content": normalized_content},
+        calls,
+        usage if isinstance(usage, dict) else {},
+    )
