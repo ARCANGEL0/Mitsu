@@ -503,3 +503,130 @@ def _anthropic_turn_from_response(
         calls,
         usage if isinstance(usage, dict) else {},
     )
+
+
+def _request_anthropic_stream(
+    endpoint: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    on_event: StreamCallback,
+    cancellation: RequestCancellation | None,
+) -> ProviderTurn | None:
+    request = Request(
+        endpoint,
+        data=json.dumps({**payload, "stream": True}).encode("utf-8"),
+        headers={**headers, "Accept": "text/event-stream"},
+        method="POST",
+    )
+    try:
+        response = urlopen(request, timeout=120)
+    except HTTPError as error:
+        failure = _stream_http_failure(error)
+        if failure is None:
+            return None
+        raise failure from error
+    except (URLError, TimeoutError, OSError) as error:
+        if cancellation is not None and cancellation.cancelled():
+            return ProviderTurn("", {"role": "assistant", "content": []}, [])
+        raise ProviderRequestError(f"Could not reach the provider: {error}") from error
+
+    if cancellation is not None:
+        cancellation.attach(response)
+    content_type = response.headers.get_content_type()
+    if content_type in {"application/json", "application/problem+json"} or content_type.endswith("+json"):
+        try:
+            decoded = json.loads(response.read().decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            if cancellation is not None:
+                cancellation.detach(response)
+            response.close()
+            raise ProviderRequestError("The provider returned an unreadable streamed response.") from error
+        finally:
+            if cancellation is not None:
+                cancellation.detach(response)
+            response.close()
+        if not isinstance(decoded, dict):
+            raise ProviderRequestError("The provider returned an unexpected response.")
+        return _anthropic_turn_from_response(decoded, on_event)
+    blocks: dict[int, dict[str, Any]] = {}
+    usage: dict[str, Any] = {}
+    try:
+        for raw_line in response:
+            if cancellation is not None and cancellation.cancelled():
+                break
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line or line.startswith(":") or not line.startswith("data:"):
+                continue
+            try:
+                event = json.loads(line[5:].strip())
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            event_type = event.get("type")
+            if event_type == "message_start":
+                message = event.get("message")
+                if isinstance(message, dict) and isinstance(message.get("usage"), dict):
+                    usage.update(message["usage"])
+            elif event_type == "content_block_start":
+                index = int(event.get("index", 0))
+                block = event.get("content_block")
+                if isinstance(block, dict):
+                    blocks[index] = dict(block)
+                    if block.get("type") == "text":
+                        blocks[index]["text"] = str(block.get("text", ""))
+                    elif block.get("type") == "tool_use":
+                        blocks[index]["input_json"] = ""
+            elif event_type == "content_block_delta":
+                index = int(event.get("index", 0))
+                delta = event.get("delta")
+                if not isinstance(delta, dict):
+                    continue
+                block = blocks.setdefault(index, {"type": "text", "text": ""})
+                if delta.get("type") == "text_delta" and isinstance(delta.get("text"), str):
+                    content = delta["text"]
+                    block["text"] = str(block.get("text", "")) + content
+                    on_event("delta", {"text": content})
+                elif delta.get("type") == "input_json_delta" and isinstance(delta.get("partial_json"), str):
+                    block["input_json"] = str(block.get("input_json", "")) + delta["partial_json"]
+            elif event_type == "message_delta":
+                delta_usage = event.get("usage")
+                if isinstance(delta_usage, dict):
+                    usage.update(delta_usage)
+        if cancellation is not None and cancellation.cancelled():
+            return ProviderTurn("", {"role": "assistant", "content": []}, [], usage)
+    except (OSError, TimeoutError, ValueError) as error:
+        if cancellation is not None and cancellation.cancelled():
+            return ProviderTurn("", {"role": "assistant", "content": []}, [], usage)
+        raise ProviderRequestError(f"Provider stream ended unexpectedly: {error}") from error
+    finally:
+        if cancellation is not None:
+            cancellation.detach(response)
+        response.close()
+
+    normalized_content: list[dict[str, Any]] = []
+    calls: list[ToolInvocation] = []
+    text_parts: list[str] = []
+    for _index, block in sorted(blocks.items()):
+        if block.get("type") == "tool_use":
+            raw_json = str(block.pop("input_json", ""))
+            if raw_json:
+                try:
+                    block["input"] = json.loads(raw_json)
+                except json.JSONDecodeError as error:
+                    raise ProviderRequestError("The provider returned malformed streamed tool arguments.") from error
+            block.setdefault("input", {})
+            if not isinstance(block.get("input"), dict):
+                raise ProviderRequestError("The provider returned malformed streamed tool arguments.")
+            call_id = str(block.get("id") or f"toolu_{uuid.uuid4().hex}")
+            block["id"] = call_id
+            calls.append(ToolInvocation(call_id, str(block.get("name", "")), block["input"]))
+        elif block.get("type") == "text":
+            text_parts.append(str(block.get("text", "")))
+        normalized_content.append(block)
+    return ProviderTurn(
+        "\n".join(text_parts),
+        {"role": "assistant", "content": normalized_content},
+        calls,
+        usage,
+    )
