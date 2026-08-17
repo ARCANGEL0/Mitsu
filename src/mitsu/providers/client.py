@@ -630,3 +630,72 @@ def _request_anthropic_stream(
         calls,
         usage,
     )
+
+
+def send_chat(profile: dict[str, Any], messages: list[dict[str, str]]) -> str:
+    protocol = profile.get("protocol", "openai")
+    base_url = str(profile.get("base_url", "")).rstrip("/")
+    model = str(profile.get("model", ""))
+    api_key = str(profile.get("api_key", ""))
+    if not base_url or not model:
+        raise ProviderRequestError("Provider setup is incomplete. Reopen provider setup from the main menu.")
+    try:
+        if protocol == "anthropic":
+            return _send_anthropic(base_url, model, api_key, messages)
+        return _send_openai_compatible(
+            base_url,
+            model,
+            api_key,
+            messages,
+            str(profile.get("reasoning_parameter", "")) if profile.get("reasoning_enabled") else "",
+            str(profile.get("reasoning_effort", "medium")),
+        )
+    except ProviderRequestError as error:
+        message = str(error)
+        if api_key:
+            message = message.replace(api_key, "[hidden]")
+        raise ProviderRequestError(message) from error
+
+
+def test_connection(profile: dict[str, Any]) -> str:
+    protocol = profile.get("protocol", "openai")
+    base_url = str(profile.get("base_url", "")).rstrip("/")
+    api_key = str(profile.get("api_key", ""))
+    if not base_url:
+        raise ProviderRequestError("Enter a provider base URL first.")
+    if protocol == "anthropic":
+        endpoint = f"{base_url}/models?limit=1" if base_url.endswith("/v1") else f"{base_url}/v1/models?limit=1"
+        headers = {"anthropic-version": "2023-06-01"}
+        if api_key:
+            headers["x-api-key"] = api_key
+    else:
+        endpoint = f"{base_url}/models"
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+    request = Request(endpoint, headers=headers, method="GET")
+    try:
+        with urlopen(request, timeout=15) as response:
+            status = response.status
+    except HTTPError as error:
+        detail = error.read(1024).decode("utf-8", errors="replace")
+        message = f"Provider returned HTTP {error.code}."
+        if detail:
+            try:
+                body = json.loads(detail)
+                detail_message = _response_error_detail(body)
+            except json.JSONDecodeError:
+                detail_message = None
+            if detail_message:
+                message = f"Provider returned HTTP {error.code}: {detail_message}"
+        if api_key:
+            message = message.replace(api_key, "[hidden]")
+        raise ProviderRequestError(message) from error
+    except (URLError, TimeoutError, OSError) as error:
+        message = f"Could not reach the provider: {error}"
+        if api_key:
+            message = message.replace(api_key, "[hidden]")
+        raise ProviderRequestError(message) from error
+    if status < 200 or status >= 300:
+        raise ProviderRequestError(f"Provider returned HTTP {status}.")
+    return "Connection succeeded. Check that the model ID is available on your account."
