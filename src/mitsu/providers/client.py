@@ -699,3 +699,190 @@ def test_connection(profile: dict[str, Any]) -> str:
     if status < 200 or status >= 300:
         raise ProviderRequestError(f"Provider returned HTTP {status}.")
     return "Connection succeeded. Check that the model ID is available on your account."
+
+
+def list_models(profile: dict[str, Any]) -> list[str]:
+    protocol = str(profile.get("protocol", "openai"))
+    base_url = str(profile.get("base_url", "")).rstrip("/")
+    api_key = str(profile.get("api_key", ""))
+    provider_id = str(profile.get("provider_id", ""))
+    if not base_url:
+        raise ProviderRequestError("Enter a provider base URL first.")
+    if provider_id == "cloudflare":
+        parsed = urlsplit(base_url)
+        if not parsed.path.endswith("/ai/v1"):
+            raise ProviderRequestError("Cloudflare base URL must end in /ai/v1.")
+        endpoint = urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path[:-6] + "/ai/models/search", "", "")
+        )
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        cursor_parameter = "page"
+    elif protocol == "anthropic":
+        endpoint = f"{base_url}/models" if base_url.endswith("/v1") else f"{base_url}/v1/models"
+        headers = {"anthropic-version": "2023-06-01"}
+        if api_key:
+            headers["x-api-key"] = api_key
+        cursor_parameter = "after_id"
+    else:
+        endpoint = f"{base_url}/models"
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        cursor_parameter = "after"
+
+    model_ids: set[str] = set()
+    cursor: str | None = None
+    visited_cursors: set[str] = set()
+    for _ in range(20):
+        query: dict[str, str] = {}
+        if provider_id == "cloudflare":
+            query["per_page"] = "100"
+            query["hide_experimental"] = "true"
+            query["format"] = "openrouter"
+            query[cursor_parameter] = cursor or "1"
+        elif protocol == "anthropic":
+            query["limit"] = "1000"
+        if cursor and provider_id != "cloudflare":
+            query[cursor_parameter] = cursor
+        url = f"{endpoint}?{urlencode(query)}" if query else endpoint
+        request = Request(url, headers=headers, method="GET")
+        try:
+            with urlopen(request, timeout=20) as response:
+                decoded = json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            detail = error.read(2048).decode("utf-8", errors="replace")
+            message = f"Provider returned HTTP {error.code}."
+            try:
+                body = json.loads(detail)
+                detail_message = _response_error_detail(body)
+            except json.JSONDecodeError:
+                detail_message = None
+            if detail_message:
+                message = f"Provider returned HTTP {error.code}: {detail_message}"
+            raise ProviderRequestError(_hide_secret(message, api_key)) from error
+        except (URLError, TimeoutError, OSError) as error:
+            raise ProviderRequestError(_hide_secret(f"Could not reach the provider: {error}", api_key)) from error
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise ProviderRequestError("The provider returned invalid JSON while listing models.") from error
+
+        if not isinstance(decoded, dict):
+            raise ProviderRequestError("The provider returned an unexpected model list.")
+        if provider_id == "cloudflare" and decoded.get("success") is False:
+            message = _response_error_detail(decoded) or "Cloudflare could not list available models."
+            raise ProviderRequestError(_hide_secret(message, api_key))
+        if provider_id == "cloudflare":
+            result = decoded.get("result", [])
+            items = result.get("data", result.get("models", [])) if isinstance(result, dict) else result
+        else:
+            items = decoded.get("data", decoded.get("models", []))
+        if not isinstance(items, list):
+            raise ProviderRequestError("The provider returned an unexpected model list.")
+        page_ids: list[str] = []
+        for item in items:
+            if isinstance(item, str):
+                model_id = item
+            elif isinstance(item, dict):
+                model_id = item.get("id") or item.get("name") or item.get("model")
+            else:
+                model_id = None
+            if isinstance(model_id, str) and model_id.strip():
+                page_ids.append(model_id.strip())
+        model_ids.update(page_ids)
+
+        if provider_id == "cloudflare":
+            result_info = decoded.get("result_info", {})
+            total_pages = result_info.get("total_pages", 1) if isinstance(result_info, dict) else 1
+            current_page = int(cursor or "1")
+            try:
+                has_more = current_page < int(total_pages or 1)
+            except (TypeError, ValueError):
+                has_more = False
+            if not has_more or not page_ids:
+                break
+            cursor = str(current_page + 1)
+        elif not decoded.get("has_more") or not page_ids:
+            break
+        else:
+            cursor = str(decoded.get("last_id") or page_ids[-1])
+            if cursor in visited_cursors:
+                break
+            visited_cursors.add(cursor)
+
+    if not model_ids:
+        raise ProviderRequestError("The provider returned no selectable models.")
+    return sorted(model_ids, key=str.casefold)
+
+
+def check_reasoning_support(profile: dict[str, Any]) -> str | None:
+    protocol = str(profile.get("protocol", "openai"))
+    provider_id = str(profile.get("provider_id", ""))
+    if protocol == "anthropic" or provider_id == "cloudflare":
+        return None
+    base_url = str(profile.get("base_url", "")).rstrip("/")
+    model = str(profile.get("model", ""))
+    api_key = str(profile.get("api_key", ""))
+    if not base_url or not model:
+        raise ProviderRequestError("Provider setup is incomplete. Choose a provider and model first.")
+    if protocol == "anthropic":
+        endpoint = f"{base_url}/models" if base_url.endswith("/v1") else f"{base_url}/v1/models"
+        headers = {"anthropic-version": "2023-06-01"}
+        if api_key:
+            headers["x-api-key"] = api_key
+    else:
+        endpoint = f"{base_url}/models"
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+    request = Request(endpoint, headers=headers, method="GET")
+    try:
+        with urlopen(request, timeout=15) as response:
+            decoded = json.loads(response.read(2_000_000).decode("utf-8"))
+    except HTTPError as error:
+        detail = error.read(1024).decode("utf-8", errors="replace")
+        try:
+            body = json.loads(detail)
+            message = _response_error_detail(body) or f"Provider returned HTTP {error.code}."
+        except json.JSONDecodeError:
+            message = f"Provider returned HTTP {error.code}."
+        raise ProviderRequestError(_hide_secret(message, api_key)) from error
+    except (URLError, TimeoutError, OSError) as error:
+        raise ProviderRequestError(_hide_secret(f"Could not reach the provider: {error}", api_key)) from error
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise ProviderRequestError("The provider returned invalid model metadata.") from error
+    if not isinstance(decoded, dict):
+        return None
+    items = decoded.get("data", decoded.get("models", []))
+    if not isinstance(items, list):
+        return None
+    metadata = next(
+        (
+            item for item in items
+            if isinstance(item, dict)
+            and str(item.get("id") or item.get("name") or item.get("model") or "") == model
+        ),
+        None,
+    )
+    if metadata is None:
+        return None
+    parameters = metadata.get("supported_parameters")
+    if isinstance(parameters, list):
+        normalized = {str(parameter).casefold() for parameter in parameters}
+        if "reasoning_effort" in normalized:
+            return "reasoning_effort"
+        if "reasoning" in normalized:
+            return "reasoning"
+        return "unsupported"
+    capabilities = metadata.get("capabilities")
+    if isinstance(capabilities, dict) and isinstance(capabilities.get("reasoning"), bool):
+        if not capabilities["reasoning"]:
+            return "unsupported"
+        parameter = metadata.get("reasoning_parameter")
+        return str(parameter) if parameter in {"reasoning", "reasoning_effort"} else None
+    if metadata.get("supports_reasoning") is False:
+        return "unsupported"
+    if metadata.get("supports_reasoning") is True:
+        parameter = metadata.get("reasoning_parameter")
+        return str(parameter) if parameter in {"reasoning", "reasoning_effort"} else None
+    return None
