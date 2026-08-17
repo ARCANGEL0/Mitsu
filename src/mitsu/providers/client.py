@@ -886,3 +886,136 @@ def check_reasoning_support(profile: dict[str, Any]) -> str | None:
         parameter = metadata.get("reasoning_parameter")
         return str(parameter) if parameter in {"reasoning", "reasoning_effort"} else None
     return None
+
+
+def _hide_secret(message: str, secret: str) -> str:
+    return message.replace(secret, "[hidden]") if secret else message
+
+
+def _response_error_detail(body: Any) -> str | None:
+    if not isinstance(body, dict):
+        return None
+    error = body.get("error")
+    if isinstance(error, dict):
+        message = error.get("message")
+        if isinstance(message, str) and message:
+            return message
+    elif isinstance(error, str) and error:
+        return error
+    errors = body.get("errors")
+    if isinstance(errors, list):
+        messages = [
+            str(item.get("message")) if isinstance(item, dict) and item.get("message") else str(item)
+            for item in errors
+            if item
+        ]
+        if messages:
+            return "; ".join(messages)
+    message = body.get("message")
+    return message if isinstance(message, str) and message else None
+
+
+def _send_openai_compatible(
+    base_url: str,
+    model: str,
+    api_key: str,
+    messages: list[dict[str, str]],
+    reasoning_parameter: str = "",
+    reasoning_effort: str = "medium",
+) -> str:
+    endpoint = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    payload = {"model": model, "messages": messages, "stream": False}
+    if reasoning_parameter == "reasoning_effort":
+        payload["reasoning_effort"] = reasoning_effort
+    elif reasoning_parameter == "reasoning":
+        payload["reasoning"] = {"effort": reasoning_effort}
+    response = _request_json(endpoint, headers, payload)
+    try:
+        return str(response["choices"][0]["message"]["content"])
+    except (KeyError, IndexError, TypeError) as error:
+        raise ProviderRequestError("The provider returned a response Mitsu could not read.") from error
+
+
+def _send_anthropic(
+    base_url: str,
+    model: str,
+    api_key: str,
+    messages: list[dict[str, str]],
+) -> str:
+    endpoint = f"{base_url}/messages" if base_url.endswith("/v1") else f"{base_url}/v1/messages"
+    headers = {"Content-Type": "application/json", "anthropic-version": "2023-06-01"}
+    if api_key:
+        headers["x-api-key"] = api_key
+    system_messages = [message["content"] for message in messages if message["role"] == "system"]
+    conversation = [message for message in messages if message["role"] != "system"]
+    payload = {"model": model, "max_tokens": 2048, "messages": conversation}
+    if system_messages:
+        payload["system"] = "\n\n".join(system_messages)
+    response = _request_json(endpoint, headers, payload)
+    try:
+        return "\n".join(
+            str(block["text"])
+            for block in response["content"]
+            if block.get("type") == "text"
+        )
+    except (KeyError, TypeError) as error:
+        raise ProviderRequestError("The provider returned a response Mitsu could not read.") from error
+
+
+def _provider_http_error(error: HTTPError) -> ProviderRequestError:
+    message = _http_error_message(error)
+    return ProviderRequestError(f"Provider request failed ({error.code}): {message}")
+
+
+def _http_error_message(error: HTTPError) -> str:
+    detail = error.read(2048).decode("utf-8", errors="replace")
+    try:
+        body = json.loads(detail)
+        message = _response_error_detail(body) or detail
+    except json.JSONDecodeError:
+        message = detail or error.reason
+    return message
+
+
+def _stream_http_failure(error: HTTPError) -> ProviderRequestError | None:
+    message = _http_error_message(error)
+    normalized = message.casefold()
+    if error.code in {400, 422, 501} and ("stream" in normalized or "unsupported" in normalized):
+        return None
+    return ProviderRequestError(f"Provider request failed ({error.code}): {message}")
+
+
+def _request_json(
+    endpoint: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    cancellation: RequestCancellation | None = None,
+) -> dict[str, Any]:
+    request = Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        response = urlopen(request, timeout=120)
+        if cancellation is not None:
+            cancellation.attach(response)
+        try:
+            decoded = json.loads(response.read().decode("utf-8"))
+        finally:
+            if cancellation is not None:
+                cancellation.detach(response)
+            response.close()
+    except HTTPError as error:
+        raise _provider_http_error(error) from error
+    except (URLError, TimeoutError, OSError) as error:
+        raise ProviderRequestError(f"Could not reach the provider: {error}") from error
+    except json.JSONDecodeError as error:
+        raise ProviderRequestError("The provider returned invalid JSON.") from error
+    if not isinstance(decoded, dict):
+        raise ProviderRequestError("The provider returned an unexpected response.")
+    return decoded
