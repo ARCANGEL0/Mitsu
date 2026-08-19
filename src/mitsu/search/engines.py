@@ -356,3 +356,126 @@ def _html_results(engine_id: str, query: str, count: int) -> list[dict[str, str]
             return parser.items[:count]
         failures.append("no recognizable links")
     raise ValueError(", ".join(dict.fromkeys(failures)) or "no recognizable results")
+
+
+def validate_search_engine(engine_id: str, settings: dict[str, Any]) -> tuple[bool, str]:
+    spec = SEARCH_ENGINE_BY_ID.get(engine_id)
+    if spec is None:
+        return False, "Unknown search engine."
+    try:
+        for field in spec.fields:
+            if not str(settings.get(field, "")).strip():
+                label = "Search Engine ID" if field == "search_engine_id" else field.replace("_", " ").title()
+                raise ValueError(f"{label} is required.")
+        if spec.kind == "searxng":
+            _validate_base_url(str(settings.get("base_url", "")))
+        if spec.kind == "html":
+            return True, f"Ready to search {spec.name} directly; the provider will be contacted on the next query."
+        else:
+            results = _api_results(engine_id, "Python programming language", settings, 2)
+        if not results:
+            return False, "The service responded, but returned no recognizable search results."
+        return True, f"Connected · found {len(results)} test result(s)."
+    except HTTPError as error:
+        return False, f"HTTP {error.code} · {error.reason}"
+    except (URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as error:
+        return False, str(error) or type(error).__name__
+
+
+def _search_one(engine_id: str, settings: dict[str, Any], query: str, count: int) -> tuple[str, list[dict[str, str]], str | None]:
+    spec = SEARCH_ENGINE_BY_ID[engine_id]
+    try:
+        if engine_id == "searxng" and settings.get("managed_local"):
+            from mitsu.services.searxng import ensure_local_searxng_running
+
+            ensure_local_searxng_running(settings)
+        if spec.kind == "html":
+            results = _html_results(engine_id, query, count)
+        else:
+            results = _api_results(engine_id, query, settings, count)
+        if not results:
+            return spec.name, [], "no recognizable results"
+        return spec.name, results, None
+    except HTTPError as error:
+        return spec.name, [], f"HTTP {error.code}"
+    except (URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as error:
+        message = str(error) or type(error).__name__
+        return spec.name, [], message[:240]
+    except RuntimeError as error:
+        return spec.name, [], str(error)[:240] or type(error).__name__
+    except Exception as error:
+        return spec.name, [], type(error).__name__
+
+
+def search_web(query: str, max_results: int, configured: dict[str, dict[str, Any]]) -> str:
+    count = max(1, min(int(max_results), 8))
+    engines = [
+        engine for engine in SEARCH_ENGINES
+        if configured.get(engine.id) and bool(configured[engine.id].get("enabled", True))
+    ]
+    if not engines:
+        return "No web search engines are enabled yet. Open /config to configure or enable one or more search engines."
+
+    with ThreadPoolExecutor(max_workers=len(engines)) as pool:
+        futures = [
+            pool.submit(_search_one, engine.id, configured[engine.id], query, count)
+            for engine in engines
+        ]
+        results_by_engine = [future.result() for future in futures]
+
+    merged_by_engine: list[list[dict[str, Any]]] = []
+    by_url: dict[str, dict[str, Any]] = {}
+    for engine_name, results, _failure in results_by_engine:
+        engine_results: list[dict[str, Any]] = []
+        for item in results:
+            parsed = urlsplit(item["url"])
+            canonical = f"{(parsed.hostname or '').lower()}{parsed.path.rstrip('/')}"
+            existing = by_url.get(canonical)
+            if existing:
+                if engine_name not in existing["sources"]:
+                    existing["sources"].append(engine_name)
+                if not existing["snippet"] and item["snippet"]:
+                    existing["snippet"] = item["snippet"]
+                engine_results.append(existing)
+                continue
+            record: dict[str, Any] = {
+                "title": item["title"],
+                "url": item["url"],
+                "snippet": item["snippet"],
+                "sources": [engine_name],
+            }
+            by_url[canonical] = record
+            engine_results.append(record)
+        merged_by_engine.append(engine_results)
+
+    merged: list[dict[str, Any]] = []
+    included: set[int] = set()
+    for rank in range(max((len(items) for items in merged_by_engine), default=0)):
+        for items in merged_by_engine:
+            if rank < len(items) and id(items[rank]) not in included:
+                included.add(id(items[rank]))
+                merged.append(items[rank])
+
+    failures = [f"{name}: {error}" for name, results, error in results_by_engine if not results]
+    successes = [name for name, results, _error in results_by_engine if results]
+    if not merged:
+        return (
+            "No configured search engine returned recognizable results. This is a provider or parser "
+            "failure, not evidence that the topic has no results. Attempts: " + "; ".join(failures)
+        )
+
+    formatted_items = []
+    for index, item in enumerate(merged[:count], 1):
+        snippet = re.sub(r"\s+", " ", item["snippet"]).strip()[:600]
+        block = (
+            f"{index}. {item['title']}\n{item['url']}\n"
+            f"Sources: {', '.join(item['sources'])}"
+        )
+        if snippet:
+            block += f"\n{snippet}"
+        formatted_items.append(block)
+    formatted = "\n\n".join(formatted_items)
+    status = "Usable results from: " + ", ".join(successes)
+    if failures:
+        status += " · unavailable: " + "; ".join(failures)
+    return f"Configured search engines queried in parallel. {status}\n\n{formatted}"
