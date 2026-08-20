@@ -331,3 +331,343 @@ class SearchEnginePanel(Vertical):
             "↑ / ↓ choose    Enter select    Esc back"
         )
         actions.focus()
+
+    def _show_searxng_setup(self, *, preserve_port: bool = False) -> None:
+        self.stage = "searxng-setup"
+        existing = self.pending.get("searxng", {})
+        editor_title = self.query_one("#search-engine-editor-title", Static)
+        editor_title.remove_class("search-engine-warning")
+        self.query_one("#search-engine-title", Static).update("LOCAL SEARXNG SETUP")
+        editor_title.update("Local web search")
+        self.query_one("#search-engine-editor-detail", Static).update(
+            "Mitsu will start SearXNG on 127.0.0.1 and stop it when you exit."
+        )
+        for selector in (
+            "#search-engine-base-label", "#search-engine-base-url", "#search-engine-key-label",
+            "#search-engine-api-key", "#docker-password-card", "#search-engine-cx-label", "#search-engine-cx",
+        ):
+            self.query_one(selector).display = False
+        self.query_one("#search-engine-port-label", Static).display = True
+        port = self.query_one("#search-engine-port", Input)
+        port.display = True
+        if not preserve_port:
+            port.value = str(existing.get("port", 8888))
+        self.action_ids = ["setup_local", "back"]
+        actions = self.query_one("#search-engine-actions", OptionList)
+        actions.clear_options()
+        actions.add_options(["Set up and start SearXNG", "Back"])
+        actions.highlighted = 0
+        self.query_one("#search-engine-status", Static).update("")
+        self.query_one("#search-engine-hint", Static).update(
+            "Enter setup    Tab to port    Esc back"
+        )
+        port.focus()
+
+    def _edit(self, engine_id: str) -> None:
+        self.current_engine_id = engine_id
+        self.stage = "edit"
+        self.message = ""
+        spec = SEARCH_ENGINE_BY_ID[engine_id]
+        existing = self.pending.get(engine_id, {})
+        self.query_one("#search-engine-title", Static).update("CONFIGURE SEARCH ENGINE")
+        self.query_one("#search-engine-detail", Static).update("")
+        self.query_one("#search-engine-list", OptionList).display = False
+        self.query_one("#search-engine-editor", Vertical).display = True
+        self.query_one("#search-engine-editor-title", Static).update(spec.name)
+        editor_detail = (
+            spec.description + "\nMitsu will query this provider's own search site directly; it may rate-limit automated traffic."
+            if spec.kind == "html"
+            else spec.description + "\nEnter the required settings, then validate the connection."
+        )
+        self.query_one("#search-engine-editor-detail", Static).update(editor_detail)
+
+        fields = set(spec.fields)
+        self.query_one("#search-engine-port-label", Static).display = False
+        self.query_one("#search-engine-port", Input).display = False
+        self.query_one("#docker-password-card", Vertical).display = False
+        sudo_password = self.query_one("#search-engine-sudo-password", Input)
+        sudo_password.value = ""
+        base = self.query_one("#search-engine-base-url", Input)
+        key = self.query_one("#search-engine-api-key", Input)
+        cx = self.query_one("#search-engine-cx", Input)
+        self.query_one("#search-engine-base-label", Static).display = "base_url" in fields
+        base.display = "base_url" in fields
+        base.value = str(existing.get("base_url", "")) if "base_url" in fields else ""
+        key_label = self.query_one("#search-engine-key-label", Static)
+        key_label.update("API key")
+        key_label.display = "api_key" in fields
+        key.display = "api_key" in fields
+        key.value = ""
+        key.placeholder = "Saved key retained · enter to replace" if existing.get("api_key") else "Paste API key"
+        self.query_one("#search-engine-cx-label", Static).display = "search_engine_id" in fields
+        cx.display = "search_engine_id" in fields
+        cx.value = str(existing.get("search_engine_id", "")) if "search_engine_id" in fields else ""
+
+        actions = (
+            [("Enable for live search", "enable_live")]
+            if spec.kind == "html"
+            else [("Validate & save", "validate")]
+        )
+        if existing:
+            actions.append(("Remove configuration", "remove"))
+        actions.append(("Back to engines", "back"))
+        self.action_ids = [action for _, action in actions]
+        action_list = self.query_one("#search-engine-actions", OptionList)
+        action_list.clear_options()
+        action_list.add_options([label for label, _action in actions])
+        action_list.highlighted = 0
+        self.query_one("#search-engine-status", Static).update("")
+        self.query_one("#search-engine-hint", Static).update(
+            "Enter enables this source    Esc returns to the list"
+            if spec.kind == "html"
+            else "Enter validates and saves this engine    Esc returns to the list"
+        )
+        first_input = base if "base_url" in fields else key if "api_key" in fields else action_list
+        first_input.focus()
+
+    async def _validate_and_save(self) -> None:
+        if not self.current_engine_id:
+            return
+        engine_id = self.current_engine_id
+        spec = SEARCH_ENGINE_BY_ID[engine_id]
+        settings = dict(self.pending.get(engine_id, {}))
+        if "base_url" in spec.fields:
+            settings["base_url"] = self.query_one("#search-engine-base-url", Input).value.strip()
+            settings.pop("managed_local", None)
+            settings.pop("port", None)
+            settings.pop("container_name", None)
+            settings.pop("container_runtime", None)
+        if "api_key" in spec.fields:
+            entered_key = self.query_one("#search-engine-api-key", Input).value.strip()
+            if entered_key:
+                settings["api_key"] = entered_key
+        if "search_engine_id" in spec.fields:
+            settings["search_engine_id"] = self.query_one("#search-engine-cx", Input).value.strip()
+
+        self.checking = True
+        actions = self.query_one("#search-engine-actions", OptionList)
+        actions.disabled = True
+        status = self.query_one("#search-engine-status", Static)
+        status.update(f"Testing {spec.name}… one small search request (API providers may use quota).")
+        try:
+            valid, message = await asyncio.to_thread(validate_search_engine, engine_id, settings)
+        except Exception as error:
+            valid, message = False, type(error).__name__
+        finally:
+            self.checking = False
+            actions.disabled = False
+        if not valid:
+            status.update(f"Could not validate {spec.name}: {message}")
+            actions.focus()
+            return
+        self.pending[engine_id] = settings
+        self.pending[engine_id]["enabled"] = True
+        self.message = f"✓ {spec.name} configured and validated."
+        self._show_list()
+
+    async def _setup_local_searxng(self) -> None:
+        port = self.query_one("#search-engine-port", Input).value.strip()
+        actions = self.query_one("#search-engine-actions", OptionList)
+        actions.disabled = True
+        self.checking = True
+        status = self.query_one("#search-engine-status", Static)
+        messages: SimpleQueue[str] = SimpleQueue()
+        progress_lines: list[str] = []
+        setup_task = asyncio.create_task(
+            asyncio.to_thread(
+                setup_local_searxng,
+                port,
+                messages.put,
+            )
+        )
+        try:
+            while not setup_task.done():
+                while not messages.empty():
+                    progress_lines.append(messages.get())
+                    status.update("\n".join(progress_lines[-5:]))
+                await asyncio.sleep(0.15)
+            while not messages.empty():
+                progress_lines.append(messages.get())
+                status.update("\n".join(progress_lines[-5:]))
+            settings = await setup_task
+        except DockerNotInstalledError:
+            self.checking = False
+            actions.disabled = False
+            self._show_docker_install_prompt()
+            return
+        except (SearXNGSetupError, OSError, ValueError) as error:
+            self.checking = False
+            actions.disabled = False
+            status.update(f"Could not set up local SearXNG: {error}")
+            actions.focus()
+            return
+        except Exception as error:
+            self.checking = False
+            actions.disabled = False
+            status.update(f"SearXNG setup stopped: {type(error).__name__}: {error}")
+            actions.focus()
+            return
+        self.checking = False
+        actions.disabled = False
+        settings["enabled"] = True
+        self.pending["searxng"] = settings
+        saved = self.credentials.search_engines()
+        saved["searxng"] = settings
+        try:
+            self.credentials.save_search_engines(saved)
+        except OSError as error:
+            self.message = f"SearXNG is running, but I couldn't save its settings: {error}"
+            self._show_list()
+            return
+        self.message = f"✓ SearXNG is running on 127.0.0.1:{settings['port']} · local only."
+        self._show_list()
+
+    def _show_docker_install_prompt(self) -> None:
+        self.stage = "docker-install"
+        self.query_one("#search-engine-sudo-password", Input).value = ""
+        self.query_one("#search-engine-title", Static).update("DOCKER NOT FOUND")
+        editor_title = self.query_one("#search-engine-editor-title", Static)
+        editor_title.update("Uh-oh! Docker isn't installed here (｡•́︿•̀｡)")
+        editor_title.add_class("search-engine-warning")
+        self.query_one("#search-engine-editor-detail", Static).update(
+            "Want me to install it? I'll use your package manager.\n"
+            "Docker group access grants root privileges."
+        )
+        self.query_one("#search-engine-list", OptionList).display = False
+        self.query_one("#search-engine-editor", Vertical).display = True
+        for selector in (
+            "#search-engine-port-label", "#search-engine-port", "#search-engine-base-label",
+            "#search-engine-base-url", "#search-engine-key-label", "#search-engine-api-key",
+            "#docker-password-card",
+            "#search-engine-cx-label", "#search-engine-cx",
+        ):
+            self.query_one(selector).display = False
+        self.action_ids = ["install_docker", "skip_docker_install"]
+        actions = self.query_one("#search-engine-actions", OptionList)
+        actions.clear_options()
+        actions.add_options([
+            "Yes · install Docker",
+            "No · back to search engines",
+        ])
+        actions.highlighted = 0
+        self.query_one("#search-engine-status", Static).update("")
+        self.query_one("#search-engine-hint", Static).update(
+            "Y install    N / Esc back    ↑ / ↓ choose    Enter select"
+        )
+        actions.focus()
+
+    def _begin_docker_install(self) -> None:
+        if getattr(os, "geteuid", lambda: 1)() == 0:
+            asyncio.create_task(self._install_docker(""))
+        else:
+            self._show_docker_password()
+
+    def _show_docker_password(self) -> None:
+        self.stage = "docker-password"
+        editor_title = self.query_one("#search-engine-editor-title", Static)
+        editor_title.remove_class("search-engine-warning")
+        self.query_one("#search-engine-title", Static).update("INSTALL DOCKER")
+        editor_title.update("Sudo password")
+        self.query_one("#search-engine-editor-detail", Static).update(
+            "I'll need your sudo password to install it for you :( It won't be stored, I promise."
+        )
+        self.query_one("#search-engine-list", OptionList).display = False
+        self.query_one("#search-engine-editor", Vertical).display = True
+        for selector in (
+            "#search-engine-port-label", "#search-engine-port", "#search-engine-base-label",
+            "#search-engine-base-url", "#search-engine-key-label", "#search-engine-api-key",
+            "#search-engine-cx-label", "#search-engine-cx",
+        ):
+            self.query_one(selector).display = False
+        self.query_one("#docker-password-card", Vertical).display = True
+        password = self.query_one("#search-engine-sudo-password", Input)
+        password.value = ""
+        self.action_ids = ["install_docker", "back_to_docker_prompt"]
+        actions = self.query_one("#search-engine-actions", OptionList)
+        actions.clear_options()
+        actions.add_options(["Install Docker", "Back"])
+        actions.highlighted = 0
+        self.query_one("#search-engine-status", Static).update("")
+        self.query_one("#search-engine-hint", Static).update("Enter install    Tab / arrows for actions    Esc back")
+        password.focus()
+
+    async def _install_docker(self, password: str) -> None:
+        actions = self.query_one("#search-engine-actions", OptionList)
+        password_input = self.query_one("#search-engine-sudo-password", Input)
+        status = self.query_one("#search-engine-status", Static)
+        self.checking = True
+        actions.disabled = True
+        password_input.disabled = True
+        messages: SimpleQueue[str] = SimpleQueue()
+        progress_lines: list[str] = []
+        install_task = asyncio.create_task(
+            asyncio.to_thread(install_docker_engine, password, messages.put)
+        )
+        try:
+            while not install_task.done():
+                while not messages.empty():
+                    progress_lines.append(messages.get())
+                    status.update("\n".join(progress_lines[-5:]))
+                await asyncio.sleep(0.15)
+            while not messages.empty():
+                progress_lines.append(messages.get())
+            await install_task
+        except (DockerInstallError, OSError, ValueError) as error:
+            self.checking = False
+            actions.disabled = False
+            password_input.disabled = False
+            status.update(f"Docker install failed: {error}")
+            password_input.focus()
+            return
+        except Exception as error:
+            self.checking = False
+            actions.disabled = False
+            password_input.disabled = False
+            status.update(f"Docker install stopped: {error}")
+            password_input.focus()
+            return
+        self.checking = False
+        actions.disabled = False
+        password_input.disabled = False
+        self._show_searxng_setup(preserve_port=True)
+        status.update("Docker is installed. Starting SearXNG…")
+        await self._setup_local_searxng()
+
+    def _save_and_close(self) -> None:
+        if self.onboarding and not any(
+            isinstance(settings, dict) and bool(settings.get("enabled", True))
+            for settings in self.pending.values()
+        ):
+            self.message = "No search engine provided (｡•́︿•̀｡) Mitsu will be unable to use web_search tool calls!"
+            status = self.query_one("#search-engine-status", Static)
+            status.update(self.message)
+            status.add_class("search-engine-warning")
+            return
+        try:
+            self.credentials.save_search_engines(self.pending)
+        except OSError as error:
+            self.query_one("#search-engine-status", Static).update(f"Could not save search settings: {error}")
+            return
+        self._finish(True)
+
+    def _finish(self, saved: bool) -> None:
+        if self.on_finish is not None:
+            self.on_finish(saved)
+
+
+class SearchEngineDialog(ModalScreen[bool]):
+    """Modal host for search-engine configuration outside onboarding."""
+
+    def __init__(self, credentials: CredentialStore, onboarding: bool = False) -> None:
+        super().__init__()
+        self.credentials = credentials
+        self.onboarding = onboarding
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="search-engine-dialog"):
+            yield SearchEnginePanel(
+                self.credentials,
+                onboarding=self.onboarding,
+                on_finish=self.dismiss,
+                id="search-engine-panel",
+            )
