@@ -141,3 +141,95 @@ def _ensure_docker_group(
             environment,
             timeout=60,
         )
+
+
+def _start_docker_service(
+    manager: PackageManager,
+    password: str,
+    sudo: str | None,
+    is_root: bool,
+    environment: dict[str, str],
+    report: Progress,
+) -> None:
+    report("Starting the Docker service…")
+    if manager.executable == "apk":
+        commands = (["rc-update", "add", "docker", "default"], ["rc-service", "docker", "start"])
+    elif shutil.which("systemctl") and os.path.isdir("/run/systemd/system"):
+        commands = (["systemctl", "enable", "--now", "docker.service"],)
+    elif shutil.which("service"):
+        commands = (["service", "docker", "start"],)
+    else:
+        raise DockerInstallError("Docker was installed, but no supported service manager was found.")
+
+    for command in commands:
+        _run_as_admin(
+            list(command),
+            manager,
+            password,
+            sudo,
+            is_root,
+            environment,
+            timeout=120,
+        )
+
+
+def _run_as_admin(
+    command: list[str],
+    manager: PackageManager,
+    password: str,
+    sudo: str | None,
+    is_root: bool,
+    environment: dict[str, str],
+    *,
+    timeout: int,
+) -> None:
+    command_label = command[0]
+    if manager.executable == "apt-get":
+        command = ["env", "DEBIAN_FRONTEND=noninteractive", *command]
+
+    if is_root:
+        elevated_command = command
+        command_input = None
+    else:
+        if sudo is None:
+            raise DockerInstallError("sudo was not found. Install Docker with an administrator account.")
+        # sudo reads the password; the root shell redirects stdin before launching the package command.
+        elevated_command = [
+            sudo,
+            "-S",
+            "-p",
+            "",
+            "--",
+            "sh",
+            "-c",
+            'exec </dev/null; exec "$@"',
+            "mitsu-package-install",
+            *command,
+        ]
+        command_input = f"{password}\n"
+
+    try:
+        result = subprocess.run(
+            elevated_command,
+            input=command_input,
+            stdin=None if command_input is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=environment,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        raise DockerInstallError(f"{manager.name} could not run `{command_label}`.") from error
+    except subprocess.TimeoutExpired as error:
+        raise DockerInstallError(f"{manager.name} did not finish `{command_label}` in time.") from error
+    except OSError as error:
+        raise DockerInstallError(f"Could not run `{command_label}` with {manager.name}: {error}") from error
+
+    if result.returncode:
+        lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+        detail = " · ".join(lines[-3:]) or "No details were returned."
+        if len(detail) > 480:
+            detail = f"…{detail[-477:]}"
+        raise DockerInstallError(f"{manager.name} failed: {detail}")
