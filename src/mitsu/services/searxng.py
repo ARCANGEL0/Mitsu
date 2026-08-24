@@ -188,3 +188,124 @@ def _probe(base_url: str) -> bool:
         return isinstance(payload, dict) and isinstance(payload.get("results"), list)
     except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
         return False
+
+
+def setup_local_searxng(
+    port_value: str,
+    progress: Progress | None = None,
+) -> dict[str, str | int | bool]:
+    """Create and start a loopback-only SearXNG container after user approval in the UI."""
+
+    report = progress or (lambda _message: None)
+    try:
+        port = int(port_value)
+    except (TypeError, ValueError) as error:
+        raise SearXNGSetupError("Enter a valid TCP port number.") from error
+    if not 1024 <= port <= 65535:
+        raise SearXNGSetupError("Choose a port between 1024 and 65535.")
+
+    report("Checking for a ready Docker runtime…")
+    runtime = _runtime()
+    container_name = f"mitsu-searxng-{port}"
+    base_url = f"http://127.0.0.1:{port}"
+    state = _container_state(runtime, container_name)
+
+    should_stop_on_failure = state is False
+    if state is True:
+        report(f"Found the existing Mitsu SearXNG container on port {port}; checking its JSON search API…")
+    elif state is False:
+        report(f"Found the saved Mitsu container; starting it on port {port}…")
+        _run(runtime, ["start", container_name], timeout=45)
+    else:
+        if not _port_available(port):
+            raise SearXNGSetupError(f"Port {port} is already in use. Choose another port and try again.")
+        report("Preparing private SearXNG settings inside its container volume…")
+        settings_text = (
+            "use_default_settings: true\n"
+            "search:\n"
+            "  formats:\n"
+            "    - html\n"
+            "    - json\n"
+            "server:\n"
+            f"  secret_key: \"{secrets.token_urlsafe(32)}\"\n"
+            "  limiter: false\n"
+            "  image_proxy: false\n"
+        )
+
+        image = _ensure_image(runtime, report)
+
+        volume_name = "mitsu-searxng-config"
+        _write_container_settings(runtime, volume_name, settings_text, image)
+        report(f"Starting SearXNG at {base_url}; it will only listen on this computer…")
+        _run(
+            runtime,
+            [
+                "run", "--detach", "--name", container_name,
+                "--restart=no",
+                "--publish", f"127.0.0.1:{port}:8080",
+                "--volume", f"{volume_name}:/etc/searxng",
+                "--env", "FORCE_OWNERSHIP=true",
+                image,
+            ],
+            timeout=90,
+        )
+        should_stop_on_failure = True
+
+    report("Waiting for SearXNG to answer with JSON search results…")
+    deadline = time.monotonic() + 75
+    while time.monotonic() < deadline:
+        if _probe(base_url):
+            report(f"SearXNG is ready at {base_url} and its JSON search API is enabled.")
+            return {
+                "base_url": base_url,
+                "port": port,
+                "managed_local": True,
+                "container_name": container_name,
+                "container_runtime": runtime,
+            }
+        time.sleep(1.5)
+
+    if should_stop_on_failure:
+        try:
+            _run(runtime, ["stop", "--time", "3", container_name], timeout=15)
+        except SearXNGSetupError:
+            pass
+    raise SearXNGSetupError(
+        f"The container started, but {base_url} did not pass the JSON API check. "
+        f"Inspect it with `{runtime} logs {container_name}` and try setup again."
+    )
+
+
+def ensure_local_searxng_running(settings: dict[str, object]) -> None:
+    """Restart a previously configured local instance when its host has rebooted."""
+
+    if not settings.get("managed_local"):
+        return
+    runtime = str(settings.get("container_runtime", ""))
+    name = str(settings.get("container_name", ""))
+    if runtime != "docker" or not name:
+        raise SearXNGSetupError("The saved Docker SearXNG details are incomplete; open /config to repair it.")
+    if not shutil.which(runtime):
+        raise SearXNGSetupError(f"The saved {runtime} runtime is unavailable; install or start it to use SearXNG.")
+    state = _container_state(runtime, name)
+    if state is None:
+        raise SearXNGSetupError(f"The saved SearXNG container {name} was not found; open /config to set it up again.")
+    if not state:
+        _run(runtime, ["start", name], timeout=45)
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline:
+            if _probe(str(settings.get("base_url", ""))):
+                return
+            time.sleep(1.5)
+        raise SearXNGSetupError("The saved local SearXNG container started but did not become ready.")
+
+
+def stop_local_searxng(settings: dict[str, object]) -> None:
+    """Stop a managed local instance while keeping its image and config for later."""
+
+    runtime = str(settings.get("container_runtime", ""))
+    name = str(settings.get("container_name", ""))
+    if runtime != "docker" or not name or not shutil.which(runtime):
+        return
+    if _container_state(runtime, name):
+        _run(runtime, ["stop", "--time", "3", name], timeout=15)
