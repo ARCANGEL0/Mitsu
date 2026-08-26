@@ -173,3 +173,168 @@ class AgentToolHost:
         self.connection_messages: list[str] = []
         self._connected = False
         self._register_builtin_tools()
+
+    def _register_builtin_tools(self) -> None:
+        @self.server.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True))
+        async def bash(command: str, purpose: str = "") -> str:
+            "Run a shell command in the current workspace."
+            return await self._run_bash(command, purpose)
+
+        @self.server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
+        async def system_info() -> str:
+            "Return basic operating system and workspace information."
+            return json.dumps(
+                {
+                    "platform": platform.platform(),
+                    "python": sys.version.split()[0],
+                    "workspace": str(self.workspace),
+                    "hostname": socket.gethostname(),
+                },
+                ensure_ascii=False,
+            )
+
+        @self.server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
+        async def list_files(path: str = ".", limit: int = 100) -> str:
+            "List a directory under the current workspace or the operator's home directory."
+            directory = self._safe_list_path(path)
+            if not directory.is_dir():
+                raise ToolHostError(f"Not a directory: {path}")
+            entries = sorted(directory.iterdir(), key=lambda item: (not item.is_dir(), item.name.casefold()))
+            bounded = max(1, min(int(limit), 200))
+            lines = [f"{'[DIR] ' if item.is_dir() else '[FILE] '}{item.name}" for item in entries[:bounded]]
+            if len(entries) > bounded:
+                lines.append(f"… {len(entries) - bounded} more entries")
+            return "\n".join(lines) or "(empty directory)"
+
+        @self.server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
+        async def read_file(path: str, max_bytes: int = 100_000) -> str:
+            "Read a UTF-8 text file under the current workspace."
+            file_path = self._safe_path(path)
+            if not file_path.is_file():
+                raise ToolHostError(f"Not a file: {path}")
+            maximum = max(1, min(int(max_bytes), 200_000))
+            raw = file_path.read_bytes()[:maximum]
+            text = raw.decode("utf-8", errors="replace")
+            if file_path.stat().st_size > maximum:
+                text += f"\n… file truncated at {maximum} bytes"
+            return text
+
+        @self.server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
+        async def web_search(query: str, max_results: int = 5) -> str:
+            "Search all configured web engines concurrently. Return merged titles, URLs, snippets, and which engines found each link. If none are configured, tell the operator to use /config."
+            if not query.strip():
+                raise ToolHostError("Enter a search query.")
+            return await asyncio.to_thread(
+                perform_web_search, query.strip(), max_results, self.search_settings()
+            )
+
+        @self.server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
+        async def ask_user(question: str, choices: list[str] | None = None) -> str:
+            "Ask the operator a question and wait for their answer."
+            options = [str(choice) for choice in (choices or []) if str(choice).strip()][:8]
+            return await self.ask_user(question.strip(), options)
+
+        @self.server.tool(annotations=ToolAnnotations(read_only_hint=False, open_world_hint=False))
+        async def record_exploit(
+            title: str, target: str, evidence: str, status: str = "candidate"
+        ) -> str:
+            """Add an applicable exploit to this session's Intel.
+
+            Use only after observed target evidence matches the exploit's product/version or
+            after validation. Mark confirmed only when the test succeeded; local search hits
+            alone are not evidence and must never be recorded.
+            """
+            return await self._update_session_intel(
+                "record_exploit",
+                {"title": title, "target": target, "evidence": evidence, "status": status},
+            )
+
+        @self.server.tool(annotations=ToolAnnotations(read_only_hint=False, open_world_hint=False))
+        async def remove_exploit(title: str, target: str, reason: str) -> str:
+            """Remove a previously recorded exploit when evidence shows it does not apply or work."""
+            return await self._update_session_intel(
+                "remove_exploit", {"title": title, "target": target, "reason": reason}
+            )
+
+    async def connect(self, config_path: Path) -> None:
+        if self._connected:
+            return
+        await self._stack.__aenter__()
+        self._connected = True
+        local_client = Client(self.server)
+        await self._stack.enter_async_context(local_client)
+        await self._register_client("mitsu", local_client)
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        except (OSError, json.JSONDecodeError) as error:
+            self.connection_messages.append(f"MCP config could not be read: {error}")
+            return
+        servers = config.get("servers", []) if isinstance(config, dict) else []
+        if not isinstance(servers, list):
+            self.connection_messages.append("MCP config has no valid servers list.")
+            return
+        for definition in servers:
+            if not isinstance(definition, dict):
+                continue
+            name = str(definition.get("name", "")).strip()
+            if not name:
+                continue
+            try:
+                if isinstance(definition.get("url"), str):
+                    client = Client(definition["url"])
+                else:
+                    command = str(definition.get("command", "")).strip()
+                    args = definition.get("args", [])
+                    env = definition.get("env", {})
+                    if not command or not isinstance(args, list) or not isinstance(env, dict):
+                        raise ToolHostError("expected a command, string args, and string environment variables")
+                    if any(not isinstance(value, str) for value in args) or any(
+                        not isinstance(key, str) or not isinstance(value, str) for key, value in env.items()
+                    ):
+                        raise ToolHostError("args and environment values must be strings")
+                    client = Client(StdioServerParameters(command=command, args=args, env=env))
+                await asyncio.wait_for(self._stack.enter_async_context(client), timeout=15)
+                await asyncio.wait_for(self._register_client(name, client), timeout=15)
+            except Exception as error:
+                self.connection_messages.append(f"{name}: {type(error).__name__}: {error}")
+
+    async def _register_client(self, server_name: str, client: Client) -> None:
+        response = await client.list_tools()
+        server_slug = self._slug(server_name)
+        for tool in response.tools:
+            public_name = f"{server_slug}__{self._slug(tool.name)}"[:64]
+            suffix = 2
+            base_name = public_name
+            while public_name in self._tools:
+                ending = f"_{suffix}"
+                public_name = f"{base_name[:64 - len(ending)]}{ending}"
+                suffix += 1
+            annotations = getattr(tool, "annotations", None)
+            read_only = bool(
+                getattr(annotations, "read_only_hint", False)
+                or getattr(annotations, "readOnlyHint", False)
+            )
+            self._clients[public_name] = (client, tool.name, read_only)
+            self._tools[public_name] = {
+                "name": public_name,
+                "description": f"{server_name}: {tool.description or tool.name}",
+                "parameters": tool.input_schema or {"type": "object", "properties": {}},
+                "read_only": read_only,
+                "server": server_name,
+                "original_name": tool.name,
+            }
+
+    def provider_tools(self, mode: str) -> list[dict[str, Any]]:
+        tools = []
+        for name, definition in self._tools.items():
+            tools.append(
+                {
+                    "name": name,
+                    "description": definition["description"],
+                    "parameters": definition["parameters"],
+                    "read_only": definition["read_only"],
+                }
+            )
+        return tools
