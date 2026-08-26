@@ -338,3 +338,172 @@ class AgentToolHost:
                 }
             )
         return tools
+
+    def is_read_only(self, name: str) -> bool:
+        definition = self._tools.get(name)
+        return bool(definition and definition["read_only"])
+
+    def requires_guided_approval(self, name: str) -> bool:
+        definition = self._tools.get(name)
+        if (
+            definition is not None
+            and definition.get("server") == "mitsu"
+            and name.endswith(("__record_exploit", "__remove_exploit"))
+        ):
+            return False
+        return bool(
+            definition is None
+            or not definition["read_only"]
+            or definition.get("server") != "mitsu"
+        )
+
+    def recon_action_is_low_impact(self, name: str, arguments: Any) -> bool:
+        definition = self._tools.get(name)
+        if definition is None:
+            return False
+        if (
+            definition.get("server") == "mitsu"
+            and name.endswith(("__record_exploit", "__remove_exploit"))
+        ):
+            return True
+        if definition.get("server") != "mitsu":
+            description = f"{name} {definition.get('description', '')}".casefold()
+            active_terms = (
+                "scan", "nmap", "port", "probe", "exploit", "attack", "execute",
+                "shell", "command", "write", "delete", "modify", "create", "edit",
+                "update", "brute", "fuzz", "crawl", "enumerat", "inject", "upload",
+            )
+            passive_terms = ("search", "lookup", "whois", "dns", "read", "list", "fetch", "get")
+            return (
+                bool(definition["read_only"])
+                and any(term in description for term in passive_terms)
+                and not any(term in description for term in active_terms)
+            )
+        if definition["read_only"]:
+            return True
+        if not name.endswith("__bash") or not isinstance(arguments, dict):
+            return False
+        return _is_low_impact_recon_command(str(arguments.get("command", "")))
+
+    async def _update_session_intel(self, action: str, values: dict[str, Any]) -> str:
+        if self.update_intel is None:
+            return "Session Intel updates are unavailable."
+        return await self.update_intel(action, values)
+
+    async def call(self, name: str, arguments: Any) -> tuple[str, bool, bool]:
+        registration = self._tools.get(name)
+        client_info = self._clients.get(name)
+        if registration is None or client_info is None:
+            return f"Unknown tool: {name}", True, False
+        if not isinstance(arguments, dict):
+            return "Tool arguments must be a JSON object.", True, not registration["read_only"]
+        client, original_name, read_only = client_info
+        try:
+            result = await client.call_tool(original_name, arguments)
+        except Exception as error:
+            return f"{type(error).__name__}: {error}", True, not read_only
+        pieces = []
+        for block in result.content or []:
+            text = getattr(block, "text", None)
+            if isinstance(text, str):
+                pieces.append(text)
+            else:
+                block_type = getattr(block, "type", "result")
+                pieces.append(f"[{block_type} result omitted]")
+        if not pieces and result.structured_content is not None:
+            pieces.append(json.dumps(result.structured_content, ensure_ascii=False, default=str))
+        output = "\n".join(pieces) or "(tool completed with no output)"
+        if len(output) > MAX_TOOL_RESULT:
+            output = output[:MAX_TOOL_RESULT] + "\n… result truncated"
+        return output, bool(result.is_error), not read_only
+
+    async def close(self) -> None:
+        if self._connected:
+            self._connected = False
+            await self._stack.aclose()
+
+    async def _run_bash(self, command: str, purpose: str) -> str:
+        if not command.strip():
+            raise ToolHostError("Command cannot be empty.")
+        process = await asyncio.create_subprocess_exec(
+            "/bin/bash",
+            "-c",
+            command,
+            cwd=self.workspace,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+        )
+        output_task = asyncio.create_task(self._read_command_output(process.stdout))
+        try:
+            await asyncio.wait_for(process.wait(), timeout=60)
+        except TimeoutError:
+            self._kill_command(process)
+            await process.wait()
+            output, truncated = await output_task
+            text = output.decode("utf-8", errors="replace")
+            if truncated:
+                text += "\n… output truncated"
+            return f"Command timed out after 60 seconds.\n{text}"
+        except asyncio.CancelledError:
+            self._kill_command(process)
+            await process.wait()
+            await output_task
+            raise
+        try:
+            output, truncated = await asyncio.wait_for(output_task, timeout=2)
+        except TimeoutError:
+            self._kill_command(process)
+            await process.wait()
+            output, truncated = await output_task
+        text = output.decode("utf-8", errors="replace")
+        if truncated:
+            text += "\n… output truncated"
+        return f"exit_code={process.returncode}\npurpose={purpose or '(not specified)'}\n{text}"
+
+    @staticmethod
+    async def _read_command_output(stream: asyncio.StreamReader | None) -> tuple[bytes, bool]:
+        if stream is None:
+            return b"", False
+        chunks = []
+        stored = 0
+        truncated = False
+        while chunk := await stream.read(65_536):
+            remaining = MAX_TOOL_RESULT - stored
+            if remaining > 0:
+                chunks.append(chunk[:remaining])
+                stored += min(len(chunk), remaining)
+            if len(chunk) > remaining:
+                truncated = True
+        return b"".join(chunks), truncated
+
+    @staticmethod
+    def _kill_command(process: asyncio.subprocess.Process) -> None:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except ProcessLookupError:
+            pass
+
+    def _safe_path(self, value: str) -> Path:
+        candidate = (self.workspace / value).resolve()
+        try:
+            candidate.relative_to(self.workspace)
+        except ValueError as error:
+            raise ToolHostError("File access is limited to the current workspace.") from error
+        return candidate
+
+    def _safe_list_path(self, value: str) -> Path:
+        requested = Path(value).expanduser()
+        candidate = (requested if requested.is_absolute() else self.workspace / requested).resolve()
+        allowed_roots = (self.workspace, Path.home().resolve())
+        if not any(candidate == root or candidate.is_relative_to(root) for root in allowed_roots):
+            raise ToolHostError("Directory listing is limited to the current workspace or home directory.")
+        return candidate
+
+    @staticmethod
+    def _slug(value: str) -> str:
+        slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", value).strip("_")
+        return slug[:36] or "tool"
