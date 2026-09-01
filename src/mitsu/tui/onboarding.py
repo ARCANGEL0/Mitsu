@@ -180,3 +180,254 @@ class OnboardingScreen(Screen):
         self._show_step()
         self._apply_theme()
         self.query_one(MitsuCompanion).set_state("running_right")
+
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        if event.option_index is None:
+            return
+        if event.option_list.id == "provider-list" and self.stage == "provider":
+            self._change_provider(PROVIDERS[event.option_index].id)
+        elif event.option_list.id == "protocol-list":
+            self.protocol_id = "anthropic" if event.option_index == 1 else "openai"
+        elif event.option_list.id == "theme-list":
+            self._select_theme(event.option_index)
+        elif event.option_list.id == "companion-list":
+            self._select_companion(event.option_index)
+
+    async def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        list_id = event.option_list.id
+        if list_id == "provider-list":
+            self._select_provider(event.option_index)
+        elif list_id == "protocol-list":
+            self.protocol_id = "anthropic" if event.option_index == 1 else "openai"
+            self._go_to("api_key")
+        elif list_id == "model-list":
+            if self.loading_models:
+                return
+            await self._select_model(event.option_index)
+        elif list_id == "theme-list":
+            self._select_theme(event.option_index)
+            self._go_to("companion")
+        elif list_id == "companion-list":
+            self._select_companion(event.option_index)
+            await self._finish_setup()
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "custom-base-url" and self.stage == "custom_url":
+            base_url = event.value.strip().rstrip("/")
+            if not self._valid_base_url(base_url):
+                self._set_status("Enter a complete http:// or https:// base URL.")
+                return
+            self.base_url = base_url
+            self.query_one("#protocol-list", OptionList).focus()
+        elif event.input.id == "provider-api-key" and self.stage == "api_key":
+            await self._submit_api_key(event.value.strip())
+        elif event.input.id == "cloudflare-account-id" and self.stage == "cloudflare_account":
+            account_id = event.value.strip()
+            if not re.fullmatch(r"[A-Fa-f0-9]{32}", account_id):
+                self._set_status("Enter the 32-character Cloudflare account ID.")
+                return
+            self.cloudflare_account_id = account_id
+            self.base_url = PROVIDER_BY_ID["cloudflare"].base_url.format(account_id=account_id)
+            await self._fetch_models()
+        elif event.input.id == "custom-model-name" and self.stage == "custom_model":
+            await self._accept_custom_model(event.value)
+
+    async def action_back_step(self) -> None:
+        if self.step_index > 0:
+            self.step_index -= 1
+            self._show_step()
+        elif self.configuration_mode is not None:
+            await self.app.open_menu()
+
+    async def action_wizard_left(self) -> None:
+        focused = self.app.focused
+        if isinstance(focused, Input):
+            if self.stage == "search":
+                panel = self.query_one("#wizard-search-engines", SearchEnginePanel)
+                if panel.stage != "list":
+                    focused.action_cursor_left()
+                    return
+            if focused.cursor_position > 0:
+                focused.action_cursor_left()
+                return
+        if self.stage == "search":
+            panel = self.query_one("#wizard-search-engines", SearchEnginePanel)
+            if panel.stage == "list":
+                panel._finish(False)
+            return
+        await self.action_back_step()
+
+    async def action_wizard_right(self) -> None:
+        focused = self.app.focused
+        if isinstance(focused, Input):
+            if self.stage == "search":
+                panel = self.query_one("#wizard-search-engines", SearchEnginePanel)
+                if panel.stage != "list":
+                    focused.action_cursor_right()
+                    return
+            if focused.cursor_position < len(focused.value):
+                focused.action_cursor_right()
+                return
+        if self.stage == "search":
+            panel = self.query_one("#wizard-search-engines", SearchEnginePanel)
+            if panel.stage == "list":
+                panel._save_and_close()
+            return
+        await self._advance_step()
+
+    def action_continue_setup(self) -> None:
+        if self.stage == "welcome":
+            self._go_to("provider")
+
+    async def _advance_step(self) -> None:
+        if self.stage == "welcome":
+            self._go_to("provider")
+        elif self.stage == "provider":
+            selected = self.query_one("#provider-list", OptionList).highlighted
+            self._select_provider(selected if selected is not None else 0)
+        elif self.stage == "custom_url":
+            base_input = self.query_one("#custom-base-url", Input)
+            if self.app.focused is base_input:
+                base_url = base_input.value.strip().rstrip("/")
+                if not self._valid_base_url(base_url):
+                    self._set_status("Enter a complete http:// or https:// base URL.")
+                    return
+                self.base_url = base_url
+                self.query_one("#protocol-list", OptionList).focus()
+                return
+            selected = self.query_one("#protocol-list", OptionList).highlighted
+            self.protocol_id = "anthropic" if selected == 1 else "openai"
+            self._go_to("api_key")
+        elif self.stage == "api_key":
+            await self._submit_api_key(self.query_one("#provider-api-key", Input).value.strip())
+        elif self.stage == "cloudflare_account":
+            field = self.query_one("#cloudflare-account-id", Input)
+            account_id = field.value.strip()
+            if not re.fullmatch(r"[A-Fa-f0-9]{32}", account_id):
+                self._set_status("Enter the 32-character Cloudflare account ID.")
+                return
+            self.cloudflare_account_id = account_id
+            self.base_url = PROVIDER_BY_ID["cloudflare"].base_url.format(account_id=account_id)
+            await self._fetch_models()
+        elif self.stage == "models":
+            if self.loading_models:
+                return
+            highlighted = self.query_one("#model-list", OptionList).highlighted
+            if not self.model_options:
+                self._go_to("api_key")
+            elif highlighted is not None:
+                await self._select_model(highlighted)
+        elif self.stage == "custom_model":
+            await self._accept_custom_model(self.query_one("#custom-model-name", Input).value)
+        elif self.stage == "style":
+            highlighted = self.query_one("#theme-list", OptionList).highlighted
+            self._select_theme(highlighted if highlighted is not None else 0)
+            self._go_to("companion")
+        elif self.stage == "companion":
+            highlighted = self.query_one("#companion-list", OptionList).highlighted
+            self._select_companion(highlighted if highlighted is not None else 0)
+            await self._finish_setup()
+
+    async def _select_model(self, index: int | None) -> None:
+        if not self.model_options:
+            self._go_to("api_key")
+            return
+        if index is None or not 0 <= index < len(self.model_options):
+            return
+        self.model_id = self.model_options[index]
+        if self.configuration_mode:
+            await self._finish_setup()
+        else:
+            self._open_search_engine_setup()
+
+    async def _accept_custom_model(self, value: str) -> None:
+        self.model_id = value.strip()
+        if not self.model_id:
+            self._set_status("Enter the model ID used by your endpoint.")
+            return
+        if self.configuration_mode:
+            await self._finish_setup()
+        else:
+            self._open_search_engine_setup()
+
+    async def _submit_api_key(self, entered_key: str) -> None:
+        spec = PROVIDER_BY_ID[self.provider_id]
+        saved_key = str(self.profile.get("api_key", "") or "")
+        self.api_key = entered_key or saved_key
+        if spec.requires_api_key and not self.api_key:
+            self._set_status("This provider needs an API key to load its models.")
+            return
+        if self.provider_id == "custom":
+            self._go_to("custom_model")
+        elif self.provider_id == "cloudflare":
+            self._go_to("cloudflare_account")
+        else:
+            await self._fetch_models()
+
+    async def _fetch_models(self) -> None:
+        self.loading_models = True
+        self.model_options = []
+        option_list = self.query_one("#model-list", OptionList)
+        option_list.clear_options()
+        option_list.add_option("Loading provider models...")
+        self._go_to("models")
+        profile = {
+            "provider_id": self.provider_id,
+            "base_url": self.base_url,
+            "api_key": self.api_key,
+            "protocol": self.protocol_id if self.provider_id == "custom" else PROVIDER_BY_ID[self.provider_id].protocol,
+        }
+        try:
+            models = await asyncio.to_thread(list_models, profile)
+        except ProviderRequestError as error:
+            self.loading_models = False
+            option_list.clear_options()
+            option_list.add_option("Return to provider key")
+            self._set_status(str(error))
+            option_list.focus()
+            return
+        self.loading_models = False
+        self.model_options = models
+        option_list.clear_options()
+        option_list.add_options(models)
+        option_list.highlighted = next((index for index, model in enumerate(models) if model == self.model_id), 0)
+        self._set_status(f"{len(models)} models available | Up/Down browse | Enter select")
+        option_list.focus()
+
+    async def _finish_setup(self) -> None:
+        if not self.provider_confirmed or not self.model_id:
+            self._set_status("Choose a provider and model before finishing setup.")
+            return
+        try:
+            self.credentials.save_profile(
+                {
+                    "provider_id": self.provider_id,
+                    "base_url": self.base_url,
+                    "model": self.model_id,
+                    "api_key": self.api_key,
+                    "protocol": self.protocol_id if self.provider_id == "custom" else PROVIDER_BY_ID[self.provider_id].protocol,
+                }
+            )
+            if self.configuration_mode is None:
+                self.preferences.save(
+                    {
+                        "theme": self.theme_id,
+                        "companion": self.companion_id,
+                        "onboarding_complete": True,
+                    }
+                )
+        except OSError as error:
+            self._set_status(f"Could not save setup: {error}")
+            return
+        self.query_one("#wizard-mascot", MitsuCompanion).clear_terminal_graphics()
+        await self.app.finish_setup()
+
+    def _open_search_engine_setup(self) -> None:
+        self._go_to("search")
+
+    def _search_engine_page_finished(self, saved: bool) -> None:
+        if saved:
+            self._go_to("style")
+        elif self.step_index > 0:
+            self.step_index -= 1
+            self._show_step()
