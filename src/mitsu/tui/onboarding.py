@@ -431,3 +431,217 @@ class OnboardingScreen(Screen):
         elif self.step_index > 0:
             self.step_index -= 1
             self._show_step()
+
+    def _select_provider(self, index: int) -> None:
+        self._change_provider(PROVIDERS[index].id)
+        self.provider_confirmed = True
+        self._rebuild_steps()
+        self._go_to(self.steps[self.step_index + 1])
+
+    def _change_provider(self, provider_id: str) -> None:
+        if provider_id == self.provider_id:
+            return
+        self.provider_id = provider_id
+        self.profile = self._saved_profile(provider_id)
+        spec = PROVIDER_BY_ID[provider_id]
+        self.protocol_id = str(self.profile.get("protocol", spec.protocol))
+        self.base_url = str(self.profile.get("base_url", spec.base_url) or "")
+        self.model_id = str(self.profile.get("model", "") or "")
+        self.api_key = ""
+        self.cloudflare_account_id = self._account_id(self.base_url)
+        if self.is_mounted:
+            self._update_provider_key_title()
+            self.query_one("#provider-api-key", Input).value = ""
+            self.query_one("#provider-api-key", Input).placeholder = (
+                "Saved key will be kept" if self.profile.get("api_key") else "Paste API key"
+            )
+            self.query_one("#custom-base-url", Input).value = self.base_url if provider_id == "custom" else ""
+            self.query_one("#custom-model-name", Input).value = self.model_id if provider_id == "custom" else ""
+            self.query_one("#cloudflare-account-id", Input).value = self.cloudflare_account_id
+            self.query_one("#protocol-list", OptionList).highlighted = 1 if self.protocol_id == "anthropic" else 0
+
+    def _select_theme(self, index: int) -> None:
+        self.theme_id = tuple(THEMES)[index]
+        self._apply_theme()
+
+    def _select_companion(self, index: int) -> None:
+        self.companion_id = COMPANIONS[index].id
+        self._show_companion()
+
+    def _steps(self) -> list[str]:
+        if self.configuration_mode == "model":
+            steps = ["api_key"]
+            if self.provider_id == "custom":
+                steps.append("custom_model")
+            elif self.provider_id == "cloudflare":
+                steps.extend(("cloudflare_account", "models"))
+            else:
+                steps.append("models")
+            return steps
+        if self.configuration_mode == "provider":
+            steps = ["provider"]
+            if self.provider_id == "custom":
+                steps.extend(("custom_url", "api_key", "custom_model"))
+            else:
+                steps.append("api_key")
+                if self.provider_id == "cloudflare":
+                    steps.append("cloudflare_account")
+                steps.append("models")
+            return steps
+        steps = ["welcome", "provider"]
+        if self.provider_id == "custom":
+            steps.extend(("custom_url", "api_key", "custom_model"))
+        else:
+            steps.append("api_key")
+            if self.provider_id == "cloudflare":
+                steps.append("cloudflare_account")
+            steps.append("models")
+        steps.extend(("search", "style", "companion"))
+        return steps
+
+    def _rebuild_steps(self) -> None:
+        current = self.stage
+        self.steps = self._steps()
+        self.step_index = self.steps.index(current) if current in self.steps else self.steps.index("provider")
+
+    @property
+    def stage(self) -> str:
+        return self.steps[self.step_index]
+
+    def _go_to(self, stage: str) -> None:
+        self._rebuild_steps()
+        if stage not in self.steps:
+            return
+        self.step_index = self.steps.index(stage)
+        self._show_step()
+
+    def _show_step(self) -> None:
+        page_ids = (
+            "welcome", "provider", "custom-url", "api-key", "cloudflare-account",
+            "models", "custom-model", "search", "style", "companion",
+        )
+        stage_to_page = {
+            "custom_url": "custom-url",
+            "api_key": "api-key",
+            "cloudflare_account": "cloudflare-account",
+            "custom_model": "custom-model",
+        }
+        active_page = stage_to_page.get(self.stage, self.stage)
+        for page in page_ids:
+            self.query_one(f"#wizard-page-{page}").display = page == active_page
+        self.query_one("#wizard-status", Static).update("")
+        self.query_one("#wizard-controls", Static).update(
+            "" if self.stage == "welcome" else "← / →  previous / next     ↑ / ↓  browse     Enter  select     Esc  back"
+        )
+        focus_ids = {
+            "provider": "provider-list",
+            "custom_url": "custom-base-url",
+            "api_key": "provider-api-key",
+            "cloudflare_account": "cloudflare-account-id",
+            "models": "model-list",
+            "custom_model": "custom-model-name",
+            "search": "search-engine-list",
+            "style": "theme-list",
+            "companion": "companion-list",
+        }
+        focus_id = focus_ids.get(self.stage)
+        if focus_id:
+            self.query_one(f"#{focus_id}").focus()
+        else:
+            self.set_focus(None)
+
+    def _set_status(self, message: str) -> None:
+        if self.is_mounted:
+            self.query_one("#wizard-status", Static).update(message)
+
+    def _apply_theme(self) -> None:
+        if not self.is_mounted:
+            return
+        self.app.set_mitsu_theme(self.theme_id)
+        shell = self.query_one("#wizard-shell")
+        for theme_id in THEMES:
+            shell.remove_class(f"theme-{theme_id}")
+        shell.add_class(f"theme-{self.theme_id}")
+        palette = THEMES[self.theme_id]
+        accent = palette["accent"]
+        preview = Text()
+        code = palette["code"]
+        preview.append("MITSU  /  READY\n", style=f"bold {accent}")
+        preview.append("async ", style=f"bold {code['keyword']}")
+        preview.append("def ", style=f"bold {code['keyword']}")
+        preview.append("scope_check", style=f"bold {code['function']}")
+        preview.append("(target):\n")
+        preview.append("    if ", style=f"bold {code['keyword']}")
+        preview.append("target.in_scope:\n        ")
+        preview.append("score", style=code["function"])
+        preview.append(" = ")
+        preview.append("0.98", style=code["number"])
+        preview.append("\n        ")
+        preview.append("return ", style=f"bold {code['keyword']}")
+        preview.append("await ", style=f"bold {code['keyword']}")
+        preview.append("check", style=f"bold {code['function']}")
+        preview.append("(")
+        preview.append('"/scan"', style=code["string"])
+        preview.append(")")
+        self.query_one("#theme-preview", Static).update(preview)
+        moon = self.query_one("#wizard-moon", MoonScene)
+        moon.accent = MOON_YELLOW
+        moon.refresh()
+        city = self.query_one(CityScene)
+        city.accent = accent
+        city.refresh()
+
+    def _show_companion(self) -> None:
+        if not self.is_mounted:
+            return
+        companion = companion_by_id(self.companion_id)
+        mascot = self.query_one("#wizard-mascot", MitsuCompanion)
+        mascot.set_companion(
+            companion.path,
+            flip_running_right=companion.run_right_flip,
+        )
+        mascot.set_state("running_right")
+
+    def _saved_profile(self, provider_id: str) -> dict:
+        profile = self.saved_profiles.get(provider_id, {})
+        return profile if isinstance(profile, dict) else {}
+
+    def _update_provider_key_title(self) -> None:
+        provider = PROVIDER_BY_ID[self.provider_id]
+        self.query_one("#provider-key-title", Static).update(
+            f"{provider.name.upper()} API KEY"
+        )
+        if self.provider_id == "custom":
+            prompt = "Please set your custom endpoint API key (if applicable)."
+        else:
+            prompt = f"Please input your API key for {provider.name}."
+        self.query_one("#provider-key-prompt", Static).update(prompt)
+        saved_key = bool(self.profile.get("api_key"))
+        if saved_key:
+            note = "API key already set [!]. Leave empty to keep unchanged."
+        elif provider.requires_api_key:
+            note = "An API key is required for this provider."
+        else:
+            note = "Leave empty if no API key is used."
+        self.query_one("#provider-key-note", Static).update(note)
+
+    @staticmethod
+    def _valid_base_url(base_url: str) -> bool:
+        try:
+            parsed = urlsplit(base_url)
+            return (
+                parsed.scheme in {"http", "https"}
+                and parsed.hostname is not None
+                and parsed.username is None
+                and parsed.password is None
+                and not parsed.query
+                and not parsed.fragment
+                and (parsed.port is None or 1 <= parsed.port <= 65535)
+            )
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _account_id(base_url: str) -> str:
+        match = re.search(r"/accounts/([A-Fa-f0-9]{32})/", base_url)
+        return match.group(1) if match else ""
