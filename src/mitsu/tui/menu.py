@@ -230,3 +230,305 @@ class MainMenuScreen(Screen):
             self.action_focus_right()
         else:
             self.action_focus_left()
+
+    def action_back_to_command_center(self) -> None:
+        if self.panel_kind.startswith("armory_"):
+            self._armory_back()
+            return
+        if self.inline_flow:
+            self._cancel_inline_flow()
+            return
+        self.action_focus_left()
+
+    async def action_select_current(self) -> None:
+        if self.active_panel == "left":
+            if self.left_index == 3:
+                self.app.exit()
+                return
+            if self.left_index == 2:
+                await self._check_for_updates()
+                return
+            self.active_panel = "right"
+            self._render_left_list()
+            self._render_right_list()
+            self.query_one("#menu-right-list", MenuList).focus()
+            return
+        if self.panel_kind == "update":
+            await self._check_for_updates()
+            return
+        if self.panel_kind == "quit":
+            self.app.exit()
+            return
+        await self._select_right_item()
+
+    def action_delete_selected_session(self) -> None:
+        if self.active_panel != "right" or self.panel_kind != "sessions" or not self.right_items:
+            return
+        item = self.right_items[self.right_index]
+        if item.get("action") != "open_session":
+            return
+        session_id = item.get("session_id", "")
+        title = item.get("label", "this session").split("] ", 1)[-1]
+        selected_index = self.right_index
+        dialog = DeleteSessionDialog(in_menu=True, session_title=title)
+
+        def dismissed(confirmed: bool) -> None:
+            if confirmed:
+                self._delete_selected_session(session_id, title, selected_index)
+
+        self.app.push_screen(dialog, dismissed)
+
+    def _delete_selected_session(self, session_id: str, title: str, selected_index: int) -> None:
+        try:
+            deleted = self.sessions.delete_session(session_id)
+        except OSError as error:
+            self.query_one("#menu-right-detail", Static).update(
+                f"Could not delete {title}: {error}"
+            )
+            return
+        if not deleted:
+            self.query_one("#menu-right-detail", Static).update(
+                f"Could not find {title} on disk. The session list was not changed."
+            )
+            return
+
+        self.records = [record for record in self.records if str(record.get("id", "")) != session_id]
+        self._show_left_selection()
+        self.right_index = min(selected_index, max(0, len(self.right_items) - 1))
+        self._render_right_list()
+        self.query_one("#menu-right-detail", Static).update(f"Removed {title} from saved sessions.")
+
+    def action_quit_app(self) -> None:
+        if self.input_stage:
+            return
+        self.app.exit()
+
+    async def _select_right_item(self) -> None:
+        if not self.right_items or self.panel_kind == "armory_running":
+            return
+        item = self.right_items[self.right_index]
+        action = item["action"]
+        if action == "create_session":
+            await self.app.open_session()
+        elif action == "open_session":
+            await self.app.open_session(item["session_id"])
+        elif action == "change_provider":
+            self._begin_provider_selection()
+        elif action == "set_model":
+            self._begin_model_selection()
+        elif action == "mcp":
+            self.app.push_screen(
+                MCPConfigDialog(self.credentials.path.parent / "mcp_servers.json"),
+                self._mcp_config_closed,
+            )
+        elif action == "search_engines":
+            self.app.push_screen(
+                SearchEngineDialog(self.credentials),
+                self._search_engines_closed,
+            )
+        elif action == "armory":
+            await self._open_armory()
+        elif action == "armory_category":
+            await self._load_armory_tools(item["category_id"])
+        elif action == "armory_tool":
+            self._show_armory_confirmation(item["tool_id"])
+        elif action == "armory_cancel":
+            if self.armory_category_id:
+                self._display_armory_tools(self.armory_category_id, selected_tool=self.armory_tool_id)
+        elif action == "armory_install":
+            await self._start_armory_operation("install")
+        elif action == "armory_uninstall":
+            await self._start_armory_operation("uninstall")
+        elif action == "armory_running":
+            return
+        elif action == "change_companion":
+            companion = companion_by_id(item["companion_id"])
+            try:
+                self.preferences.save({"companion": companion.id})
+            except OSError as error:
+                self.query_one("#menu-right-detail", Static).update(f"Could not save companion: {error}")
+                return
+            self.saved_preferences["companion"] = companion.id
+            self._set_menu_companion(companion.id)
+            self.left_index = 1
+            self.active_panel = "right"
+            self._show_left_selection()
+            self.right_index = 5
+            self.right_items[self.right_index]["detail"] = f"Saved {companion.name} as your companion."
+            self._render_left_list()
+            self._render_right_list()
+        elif action == "companions":
+            self.panel_kind = "companions"
+            self.right_items = [
+                {
+                    "label": companion.name,
+                    "action": "change_companion",
+                    "companion_id": companion.id,
+                    "detail": "Press Enter to use this companion.",
+                }
+                for companion in COMPANIONS
+            ]
+            self.right_index = next(
+                (index for index, companion in enumerate(COMPANIONS)
+                 if companion.id == self.saved_preferences.get("companion", "mitsu")),
+                0,
+            )
+            self.query_one("#menu-right-title", Static).update("PET COMPANION")
+            self._render_right_list()
+        elif action == "check_updates":
+            await self._check_for_updates()
+        elif action == "select_provider":
+            await self._choose_provider(item["provider_id"])
+        elif action == "select_model":
+            await self._save_pending_profile(item["model"])
+        elif action == "select_configured_model":
+            profile = self.credentials.profile_for(item["provider_id"])
+            if profile is not None:
+                self.pending_profile = profile
+                self.inline_flow = "model"
+                await self._save_pending_profile(item["model"])
+        elif action == "retry_models":
+            if self.panel_kind == "configured_models":
+                await self._load_all_provider_models()
+            else:
+                await self._load_pending_models()
+        elif action == "quit":
+            self.app.exit()
+
+    def _mcp_config_closed(self, saved: bool) -> None:
+        if saved:
+            self.query_one("#menu-right-detail", Static).update(
+                "MCP servers saved. They will connect when a session starts."
+            )
+
+    def _search_engines_closed(self, saved: bool | None) -> None:
+        if saved:
+            self.query_one("#menu-right-detail", Static).update(
+                "Search engine settings saved. Configured sources are ready for web searches."
+            )
+
+    async def _open_armory(self) -> None:
+        self.armory_environment = await asyncio.to_thread(load_host_environment)
+        self.armory_statuses.clear()
+        self._show_armory_categories()
+        self.query_one("#menu-right-list", MenuList).focus()
+
+    def _show_armory_categories(self) -> None:
+        self.panel_kind = "armory_categories"
+        self.armory_category_id = None
+        self.armory_tool_id = None
+        self.query_one("#menu-right-title", Static).update("REDTEAM ARMORY")
+        self.right_items = [
+            {
+                "label": f"{category.name}  ·  {len(TOOLS_BY_CATEGORY[category.id])} tools",
+                "action": "armory_category",
+                "category_id": category.id,
+                "detail": category.description,
+            }
+            for category in ARMORY_CATEGORIES
+        ]
+        self.right_index = 0
+        self._render_right_list()
+        environment = self.armory_environment
+        if environment is None:
+            detail = "Host details are unavailable."
+        else:
+            manager = environment.package_manager_name
+            detail = (
+                f"{environment.os_name} · {manager}. Choose a category to inspect installed tools. "
+                "Installs use native packages or catalogued upstream methods and run visibly in a new terminal. "
+                "Mitsu only catalogs tools here; it does not execute them."
+            )
+            if not environment.package_manager_id:
+                detail += " No supported package manager was detected."
+        self.query_one("#menu-right-detail", Static).update(detail)
+
+    async def _load_armory_tools(self, category_id: str) -> None:
+        if category_id not in TOOLS_BY_CATEGORY or self.armory_environment is None:
+            return
+        self.armory_category_id = category_id
+        self.panel_kind = "armory_loading"
+        category = next(category for category in ARMORY_CATEGORIES if category.id == category_id)
+        self.query_one("#menu-right-title", Static).update(category.name.upper())
+        self.query_one("#menu-right-list", MenuList).update("Checking installed tools…")
+        self.query_one("#menu-right-detail", Static).update(
+            f"Reading package status on {self.armory_environment.os_name}."
+        )
+        environment = self.armory_environment
+        tools = TOOLS_BY_CATEGORY[category_id]
+        statuses = await asyncio.to_thread(
+            lambda: {tool.id: inspect_tool(tool, environment) for tool in tools}
+        )
+        if self.panel_kind != "armory_loading":
+            return
+        self.armory_statuses.update(statuses)
+        self._display_armory_tools(category_id)
+        self.query_one("#menu-right-list", MenuList).focus()
+
+    def _display_armory_tools(self, category_id: str, *, selected_tool: str | None = None) -> None:
+        self.panel_kind = "armory_tools"
+        self.armory_category_id = category_id
+        category = next(category for category in ARMORY_CATEGORIES if category.id == category_id)
+        self.query_one("#menu-right-title", Static).update(category.name.upper())
+        self.right_items = []
+        for tool in TOOLS_BY_CATEGORY[category_id]:
+            status = self.armory_statuses.get(tool.id, ToolStatus(False, False))
+            label = f"{'INSTALLED' if status.installed else 'NOT INSTALLED'}  ·  {tool.name}"
+            self.right_items.append(
+                {
+                    "label": label,
+                    "action": "armory_tool",
+                    "tool_id": tool.id,
+                    "status": "installed" if status.installed else "missing",
+                    "detail": tool.description,
+                }
+            )
+        self.right_index = next(
+            (index for index, item in enumerate(self.right_items) if item.get("tool_id") == selected_tool),
+            0,
+        )
+        self._render_right_list()
+        self.query_one("#menu-right-detail", Static).update(
+            "Enter to manage a tool · Esc / ← back to categories. Installing or removing opens a terminal."
+        )
+
+    def _show_armory_confirmation(self, tool_id: str) -> None:
+        tool = TOOL_BY_ID.get(tool_id)
+        if tool is None:
+            return
+        self.armory_tool_id = tool_id
+        status = self.armory_statuses.get(tool_id, ToolStatus(False, False))
+        self.panel_kind = "armory_confirm"
+        if status.installed and not status.managed:
+            self.query_one("#menu-right-title", Static).update("TOOL ALREADY PRESENT")
+            self.right_items = [
+                {
+                    "label": "Back to tools",
+                    "action": "armory_cancel",
+                    "detail": "This executable is present, but Mitsu cannot identify a managed installation for it.",
+                }
+            ]
+            detail = (
+                f"{tool.name} is present outside Mitsu's supported install sources. "
+                "Mitsu cannot safely remove a manual installation."
+            )
+        elif status.installed:
+            self.query_one("#menu-right-title", Static).update("REMOVE TOOL?")
+            detail = (
+                f"{tool.name} is installed. Would you like to remove it? "
+                "The selected installer will show what it plans to remove."
+            )
+            self.right_items = [
+                {"label": "No · keep it installed", "action": "armory_cancel", "detail": "No changes will be made."},
+                {"label": "Yes · uninstall", "action": "armory_uninstall", "detail": "This opens the selected installer in a new terminal."},
+            ]
+        else:
+            self.query_one("#menu-right-title", Static).update("INSTALL TOOL?")
+            detail = f"{tool.name} is not installed. Want me to install it for you? (＾▽＾)"
+            self.right_items = [
+                {"label": "No · go back", "action": "armory_cancel", "detail": "No changes will be made."},
+                {"label": "Yes · install", "action": "armory_install", "detail": "This opens the selected installer in a new terminal."},
+            ]
+        self.right_index = 0
+        self._render_right_list()
+        self.query_one("#menu-right-detail", Static).update(detail)
