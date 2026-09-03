@@ -532,3 +532,331 @@ class MainMenuScreen(Screen):
         self.right_index = 0
         self._render_right_list()
         self.query_one("#menu-right-detail", Static).update(detail)
+
+    async def _start_armory_operation(self, operation: str) -> None:
+        if self.armory_operation_process is not None:
+            return
+        tool = TOOL_BY_ID.get(self.armory_tool_id or "")
+        environment = self.armory_environment
+        if tool is None or environment is None:
+            return
+        try:
+            process, method_id = await asyncio.to_thread(open_install_terminal, tool, environment, operation)
+        except ArmoryError as error:
+            self.query_one("#menu-right-detail", Static).update(str(error))
+            return
+        self.armory_operation_process = process
+        self.armory_operation = operation
+        self.armory_operation_method_id = method_id
+        category_id = self.armory_category_id
+        if category_id:
+            self._display_armory_tools(category_id, selected_tool=tool.id)
+        self.panel_kind = "armory_running"
+        self.query_one("#menu-right-detail", Static).update(
+            "A new terminal is showing the install or removal output. Status refreshes while it runs. "
+            "Mitsu catalogs tools here; it does not execute them."
+        )
+        self.run_worker(
+            self._watch_armory_operation(process, tool, operation, method_id),
+            name="redteam-armory-package-operation",
+            exclusive=True,
+        )
+
+    async def _watch_armory_operation(self, process, tool, operation: str, method_id: str) -> None:
+        environment = self.armory_environment
+        if environment is None:
+            return
+        previous = self.armory_statuses.get(tool.id, ToolStatus(False, False))
+        while process.poll() is None:
+            await asyncio.sleep(1.0)
+            current = await asyncio.to_thread(inspect_tool, tool, environment)
+            if current != previous:
+                previous = current
+                self.armory_statuses[tool.id] = current
+                if self.panel_kind == "armory_running":
+                    for item in self.right_items:
+                        if item.get("tool_id") == tool.id:
+                            item["label"] = f"{'INSTALLED' if current.installed else 'NOT INSTALLED'}  ·  {tool.name}"
+                            item["status"] = "installed" if current.installed else "missing"
+                    self._render_right_list()
+                    self.query_one("#menu-right-detail", Static).update(
+                        f"{tool.name} status updated. Close the terminal when you are done reviewing its output."
+                    )
+        return_code = process.poll()
+        final_status = await asyncio.to_thread(inspect_tool, tool, environment)
+        if operation == "install" and return_code == 0 and not method_id.startswith("system:"):
+            if method_id.startswith("official-script:"):
+                await asyncio.to_thread(record_managed_install, tool.id, method_id)
+            final_status = await asyncio.to_thread(inspect_tool, tool, environment)
+            if not final_status.installed and method_id.startswith("official-script:"):
+                await asyncio.to_thread(forget_managed_install, tool.id)
+                final_status = await asyncio.to_thread(inspect_tool, tool, environment)
+        elif operation == "uninstall" and return_code == 0 and not final_status.installed:
+            await asyncio.to_thread(forget_managed_install, tool.id)
+        self.armory_statuses[tool.id] = final_status
+        self.armory_operation_process = None
+        self.armory_operation = None
+        self.armory_operation_method_id = None
+        category_id = self.armory_category_id
+        if self.panel_kind != "armory_running" or category_id is None:
+            return
+        self._display_armory_tools(category_id, selected_tool=tool.id)
+        if return_code == 0 and final_status.installed == (operation == "install"):
+            message = f"{tool.name} is now {'installed' if final_status.installed else 'uninstalled'}."
+        else:
+            message = f"Package operation ended with status {return_code}; check the terminal output."
+        self.query_one("#menu-right-detail", Static).update(message)
+
+    def _armory_back(self) -> None:
+        if self.armory_operation_process is not None and self.armory_operation_process.poll() is None:
+            self.query_one("#menu-right-detail", Static).update(
+                "The package manager is still running in its terminal. Close it after the operation finishes."
+            )
+            return
+        if self.panel_kind == "armory_confirm" and self.armory_category_id:
+            self._display_armory_tools(self.armory_category_id, selected_tool=self.armory_tool_id)
+            self.query_one("#menu-right-list", MenuList).focus()
+        elif self.panel_kind in {"armory_tools", "armory_loading"}:
+            self._show_armory_categories()
+            self.query_one("#menu-right-list", MenuList).focus()
+        elif self.panel_kind == "armory_categories":
+            self.armory_environment = None
+            self.left_index = 1
+            self.active_panel = "right"
+            self._show_left_selection()
+            self.right_index = 4
+            self._render_right_list()
+            self.query_one("#menu-right-list", MenuList).focus()
+
+    def _show_left_selection(self) -> None:
+        model_search = self.query_one("#menu-model-search", Input)
+        model_search.display = False
+        model_search.disabled = False
+        model_search.value = ""
+        kind = ("sessions", "configuration", "update", "quit")[self.left_index]
+        self.panel_kind = kind
+        self.right_index = 0
+        title = {
+            "sessions": "SESSIONS",
+            "configuration": "CONFIGURATION",
+            "update": "UPDATE MITSU",
+            "quit": "QUIT MITSU",
+        }[kind]
+        self.query_one("#menu-right-title", Static).update(title)
+        if kind == "sessions":
+            self.right_items = [
+                {
+                    "label": f"[{index}] {str(record.get('title', 'Untitled session')).splitlines()[0]}",
+                    "action": "open_session",
+                    "session_id": str(record["id"]),
+                    "detail": self._session_detail(record),
+                }
+                for index, record in enumerate(self.records, start=1)
+                if record.get("id")
+            ]
+            self.right_items.append(
+                {"label": "[+] CREATE NEW SESSION", "action": "create_session", "detail": "Start a fresh session."}
+            )
+        elif kind == "configuration":
+            self.right_items = [
+                {"label": f"[{index}] {label}", "action": action, "detail": detail}
+                for index, ((label, detail), action) in enumerate(
+                    zip(self.CONFIG_ITEMS, (
+                        "change_provider", "set_model", "mcp", "search_engines", "armory", "companions",
+                    )),
+                    start=1,
+                )
+            ]
+        elif kind == "update":
+            self.right_items = []
+        else:
+            self.right_items = []
+        self._render_right_list()
+        if kind == "update":
+            self.query_one("#menu-right-detail", Static).update(self.update_status)
+        elif kind == "quit":
+            self.query_one("#menu-right-detail", Static).update("Exit Mitsu and return to your shell.")
+
+    def _render_left_list(self) -> None:
+        output = Text()
+        for index, item in enumerate(self.LEFT_ITEMS):
+            selected = index == self.left_index
+            if selected and self.active_panel == "left":
+                output.append("› ", style=Style(color=self.accent, bold=True))
+                output.append(f"[*] {item}", style=Style(color=self.accent, bold=True, underline=True))
+            elif selected:
+                output.append("  ", style="#938a84")
+                output.append(f"[*] {item}", style=Style(color=self.accent, bold=True))
+            else:
+                output.append("  [*] ", style="#817a75")
+                output.append(item, style="#d0cbc5")
+            if index + 1 < len(self.LEFT_ITEMS):
+                output.append("\n")
+        self.query_one("#menu-left-list", Static).update(output)
+
+    def _render_right_list(self) -> None:
+        list_widget = self.query_one("#menu-right-list", Static)
+        detail_widget = self.query_one("#menu-right-detail", Static)
+        output = Text()
+        available_rows = max(1, min(18, list_widget.size.height or 18))
+        visible_count = min(14, len(self.right_items), max(1, available_rows - 2))
+        start = max(0, min(self.right_index - visible_count // 2, len(self.right_items) - visible_count))
+        visible_items = self.right_items[start : start + visible_count]
+        show_earlier = start > 0
+        show_later = start + len(visible_items) < len(self.right_items)
+        if visible_count + int(show_earlier) + int(show_later) > available_rows:
+            show_earlier = show_later = False
+        if show_earlier:
+            output.append("  ↑ earlier items\n", style="#817a75")
+        for offset, item in enumerate(visible_items):
+            index = start + offset
+            selected = index == self.right_index
+            status = item.get("status")
+            if status:
+                output.append("● ", style="#79d78c" if status == "installed" else "#ef7180")
+            if selected and self.active_panel == "right":
+                output.append("› ", style=Style(color=self.accent, bold=True))
+                output.append(item["label"], style=Style(color=self.accent, bold=True, underline=True))
+            elif selected:
+                output.append("  ", style="#938a84")
+                output.append(item["label"], style=Style(color=self.accent, bold=True))
+            else:
+                output.append("  ", style="#817a75")
+                output.append(item["label"], style="#d0cbc5")
+            if index + 1 < start + len(visible_items):
+                output.append("\n")
+        if show_later:
+            output.append("\n  ↓ more items", style="#817a75")
+        list_widget.update(output)
+        if self.right_items:
+            detail_widget.update(self.right_items[self.right_index].get("detail", ""))
+        else:
+            detail_widget.update("")
+        if self.panel_kind == "companions" and self.right_items:
+            selected = self.right_items[self.right_index]
+            self._set_menu_companion(selected["companion_id"])
+
+    async def _check_for_updates(self) -> None:
+        detail = self.query_one("#menu-right-detail", Static)
+        self.update_status = f"Checking GitHub for a version newer than v{__version__}…"
+        detail.update(self.update_status)
+        try:
+            latest = await asyncio.to_thread(fetch_latest_version)
+        except (OSError, ValueError) as error:
+            self.update_status = f"Could not check GitHub: {error}"
+        else:
+            if latest is None:
+                self.update_status = "The upstream repository does not have a version.txt yet."
+            elif compare_versions(latest, __version__) > 0:
+                self.update_status = f"Mitsu v{latest} is available. Installed version: v{__version__}."
+            elif compare_versions(latest, __version__) < 0:
+                self.update_status = f"GitHub reports v{latest}; this checkout is v{__version__}."
+            else:
+                self.update_status = f"You’re up to date: v{__version__}."
+        if self.panel_kind == "update":
+            detail.update(self.update_status)
+
+    def _begin_provider_selection(self) -> None:
+        self.inline_flow = "provider"
+        self.pending_profile = None
+        self.input_stage = None
+        self.api_key_prompted = False
+        self.panel_kind = "provider_list"
+        self.right_index = next(
+            (index for index, provider in enumerate(PROVIDERS)
+             if provider.id == self.profile.get("provider_id")),
+            0,
+        )
+        self.right_items = [
+            {
+                "label": f"[{index}] {provider.name}",
+                "action": "select_provider",
+                "provider_id": provider.id,
+                "detail": "Press Enter to configure this provider.",
+            }
+            for index, provider in enumerate(PROVIDERS, start=1)
+        ]
+        self.query_one("#menu-right-title", Static).update("CHOOSE PROVIDER")
+        self._render_right_list()
+        self.query_one("#menu-right-detail", Static).update(
+            "Saved API keys are reused. Choose a provider with ↑ / ↓ and Enter."
+        )
+
+    def _begin_model_selection(self) -> None:
+        profiles = self.credentials.configured_profiles()
+        if not profiles:
+            self.query_one("#menu-right-detail", Static).update("Configure a provider before choosing a model.")
+            return
+        self.inline_flow = "model"
+        self.pending_profile = None
+        self.panel_kind = "configured_models"
+        self.run_worker(
+            self._load_all_provider_models(profiles),
+            name="load-configured-provider-models",
+            exclusive=True,
+        )
+
+    async def _load_all_provider_models(self, profiles: list[dict] | None = None) -> None:
+        profiles = profiles or self.credentials.configured_profiles()
+        self.panel_kind = "configured_models"
+        self.query_one("#menu-right-title", Static).update("MODELS FROM CONFIGURED PROVIDERS")
+        self.query_one("#menu-right-list", Static).update("")
+        self.query_one("#menu-right-detail", Static).update("Loading each configured provider’s model list…")
+        self._hide_inline_inputs()
+        search = self.query_one("#menu-model-search", Input)
+        search.display = True
+        search.disabled = True
+        search.value = ""
+        search.placeholder = "Loading models from configured providers…"
+        self.configured_model_items = []
+        self.configured_model_failures = []
+        search.focus()
+        results = await asyncio.gather(
+            *(asyncio.to_thread(list_models, profile) for profile in profiles),
+            return_exceptions=True,
+        )
+        if self.panel_kind != "configured_models":
+            return
+        failures = []
+        for profile, result in zip(profiles, results):
+            spec = PROVIDER_BY_ID[str(profile["provider_id"])]
+            if isinstance(result, BaseException):
+                failures.append(f"{spec.name}: {result}")
+                continue
+            for model in result:
+                self.configured_model_items.append(
+                    {
+                        "label": f"{spec.name}  ·  {model}",
+                        "action": "select_configured_model",
+                        "provider_id": spec.id,
+                        "model": model,
+                        "detail": f"Use {model} with {spec.name}.",
+                    }
+                )
+        self.configured_model_failures = failures
+        search.disabled = False
+        search.placeholder = "Filter models across configured providers"
+        if self.configured_model_items:
+            self.right_index = next(
+                (
+                    index
+                    for index, item in enumerate(self.configured_model_items)
+                    if item["provider_id"] == self.profile.get("provider_id")
+                    and item["model"] == self.profile.get("model")
+                ),
+                0,
+            )
+            self.right_items = list(self.configured_model_items)
+            self._filter_configured_models(search.value)
+            search.focus()
+            return
+        search.display = False
+        search.disabled = False
+        self.right_items = [
+            {"label": "[↻] RETRY MODEL LISTS", "action": "retry_models", "detail": "Try the configured providers again."}
+        ]
+        self.right_index = 0
+        self._render_right_list()
+        self.query_one("#menu-right-detail", Static).update(
+            "No models were returned. " + (" · ".join(failures) if failures else "Check provider setup.")
+        )
