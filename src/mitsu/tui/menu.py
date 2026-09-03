@@ -860,3 +860,172 @@ class MainMenuScreen(Screen):
         self.query_one("#menu-right-detail", Static).update(
             "No models were returned. " + (" · ".join(failures) if failures else "Check provider setup.")
         )
+
+    def _filter_configured_models(self, query: str) -> None:
+        normalized = query.casefold().strip()
+        selected = None
+        if self.right_items and 0 <= self.right_index < len(self.right_items):
+            item = self.right_items[self.right_index]
+            selected = (item.get("provider_id"), item.get("model"))
+        matches = [
+            item for item in self.configured_model_items
+            if not normalized or normalized in item["label"].casefold()
+        ]
+        self.right_items = matches
+        self.right_index = next(
+            (
+                index for index, item in enumerate(matches)
+                if selected == (item.get("provider_id"), item.get("model"))
+            ),
+            0,
+        )
+        self._render_right_list()
+        detail = (
+            f"{len(matches)} matching models · ↑ / ↓ browse · Enter to choose."
+            if matches
+            else "No matching models. Try another model or provider name."
+        )
+        if self.configured_model_failures:
+            detail += " Some providers could not be reached: " + " · ".join(self.configured_model_failures)
+        self.query_one("#menu-right-detail", Static).update(detail)
+
+    async def _choose_provider(self, provider_id: str) -> None:
+        spec = PROVIDER_BY_ID[provider_id]
+        profile = self.credentials.profile_for(provider_id)
+        self.pending_profile = dict(profile) if profile else {
+            "provider_id": provider_id,
+            "base_url": spec.base_url,
+            "model": "",
+            "api_key": "",
+            "protocol": spec.protocol,
+        }
+        self.inline_flow = "provider"
+        self.panel_kind = "provider_setup"
+        self.api_key_prompted = False
+        self._continue_pending_profile()
+
+    def _continue_pending_profile(self) -> None:
+        profile = self.pending_profile
+        if profile is None:
+            return
+        provider_id = str(profile.get("provider_id", ""))
+        spec = PROVIDER_BY_ID[provider_id]
+        if provider_id == "custom" and not profile.get("base_url"):
+            self._request_inline_input(
+                "base_url",
+                "CUSTOM ENDPOINT",
+                "Enter the base URL for your endpoint.",
+                "https://your-endpoint.example/v1",
+            )
+            return
+        if spec.requires_api_key and not profile.get("api_key"):
+            prompt = f"Please input your API key for {spec.name}."
+            self.api_key_prompted = True
+            self._request_inline_input("api_key", f"{spec.name.upper()} API KEY", prompt, "Paste API key", secret=True)
+            return
+        if provider_id == "custom" and not profile.get("api_key") and not self.api_key_prompted:
+            self.api_key_prompted = True
+            self._request_inline_input(
+                "api_key",
+                "CUSTOM ENDPOINT API KEY",
+                "Please set your custom endpoint API key (if applicable).",
+                "Paste API key",
+                secret=True,
+            )
+            return
+        if provider_id == "cloudflare" and not self._has_cloudflare_account(str(profile.get("base_url", ""))):
+            self._request_inline_input(
+                "account_id",
+                "CLOUDFLARE ACCOUNT",
+                "Enter the account ID used by your Workers AI endpoint.",
+                "Cloudflare account ID",
+            )
+            return
+        if provider_id == "custom":
+            self._request_inline_input(
+                "model_name",
+                "MODEL NAME",
+                "Enter the model ID exactly as your endpoint expects it.",
+                "Provider model ID",
+            )
+            return
+        self.run_worker(self._load_pending_models(), name="load-provider-models", exclusive=True)
+
+    def _request_inline_input(
+        self,
+        stage: str,
+        title: str,
+        prompt: str,
+        placeholder: str,
+        secret: bool = False,
+    ) -> None:
+        self.input_stage = stage
+        self.panel_kind = "inline_input"
+        self.right_items = []
+        self.right_index = 0
+        self.query_one("#menu-right-title", Static).update(title)
+        self.query_one("#menu-right-list", Static).update("")
+        note = ""
+        if stage == "api_key":
+            profile = self.pending_profile or {}
+            if profile.get("api_key"):
+                note = "\n\nAPI key already set [!]. Leave empty to keep unchanged."
+            elif profile.get("provider_id") == "custom":
+                note = "\n\nLeave empty if no API key is used."
+            else:
+                note = "\n\nAn API key is required to load this provider’s models."
+        note += "\n\nEsc returns to Configuration. Enter submits."
+        self.query_one("#menu-right-detail", Static).update(prompt + note)
+        secret_input = self.query_one("#menu-secret-input", Input)
+        text_input = self.query_one("#menu-text-input", Input)
+        secret_input.display = secret
+        text_input.display = not secret
+        current = secret_input if secret else text_input
+        current.placeholder = placeholder
+        current.value = ""
+        current.focus()
+
+    async def _submit_inline_input(self, value: str) -> None:
+        stage = self.input_stage
+        profile = self.pending_profile
+        if not stage or profile is None:
+            return
+        if stage == "api_key":
+            provider_id = str(profile.get("provider_id", ""))
+            spec = PROVIDER_BY_ID[provider_id]
+            if spec.requires_api_key and not value and not profile.get("api_key"):
+                self.query_one("#menu-right-detail", Static).update(
+                    f"{spec.name} needs an API key to load its model list.\n\nEsc returns to Configuration."
+                )
+                self.query_one("#menu-secret-input", Input).focus()
+                return
+            if value:
+                profile["api_key"] = value
+        elif stage == "base_url":
+            if not self._valid_endpoint(value):
+                self.query_one("#menu-right-detail", Static).update(
+                    "Enter a complete http:// or https:// base URL.\n\nEsc returns to Configuration."
+                )
+                self.query_one("#menu-text-input", Input).focus()
+                return
+            profile["base_url"] = value.rstrip("/")
+            profile["protocol"] = str(profile.get("protocol") or "openai")
+        elif stage == "account_id":
+            if not re.fullmatch(r"[A-Fa-f0-9]{32}", value):
+                self.query_one("#menu-right-detail", Static).update(
+                    "Enter the 32-character Cloudflare account ID.\n\nEsc returns to Configuration."
+                )
+                self.query_one("#menu-text-input", Input).focus()
+                return
+            profile["base_url"] = PROVIDER_BY_ID["cloudflare"].base_url.format(account_id=value)
+        elif stage == "model_name":
+            if not value:
+                self.query_one("#menu-right-detail", Static).update(
+                    "Enter the model ID used by your endpoint.\n\nEsc returns to Configuration."
+                )
+                self.query_one("#menu-text-input", Input).focus()
+                return
+            await self._save_pending_profile(value)
+            return
+        self._hide_inline_inputs()
+        self._continue_pending_profile()
