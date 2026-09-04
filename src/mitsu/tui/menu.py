@@ -1029,3 +1029,80 @@ class MainMenuScreen(Screen):
             return
         self._hide_inline_inputs()
         self._continue_pending_profile()
+
+    async def _load_pending_models(self) -> None:
+        profile = self.pending_profile
+        if profile is None:
+            return
+        provider_id = str(profile.get("provider_id", ""))
+        provider = PROVIDER_BY_ID[provider_id]
+        self.panel_kind = "model_list"
+        self.input_stage = None
+        self.query_one("#menu-right-title", Static).update("AVAILABLE MODELS")
+        self.query_one("#menu-right-list", Static).update("")
+        self.query_one("#menu-right-detail", Static).update(f"Loading models from {provider.name}…")
+        self._hide_inline_inputs()
+        try:
+            models = await asyncio.to_thread(list_models, profile)
+        except ProviderRequestError as error:
+            self.right_items = [
+                {"label": "[↻] TRY AGAIN", "action": "retry_models", "detail": str(error)}
+            ]
+            self.right_index = 0
+            self.query_one("#menu-right-title", Static).update("MODEL LIST UNAVAILABLE")
+            self._render_right_list()
+            return
+        if not models:
+            self.right_items = [
+                {"label": "[↻] TRY AGAIN", "action": "retry_models", "detail": "No models were returned."}
+            ]
+            self.right_index = 0
+            self.query_one("#menu-right-title", Static).update("NO MODELS FOUND")
+            self._render_right_list()
+            return
+        self.right_items = [
+            {
+                "label": f"[{index}] {model}",
+                "action": "select_model",
+                "model": model,
+                "detail": "Press Enter to use this model.",
+            }
+            for index, model in enumerate(models, start=1)
+        ]
+        self.right_index = next(
+            (index for index, item in enumerate(self.right_items)
+             if item["model"] == profile.get("model")),
+            0,
+        )
+        self._render_right_list()
+        self.query_one("#menu-right-detail", Static).update("Choose a model with ↑ / ↓ and Enter.")
+
+    async def _save_pending_profile(self, model: str) -> None:
+        if self.pending_profile is None:
+            return
+        flow = self.inline_flow
+        if model != str(self.pending_profile.get("model", "")):
+            self.pending_profile["reasoning_enabled"] = False
+            self.pending_profile["reasoning_parameter"] = ""
+            self.pending_profile["reasoning_effort"] = "medium"
+        self.pending_profile["model"] = model
+        try:
+            self.credentials.save_profile(self.pending_profile)
+        except OSError as error:
+            self.query_one("#menu-right-detail", Static).update(f"Could not save provider settings: {error}")
+            return
+        provider = PROVIDER_BY_ID[str(self.pending_profile["provider_id"])].name
+        self.profile = self.credentials.active() or dict(self.pending_profile)
+        self.query_one("#menu-runtime-info", Static).update(_runtime_info(provider, model))
+        self.pending_profile = None
+        self.inline_flow = None
+        self.input_stage = None
+        self.left_index = 1
+        self.active_panel = "right"
+        self._hide_inline_inputs()
+        self._show_left_selection()
+        self.right_index = 0 if flow == "provider" else 1
+        self.right_index = 0 if self.right_index >= len(self.right_items) else self.right_index
+        self.right_items[self.right_index]["detail"] = f"Saved {provider} · {model}."
+        self._render_left_list()
+        self._render_right_list()
