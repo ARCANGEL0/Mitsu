@@ -1106,3 +1106,70 @@ class MainMenuScreen(Screen):
         self.right_items[self.right_index]["detail"] = f"Saved {provider} · {model}."
         self._render_left_list()
         self._render_right_list()
+
+    def _cancel_inline_flow(self) -> None:
+        if not self.inline_flow:
+            return
+        self._hide_inline_inputs()
+        self.pending_profile = None
+        self.inline_flow = None
+        self.input_stage = None
+        self.left_index = 1
+        self.active_panel = "right"
+        self._show_left_selection()
+        self._render_left_list()
+
+    def _hide_inline_inputs(self) -> None:
+        for widget_id in ("#menu-secret-input", "#menu-text-input", "#menu-model-search"):
+            widget = self.query_one(widget_id, Input)
+            widget.display = False
+            widget.disabled = False
+            widget.value = ""
+        if self.is_mounted:
+            target = "#menu-left-list" if self.active_panel == "left" else "#menu-right-list"
+            self.query_one(target, MenuList).focus()
+
+    @staticmethod
+    def _valid_endpoint(value: str) -> bool:
+        try:
+            parsed = urlsplit(value)
+            return (
+                parsed.scheme in {"http", "https"}
+                and parsed.hostname is not None
+                and parsed.username is None
+                and parsed.password is None
+                and not parsed.query
+                and not parsed.fragment
+                and (parsed.port is None or 1 <= parsed.port <= 65535)
+            )
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _has_cloudflare_account(base_url: str) -> bool:
+        return re.search(r"/accounts/[A-Fa-f0-9]{32}/", base_url) is not None
+
+    def _set_menu_companion(self, companion_id: str) -> None:
+        companion = companion_by_id(companion_id)
+        mascot = self.query_one("#menu-companion", MitsuCompanion)
+        if mascot.sprite_path != companion.path:
+            mascot.set_companion(companion.path)
+        mascot.set_state("running_right")
+
+    def _provider_name(self) -> str:
+        provider = str(self.profile.get("provider_id", ""))
+        provider_spec = PROVIDER_BY_ID.get(provider)
+        return provider_spec.name if provider_spec else "Not configured"
+
+    @staticmethod
+    def _session_detail(record: dict) -> str:
+        provider = str(record.get("provider_id", "provider")).replace("_", " ").title()
+        model = record.get("model", "")
+        return f"{provider} · {model}\nUpdated {MainMenuScreen._format_date(record.get('updated_at', ''))}"
+
+    @staticmethod
+    def _format_date(value: str) -> str:
+        try:
+            return datetime.fromisoformat(value).astimezone().strftime("%b %d · %H:%M")
+        except (TypeError, ValueError):
+            return "Recently"
