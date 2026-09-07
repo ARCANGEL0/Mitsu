@@ -969,3 +969,400 @@ class SessionScreen(Screen):
             self._dispatching_prompt = False
         if self._queued_prompts:
             self._schedule_next_queued_prompt()
+
+    def _update_queue_status(self) -> None:
+        if not self.is_mounted:
+            return
+        status = self.query_one("#queue-status", Static)
+        if not self._queued_prompts:
+            status.update("")
+            status.display = False
+            return
+        palette = THEMES.get(self.theme_id, THEMES["ember"])
+        accent = palette["accent"]
+        renderable = Text()
+        renderable.append(f"↳ In queue · {len(self._queued_prompts)}", style=f"bold {accent}")
+        renderable.append(" · Esc interrupts + sends next now", style=palette["ui"]["muted"])
+        preview_limit = max(8, min(72, self.size.width - 16))
+        visible_prompts = self._queued_prompts[:2]
+        for index, prompt in enumerate(visible_prompts, 1):
+            preview = " ".join(prompt.split())
+            if len(preview) > preview_limit:
+                preview = preview[: preview_limit - 1].rstrip() + "…"
+            renderable.append(f"\n  {index} › ", style=palette["ui"]["muted"])
+            renderable.append(preview, style=accent)
+        if len(self._queued_prompts) > len(visible_prompts):
+            remaining = len(self._queued_prompts) - len(visible_prompts)
+            renderable.append(f"\n  +{remaining} more queued", style=palette["ui"]["muted"])
+        status.update(renderable)
+        status.display = True
+
+    def _show_command_panel(
+        self,
+        title: str,
+        content: str,
+        actions: list[tuple[str, str]] | None = None,
+    ) -> None:
+        self._command_panel_active = True
+        self._command_panel_stage = None
+        panel = self.query_one("#command-panel", Vertical)
+        panel.display = True
+        self.query_one("#command-panel-title", Static).update(title.upper())
+        self.query_one("#command-panel-content", Static).update(content)
+        self.query_one("#command-panel-scroll", VerticalScroll).scroll_home(animate=False)
+        self.query_one("#prompt-line", Horizontal).display = False
+        self.query_one("#slash-suggestions", Static).display = False
+        self.query_one("#shortcut-hint", Static).display = False
+        panel_input = self.query_one("#command-panel-input", Input)
+        panel_input.value = ""
+        panel_input.display = False
+
+        choices = actions if actions is not None else [("Close", "close")]
+        options = self.query_one("#command-panel-options", OptionList)
+        options.clear_options()
+        options.set_options([label for label, _action in choices])
+        options.display = bool(choices)
+        self._command_panel_actions = [action for _label, action in choices]
+        hint = "↑ / ↓ choose    Enter select    Esc close" if choices else "Esc close"
+        self.query_one("#command-panel-hint", Static).update(hint)
+        self.query_one("#shortcut-hint", Static).update(hint)
+        if choices:
+            options.highlighted = 0
+            options.focus()
+
+    def _close_command_panel(self) -> None:
+        if not self._command_panel_active:
+            return
+        self._command_panel_active = False
+        self._command_panel_stage = None
+        self._pending_export_path = None
+        self._pending_rewind_checkpoint = None
+        self._command_panel_actions.clear()
+        self.query_one("#command-panel", Vertical).display = False
+        panel_input = self.query_one("#command-panel-input", Input)
+        panel_input.value = ""
+        panel_input.display = False
+        self.query_one("#prompt-line", Horizontal).display = True
+        shortcut = self.query_one("#shortcut-hint", Static)
+        shortcut.update("Enter send    Shift+Enter new line    Shift+Tab mode    Esc stop    PgUp/PgDn history    Ctrl+B sessions")
+        shortcut.display = True
+        self.call_after_refresh(self._focus_prompt)
+        self._schedule_next_queued_prompt()
+
+    def _show_permissions_panel(self, message: str | None = None) -> None:
+        lines = ["APPROVALS SAVED FOR THIS SESSION", ""]
+        lines.extend(f"• Shell command prefix: {prefix}" for prefix in self.trusted_command_prefixes)
+        lines.extend(f"• MCP tool: {tool_name}" for tool_name in self.trusted_tool_names)
+        if not self.trusted_command_prefixes and not self.trusted_tool_names:
+            lines.append("None yet.")
+        if message:
+            lines.extend(["", message])
+        actions = [("Close", "close")]
+        if self.trusted_command_prefixes or self.trusted_tool_names:
+            actions.append(("Clear all saved approvals", "clear"))
+        self._show_command_panel("Session approvals", "\n".join(lines), actions)
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id != "command-panel-options":
+            return
+        index = event.option_index
+        if not 0 <= index < len(self._command_panel_actions):
+            return
+        action = self._command_panel_actions[index]
+        if action == "close":
+            self._close_command_panel()
+        elif action == "clear":
+            self.trusted_command_prefixes.clear()
+            self.trusted_tool_names.clear()
+            self.session["trusted_command_prefixes"] = []
+            self.session["trusted_tool_names"] = []
+            self.sessions.save_session(self.session)
+            self._show_permissions_panel("Saved approvals cleared.")
+        elif action.startswith("level:"):
+            self._apply_level(int(action.partition(":")[2]))
+            self._close_command_panel()
+        elif action == "export:copy":
+            self._copy_session_export()
+        elif action == "export:save":
+            self._begin_export_path()
+        elif action == "export:overwrite":
+            self._write_session_export(self._pending_export_path)
+        elif action == "export:choose-path":
+            self._begin_export_path()
+        elif action.startswith("rewind-point:"):
+            self._show_rewind_choices(int(action.partition(":")[2]))
+        elif action in {"rewind:both", "rewind:conversation", "rewind:code"}:
+            self._show_command_panel("Rewinding", "Restoring the selected conversation and workspace point…", [])
+            self.run_worker(self._apply_rewind(action), name="apply-rewind")
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "command-panel-input" or self._command_panel_stage != "export-path":
+            return
+        path_text = event.value.strip()
+        if not path_text:
+            self._show_export_path_error("Enter a filename or full path first.")
+            return
+        path = Path(path_text).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        active_session_path = self.sessions.path / f"{self.session.get('id', '')}.json"
+        try:
+            same_as_active_session = path.resolve(strict=False) == active_session_path.resolve(strict=False)
+        except (OSError, RuntimeError):
+            same_as_active_session = os.path.abspath(path) == os.path.abspath(active_session_path)
+        if same_as_active_session:
+            self._show_export_path_error("Choose a different path so the active session file stays intact.")
+            return
+        if path.exists() and path.is_dir():
+            self._show_export_path_error("That path is a directory. Choose a filename instead.")
+            return
+        if not path.parent.is_dir():
+            self._show_export_path_error(f"The destination folder does not exist: {path.parent}")
+            return
+        self._pending_export_path = path
+        if path.exists():
+            self._command_panel_stage = "export-overwrite"
+            self._show_command_panel(
+                "File already exists",
+                f"{path}\n\nOverwrite this file?",
+                [("Overwrite", "export:overwrite"), ("Choose another path", "export:choose-path"), ("Cancel", "close")],
+            )
+            return
+        self._write_session_export(path)
+
+    def _show_level_panel(self) -> None:
+        choices = (
+            ("1 · Opsec Kiddy — passive OSINT, tiny footprint", "level:1"),
+            ("2 · Curious mode — follow a few low-impact clues", "level:2"),
+            ("3 · Chill — balanced checks, focused validation", "level:3"),
+            ("4 · LulzSec Intern — broader enumeration, more hypotheses", "level:4"),
+            ("5 · Mista Robot — thorough in-scope investigation", "level:5"),
+        )
+        self._show_command_panel(
+            "Change aggressiveness level for workflow",
+            "Pick how broadly Mitsu investigates. The current mode still controls tool approvals.",
+            list(choices),
+        )
+        options = self.query_one("#command-panel-options", OptionList)
+        options.highlighted = self.level - 1
+
+    def _session_export_text(self) -> str:
+        title = str(self.session.get("title", "Mitsu session")).strip() or "Mitsu session"
+        lines = [
+            f"# {title}",
+            "",
+            f"Exported: {datetime.now().astimezone().isoformat(timespec='seconds')}",
+            f"Session ID: {self.session.get('id', '')}",
+            f"Mode: {self.mode}",
+            f"Model: {self.provider.get('model', '')}",
+            "Targets: " + (", ".join(self.targets) if self.targets else "none saved"),
+            "",
+        ]
+        labels = {
+            "user": "Operator",
+            "assistant": "Mitsu",
+            "tool": "Tool call",
+            "tool-result": "Tool result",
+            "error": "Error",
+            "success": "Mitsu",
+            "system": "System",
+        }
+        for entry in self.session.get("messages", []):
+            if not isinstance(entry, dict):
+                continue
+            role = str(entry.get("role", "assistant"))
+            body = str(entry.get("text", ""))
+            if role == "user" and body.startswith("›  "):
+                body = body[3:]
+            lines.extend((f"## {labels.get(role, role.title())}", "", body, ""))
+        return "\n".join(lines).rstrip() + "\n"
+
+    def _copy_session_export(self) -> None:
+        try:
+            self.app.copy_to_clipboard(self._session_export_text())
+        except (AttributeError, RuntimeError, OSError) as error:
+            self._show_command_panel(
+                "Clipboard unavailable",
+                f"Could not copy this session: {error}",
+                [("Close", "close")],
+            )
+            return
+        self._show_command_panel(
+            "Session copied",
+            "The full visible session history is on your clipboard.",
+            [("Close", "close")],
+        )
+
+    def _begin_export_path(self) -> None:
+        self._command_panel_stage = "export-path"
+        self.query_one("#command-panel-title", Static).update("SAVE SESSION HISTORY")
+        self.query_one("#command-panel-content", Static).update(
+            "Type a filename or full path. Relative paths are saved from the current directory."
+        )
+        self.query_one("#command-panel-options", OptionList).display = False
+        panel_input = self.query_one("#command-panel-input", Input)
+        panel_input.value = ""
+        panel_input.placeholder = "history.md or /home/me/history.md"
+        panel_input.display = True
+        self.query_one("#command-panel-hint", Static).update("Enter save    Esc cancel")
+        self.call_after_refresh(panel_input.focus)
+
+    def _show_export_path_error(self, message: str) -> None:
+        self.query_one("#command-panel-content", Static).update(message)
+        self.call_after_refresh(self.query_one("#command-panel-input", Input).focus)
+
+    def _write_session_export(self, path: Path | None) -> None:
+        if path is None:
+            self._show_export_path_error("Choose a destination path first.")
+            return
+        if path.exists() and path.is_dir():
+            self._show_export_path_error("That path is a directory. Choose a filename instead.")
+            return
+        if not path.parent.is_dir():
+            self._show_export_path_error(f"The destination folder does not exist: {path.parent}")
+            return
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", newline="\n", dir=path.parent, delete=False
+            ) as stream:
+                temporary = Path(stream.name)
+                stream.write(self._session_export_text())
+            os.replace(temporary, path)
+        except OSError as error:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            self._show_export_path_error(f"Could not save the history: {error}")
+            return
+        self._pending_export_path = None
+        self._show_command_panel(
+            "History saved",
+            f"Saved {len(self.session.get('messages', []))} transcript entries to:\n{path}",
+            [("Close", "close")],
+        )
+
+    def _show_export_panel(self) -> None:
+        self._pending_export_path = None
+        self._command_panel_stage = "export"
+        self._show_command_panel(
+            "Export session history",
+            "Copy the full transcript or save it to a file.",
+            [("Copy", "export:copy"), ("Save as file", "export:save"), ("Cancel", "close")],
+        )
+
+    def _show_rewind_panel(self) -> None:
+        points = self.session.get("rewind_points", [])
+        available = [
+            index
+            for index, point in enumerate(points if isinstance(points, list) else [])
+            if isinstance(point, dict) and point.get("conversation_available", True)
+        ]
+        if not available:
+            self._show_command_panel(
+                "Rewind",
+                "No saved conversation points yet. Mitsu records a point after each task finishes or is interrupted.",
+                [("Close", "close")],
+            )
+            return
+        choices = []
+        for index in reversed(available[-12:]):
+            prompt = " ".join(str(points[index].get("prompt", "")).split())
+            preview = prompt[:72] + ("…" if len(prompt) > 72 else "")
+            choices.append((f"Before: {preview}", f"rewind-point:{index}"))
+        choices.append(("Cancel", "close"))
+        self._show_command_panel(
+            "Rewind to a conversation point",
+            "Choose the user request to return to. The rewind choices follow next.",
+            choices,
+        )
+
+    def _show_rewind_choices(self, index: int) -> None:
+        points = self.session.get("rewind_points", [])
+        if not isinstance(points, list) or not 0 <= index < len(points):
+            self._show_rewind_panel()
+            return
+        point = points[index]
+        self._pending_rewind_checkpoint = index
+        code_available = all(
+            isinstance(item, dict)
+            and (
+                not item.get("file_changes_active", True)
+                or item.get("files_available", False)
+            )
+            for item in points[index:]
+        )
+        actions = [("Restore conversation only", "rewind:conversation")]
+        if code_available:
+            actions.extend(
+                [
+                    ("Restore conversation + code", "rewind:both"),
+                    ("Restore code only", "rewind:code"),
+                ]
+            )
+        else:
+            point["code_unavailable_reason"] = (
+                "A workspace snapshot is incomplete or exceeds the rewind size limit."
+            )
+        actions.append(("Cancel", "close"))
+        prompt = " ".join(str(point.get("prompt", "")).split())[:180]
+        detail = f"Before: {prompt}\nCode restore needs complete workspace snapshots; secrets, dependencies, and large files are excluded."
+        if not code_available:
+            detail += "\nCode rewind is unavailable for this point."
+        self._show_command_panel(
+            "Choose what to rewind",
+            detail,
+            actions,
+        )
+
+    async def _apply_rewind(self, action: str) -> None:
+        index = self._pending_rewind_checkpoint
+        points = self.session.get("rewind_points", [])
+        if index is None or not isinstance(points, list) or not 0 <= index < len(points):
+            self._show_rewind_panel()
+            return
+        restore_conversation = action in {"rewind:both", "rewind:conversation"}
+        restore_code = action in {"rewind:both", "rewind:code"}
+        failed_paths: list[str] = []
+        if restore_code:
+            change_sets = [
+                point.get("file_changes", {})
+                for point in reversed(points[index:])
+                if isinstance(point, dict)
+                and point.get("file_changes_active", True)
+                and isinstance(point.get("file_changes"), dict)
+            ]
+            failed_paths = await asyncio.to_thread(
+                apply_undo_changes, Path.cwd(), change_sets
+            )
+            if not failed_paths:
+                for point in points[index:]:
+                    if isinstance(point, dict):
+                        point["file_changes"] = {}
+                        point["files_available"] = False
+                        point["file_changes_active"] = False
+        if restore_conversation:
+            point = points[index]
+            message_count = max(0, int(point.get("messages_before", 0)))
+            chat_count = max(0, int(point.get("chat_history_before", 0)))
+            history_count = point.get("agent_history_before")
+            self.session["messages"] = self.session.get("messages", [])[:message_count]
+            self.session["chat_history"] = self.session.get("chat_history", [])[:chat_count]
+            if isinstance(history_count, int) and not isinstance(history_count, bool):
+                self.agent_history[:] = self.agent_history[:max(0, history_count)]
+            else:
+                self.agent_history = self._history_for_new_protocol()
+            self.session["agent_history"] = self.agent_history
+            for newer in points[index:]:
+                if isinstance(newer, dict):
+                    newer["conversation_available"] = False
+            await self._rebuild_conversation()
+        self.session["rewind_points"] = points
+        self.sessions.save_session(self.session)
+        detail = "Conversation restored." if restore_conversation else "Conversation left as-is."
+        if restore_code:
+            detail += " Workspace code restored." if not failed_paths else f" Some files could not be restored: {', '.join(failed_paths[:8])}"
+        self._pending_rewind_checkpoint = None
+        self._show_command_panel("Rewind complete", detail, [("Close", "close")])
