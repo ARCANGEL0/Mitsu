@@ -461,3 +461,511 @@ class MCPConfigDialog(ModalScreen[bool]):
                 show_line_numbers=False,
             )
             yield Static("Ctrl+S save    Esc close", id="mcp-dialog-hint", markup=False)
+
+    def action_save(self) -> None:
+        editor = self.query_one("#mcp-dialog-editor", TextArea)
+        try:
+            value = json.loads(editor.text)
+        except json.JSONDecodeError as error:
+            self.query_one("#mcp-dialog-detail", Static).update(f"Invalid JSON: {error.msg} at line {error.lineno}.")
+            return
+        if not self._valid_config(value):
+            self.query_one("#mcp-dialog-detail", Static).update(
+                'Use an object with a "servers" list. Each server needs a name and either a command or an http(s) URL.'
+            )
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self.path.parent.chmod(0o700)
+            self.path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            self.path.chmod(0o600)
+        except OSError as error:
+            self.query_one("#mcp-dialog-detail", Static).update(f"Could not save MCP config: {error}")
+            return
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    @staticmethod
+    def _valid_config(value: object) -> bool:
+        if not isinstance(value, dict) or not isinstance(value.get("servers"), list):
+            return False
+        for server in value["servers"]:
+            if not isinstance(server, dict) or not isinstance(server.get("name"), str) or not server["name"].strip():
+                return False
+            command = server.get("command")
+            url = server.get("url")
+            if not isinstance(command, str) or not command.strip():
+                if not isinstance(url, str):
+                    return False
+                try:
+                    parsed = urlsplit(url)
+                except ValueError:
+                    return False
+                if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                    return False
+            args = server.get("args", [])
+            env = server.get("env", {})
+            if not isinstance(args, list) or any(not isinstance(item, str) for item in args):
+                return False
+            if not isinstance(env, dict) or any(not isinstance(key, str) or not isinstance(item, str) for key, item in env.items()):
+                return False
+        return True
+
+
+class AskUserDialog(ModalScreen[str]):
+    BINDINGS = [Binding("escape", "skip", "Skip question", priority=True)]
+
+    def __init__(self, question: str, choices: list[str]) -> None:
+        super().__init__()
+        self.question = question
+        self.choices = choices
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="ask-user-dialog"):
+            yield Static("MITSU HAS A QUESTION", id="ask-user-title", markup=False)
+            yield Static(self.question, id="ask-user-question", markup=False)
+            if self.choices:
+                yield OptionList(*self.choices, id="ask-user-choices", markup=False)
+            yield Input(placeholder="Or type another answer…", id="ask-user-input")
+            yield Static("↑ / ↓ choose    Enter answer    Esc skip", id="ask-user-hint", markup=False)
+
+    def on_mount(self) -> None:
+        if self.choices:
+            self.query_one("#ask-user-choices", OptionList).focus()
+        else:
+            self.query_one("#ask-user-input", Input).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id == "ask-user-choices" and 0 <= event.option_index < len(self.choices):
+            self.dismiss(self.choices[event.option_index])
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "ask-user-input" and event.value.strip():
+            self.dismiss(event.value.strip())
+
+    def action_skip(self) -> None:
+        self.dismiss("[The operator skipped this question.]")
+
+
+class ConversationSearchDialog(ModalScreen[str | None]):
+    BINDINGS = [Binding("escape", "cancel", "Close search", priority=True)]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="conversation-search-dialog"):
+            yield Static("FIND IN THIS SESSION", id="conversation-search-title", markup=False)
+            yield Input(placeholder="Search messages…", id="conversation-search-input")
+            yield Static("Enter find    Esc close", id="conversation-search-hint", markup=False)
+
+    def on_mount(self) -> None:
+        self.query_one("#conversation-search-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "conversation-search-input":
+            self.dismiss(event.value.strip() or None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class ToolApprovalDialog(ModalScreen[str]):
+    BINDINGS = [
+        Binding("escape", "deny", "Deny", priority=True),
+        Binding("n", "deny", "Deny", priority=True),
+        Binding("y", "allow_once", "Allow once", priority=True),
+        Binding("a", "allow_always", "Always allow", priority=True),
+    ]
+
+    def __init__(self, tool_name: str, arguments: dict, mode: str = "Guided") -> None:
+        super().__init__()
+        self.tool_name = tool_name
+        self.arguments = arguments
+        self.mode = mode
+        self.always_label = self._always_label()
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="tool-approval-dialog"):
+            title = "RECON · ACTION REVIEW" if self.mode == "Recon" else "GUIDED · ACTION APPROVAL"
+            yield Static(title, id="tool-approval-title", markup=False)
+            is_shell = self.tool_name.endswith("__bash")
+            action_title = (
+                "Would you like to run this command?"
+                if is_shell
+                else f"Mitsu wants to call {self.tool_name}:"
+            )
+            yield Static(action_title, id="tool-approval-name", markup=False)
+            if is_shell:
+                command = str(self.arguments.get("command", ""))
+                purpose = str(self.arguments.get("purpose", "")).strip()
+                detail = "Environment: local\n\n$ " + command
+                if purpose:
+                    detail += "\n\nReason: " + purpose
+            else:
+                detail = json.dumps(self.arguments, ensure_ascii=False, indent=2, default=str)
+            yield Static(detail[:4000], id="tool-approval-detail", markup=False)
+            options = [
+                "Yes · run once",
+                self.always_label,
+                "No · ask Mitsu to try a different approach",
+            ]
+            yield OptionList(*options, id="tool-approval-options", markup=False)
+            yield Static("↑ / ↓ choose    Enter select    Y once    A always    N / Esc deny", id="tool-approval-hint", markup=False)
+
+    def _always_label(self) -> str:
+        if self.tool_name.endswith("__bash"):
+            command = str(self.arguments.get("command", "")).strip()
+            prefix = command[:64]
+            return f"Yes · always allow commands starting with: {prefix or '(empty command)'}"
+        return f"Yes · always allow this tool: {self.tool_name}"
+
+    def on_mount(self) -> None:
+        self.query_one("#tool-approval-options", OptionList).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id == "tool-approval-options":
+            choices = (
+                "allow_once",
+                "allow_always",
+                "deny",
+            )
+            self.dismiss(choices[event.option_index])
+
+    def action_allow_once(self) -> None:
+        self.dismiss("allow_once")
+
+    def action_allow_always(self) -> None:
+        self.dismiss("allow_always")
+
+    def action_deny(self) -> None:
+        self.dismiss("deny")
+
+
+class SessionScreen(Screen):
+    BINDINGS = [
+        Binding("ctrl+b", "back_to_menu", "Back to menu"),
+        Binding("ctrl+f", "search_chat", "Find in chat", priority=True),
+        Binding("escape", "cancel_agent", "Stop current action", priority=True),
+        Binding("shift+tab", "cycle_mode", "Switch mode", priority=True),
+        Binding("pageup", "scroll_chat_up", "Scroll chat up", priority=True),
+        Binding("pagedown", "scroll_chat_down", "Scroll chat down", priority=True),
+    ]
+
+    def __init__(
+        self,
+        session: dict,
+        provider: dict,
+        companion_path: Path,
+        sessions: SessionStore,
+        theme_id: str = "ember",
+    ) -> None:
+        super().__init__(classes=f"theme-{theme_id}")
+        self.session = session
+        self.provider = provider
+        self.companion_path = companion_path
+        self.companion_id = next(
+            (companion.id for companion in COMPANIONS if companion.path == companion_path),
+            "mitsu",
+        )
+        self.sessions = sessions
+        self.theme_id = theme_id
+        self._remove_legacy_search_entries()
+        self._remove_legacy_level_entries()
+        self._remove_legacy_command_entries()
+        mode = session.get("mode", "Recon")
+        self.mode = {"Investigate": "Recon", "Autopwn": "AutoPwn", "auto-pwn": "AutoPwn"}.get(mode, mode)
+        if self.mode not in {"Recon", "Guided", "AutoPwn"}:
+            self.mode = "Recon"
+        self.targets = session.get("targets", [])
+        self.active_target = session.get("active_target")
+        saved_prefixes = session.get("trusted_command_prefixes", [])
+        self.trusted_command_prefixes = [
+            str(value)
+            for value in (saved_prefixes if isinstance(saved_prefixes, list) else [])
+            if isinstance(value, str) and value
+        ]
+        saved_tools = session.get("trusted_tool_names", [])
+        self.trusted_tool_names = [
+            str(value)
+            for value in (saved_tools if isinstance(saved_tools, list) else [])
+            if isinstance(value, str) and value
+        ]
+        self.findings = self._stored_list("findings")
+        stored_exploits = self._stored_list("exploits")
+        self.exploits = [
+            item for item in stored_exploits
+            if not self._is_unverified_exploit_reference(item)
+        ]
+        if len(self.exploits) != len(stored_exploits):
+            self.session["exploits"] = self.exploits
+            self.sessions.save_session(self.session)
+        self.ips = self._stored_list("ips")
+        self.harvested_data = self._stored_list("harvested_data")
+        self._companion_generation = 0
+        self._last_activity = "Mitsu is Ready to Pwn!"
+        self.level = int(session.get("level", 3)) if str(session.get("level", 3)).isdigit() else 3
+        self.level = min(5, max(1, self.level))
+        self.verbose = bool(session.get("verbose", False))
+        self._message_widgets: list[Static] = []
+        self._search_query = ""
+        self._search_matches: list[int] = []
+        self._search_cursor = -1
+        self._search_mode = False
+        self._command_panel_active = False
+        self._command_panel_actions: list[str] = []
+        self._command_panel_stage: str | None = None
+        self._pending_export_path: Path | None = None
+        self._pending_rewind_checkpoint: int | None = None
+        self._active_command: str | None = None
+        saved_agent_history = session.get("agent_history")
+        if isinstance(saved_agent_history, list):
+            self.agent_history = saved_agent_history
+        else:
+            self.agent_history = history_from_legacy(session.get("chat_history", []))
+        self.session["agent_history"] = self.agent_history
+        self._tool_host = AgentToolHost(
+            Path.cwd(),
+            self._ask_user,
+            self._update_session_intel,
+            search_settings=self.app.credentials.search_engines,
+        )
+        self._tool_connection_task: asyncio.Task | None = None
+        self._tool_reconnect_task: asyncio.Task | None = None
+        self._tool_host_ready = asyncio.Event()
+        self._tool_host_shutdown = asyncio.Event()
+        self._agent_running = False
+        self._agent_task: asyncio.Task | None = None
+        self._queued_prompts: list[str] = []
+        self._queue_drain_scheduled = False
+        self._command_running = False
+        self._dispatching_prompt = False
+        self._thinking_timer = None
+        self._thinking_started: float | None = None
+        self._thinking_frame = 0
+        self._stream_characters = 0
+        self._current_request_characters = 0
+        self._current_input_estimate: int | None = None
+        self._stream_text = ""
+        self._stream_preview: Static | None = None
+        self._exact_usage: dict[str, int] = {}
+        self._retry_state: dict[str, Any] | None = None
+
+    def compose(self) -> ComposeResult:
+        yield SessionTopBar(
+            self.provider,
+            self.mode,
+            len(self.targets),
+            len(self.findings),
+            len(self.ips),
+            self.theme_id,
+            id="session-topbar",
+        )
+        with Horizontal(id="session-center"):
+            with VerticalScroll(id="session-left"):
+                yield MitsuCompanion(sprite_path=self.companion_path, id="session-companion")
+                yield Static("Mitsu is Ready to Pwn!", id="companion-status", markup=False)
+                yield Static("Workspace", classes="session-label", markup=False)
+                yield Static(str(Path.cwd()), id="project-path", markup=False)
+                yield Static("Aggressive level:", classes="session-label", markup=False)
+                yield Static("", id="aggressive-level", markup=False)
+                yield Static("Search", classes="session-label", id="search-label", markup=False)
+                yield Static("", id="search-status", markup=False)
+            with Vertical(id="session-transcript-panel"):
+                with Vertical(id="session-heading"):
+                    yield Static(self._session_title_renderable(), id="session-title", markup=False)
+                    yield Static("Mitsu is Ready to Pwn!", id="session-subtitle", markup=False)
+                with VerticalScroll(id="conversation"):
+                    if self.session.get("messages"):
+                        for entry in self.session["messages"]:
+                            role = entry.get("role", "assistant")
+                            message_widget = Static(
+                                self._message_renderable(entry.get("text", "")),
+                                classes=self._message_class(role),
+                                markup=False,
+                            )
+                            self._message_widgets.append(message_widget)
+                            yield message_widget
+                    else:
+                        yield Static(
+                            self._opening_greeting(),
+                            classes="system-message",
+                            markup=False,
+                        )
+            with VerticalScroll(id="session-right"):
+                yield Static("INTEL", classes="session-section-title", markup=False)
+                yield Static("Summary", classes="session-label", markup=False)
+                yield Static("", id="intel-summary", markup=False)
+                yield Static("Last activity", classes="session-label", markup=False)
+                yield Static(self._last_activity, id="activity-summary", markup=False)
+                yield Static("Authorized scope", classes="session-label", markup=False)
+                yield Static("", id="target-summary", markup=False)
+                yield Static("", id="target-list", markup=False)
+                yield Static("Findings", classes="session-label", markup=False)
+                yield Static("", id="findings-summary", markup=False)
+                yield Static("Exploits", classes="session-label", markup=False)
+                yield Static("", id="exploits-summary", markup=False)
+                yield Static("IPs", classes="session-label", markup=False)
+                yield Static("", id="ips-summary", markup=False)
+                if self.harvested_data:
+                    yield Static("Harvested data", classes="session-label", markup=False)
+                    yield Static("", id="harvested-summary", markup=False)
+        with Vertical(id="composer"):
+            yield Static("", id="thinking-status", markup=False)
+            yield Static("", id="queue-status", markup=False)
+            yield Static("", id="slash-suggestions", markup=False)
+            with Vertical(id="command-panel"):
+                yield Static("", id="command-panel-title", markup=False)
+                with VerticalScroll(id="command-panel-scroll"):
+                    yield Static("", id="command-panel-content", markup=False)
+                yield OptionList(id="command-panel-options", compact=True)
+                command_input = Input(
+                    placeholder="history.md or /home/me/history.md",
+                    id="command-panel-input",
+                )
+                command_input.display = False
+                yield command_input
+                yield Static("", id="command-panel-hint", markup=False)
+            with Horizontal(id="prompt-line"):
+                yield Static("✦", id="prompt-symbol", markup=False)
+                yield PromptTextArea(
+                    "",
+                    placeholder="Ask Mitsu…  (type / for commands)",
+                    id="prompt-input",
+                    show_line_numbers=False,
+                )
+            yield Static("Enter send    Shift+Enter new line    Shift+Tab mode    Esc stop    PgUp/PgDn history    Ctrl+B sessions", id="shortcut-hint", markup=False)
+
+    def on_mount(self) -> None:
+        self._update_context()
+        self._update_search_sidebar()
+        self.call_after_refresh(self._focus_prompt)
+        self.query_one(MitsuCompanion).set_state("idle")
+        self._tool_connection_task = asyncio.create_task(self._connect_tool_host())
+
+    async def on_unmount(self) -> None:
+        if self._thinking_timer:
+            self._thinking_timer.stop()
+            self._thinking_timer = None
+        if self._agent_task and not self._agent_task.done():
+            self._agent_task.cancel()
+            await asyncio.gather(self._agent_task, return_exceptions=True)
+        if self._tool_reconnect_task and not self._tool_reconnect_task.done():
+            self._tool_reconnect_task.cancel()
+            await asyncio.gather(self._tool_reconnect_task, return_exceptions=True)
+        if self._tool_connection_task and not self._tool_connection_task.done():
+            # MCP async contexts must be closed by the same task that entered them.
+            self._tool_host_shutdown.set()
+            if not self._tool_host_ready.is_set():
+                self._tool_connection_task.cancel()
+            await asyncio.gather(self._tool_connection_task, return_exceptions=True)
+
+    async def _connect_tool_host(self) -> None:
+        ready = self._tool_host_ready
+        shutdown = self._tool_host_shutdown
+        host = self._tool_host
+        config_path = self.app.credentials.path.parent / "mcp_servers.json"
+        try:
+            await host.connect(config_path)
+            ready.set()
+            count = len(host.provider_tools(self.mode))
+            status = f"Tools ready · {count} available"
+            if host.connection_messages:
+                status += f" · {len(host.connection_messages)} MCP connection issue(s)"
+            self._set_activity(status)
+            await shutdown.wait()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._set_activity(f"Built-in tools could not start: {type(error).__name__}: {error}")
+        finally:
+            ready.set()
+            try:
+                await host.close()
+            except Exception as error:
+                self._set_activity(f"Tool cleanup issue: {type(error).__name__}: {error}")
+
+    def _focus_prompt(self) -> None:
+        if self.is_mounted and self.app.screen is self:
+            if self._command_panel_active:
+                options = self.query_one("#command-panel-options", OptionList)
+                if options.display:
+                    options.focus()
+                return
+            prompt = self.query_one("#prompt-input", PromptTextArea)
+            prompt.disabled = False
+            prompt.read_only = False
+            prompt.focus()
+            self._schedule_next_queued_prompt()
+
+    def on_prompt_text_area_slash_suggestions_changed(
+        self, event: PromptTextArea.SlashSuggestionsChanged
+    ) -> None:
+        self._render_slash_suggestions(self.query_one("#prompt-input", PromptTextArea))
+
+    def _render_slash_suggestions(self, prompt: PromptTextArea) -> None:
+        panel = self.query_one("#slash-suggestions", Static)
+        if not prompt.slash_suggestions:
+            panel.display = False
+            return
+        palette = THEMES.get(self.theme_id, THEMES["ember"])
+        accent = palette["accent"]
+        renderable = Text()
+        for index, (command, description, _takes_argument) in enumerate(prompt.slash_suggestions):
+            selected = index == prompt.slash_suggestion_index
+            dark_bg = palette["ui"]["background"]
+            marker_style = f"bold {dark_bg} on {accent}" if selected else f"bold {accent}"
+            command_style = f"bold {dark_bg} on {accent}" if selected else palette["code"]["function"]
+            detail_style = f"{dark_bg} on {accent}" if selected else palette["ui"]["muted"]
+            renderable.append("› " if selected else "  ", style=marker_style)
+            renderable.append(command, style=command_style)
+            renderable.append(f"  {description}\n", style=detail_style)
+        renderable.append("↑/↓ move   Tab complete   Enter run", style=palette["ui"]["muted"])
+        panel.update(renderable)
+        panel.display = True
+
+    async def on_prompt_text_area_submitted(self, event: PromptTextArea.Submitted) -> None:
+        prompt = event.prompt.strip()
+        if not prompt:
+            return
+        if self._agent_running or self._command_running or self._dispatching_prompt or self._queued_prompts:
+            self._queued_prompts.append(prompt)
+            self._update_queue_status()
+            if not self._agent_running and not self._command_running:
+                self._schedule_next_queued_prompt()
+            self.call_after_refresh(self._focus_prompt)
+            return
+        await self._dispatch_prompt(prompt)
+        if self.app.screen is self and not self._agent_running:
+            self.call_after_refresh(self._focus_prompt)
+
+    async def _dispatch_prompt(self, prompt: str) -> None:
+        self._dispatching_prompt = True
+        try:
+            if prompt.startswith("/"):
+                # Slash commands are TUI actions; only ordinary prompts enter the agent loop.
+                command = prompt.partition(" ")[0].casefold()
+                self._command_running = True
+                self._active_command = command
+                try:
+                    await self._handle_command(prompt)
+                    if (
+                        self.app.screen is self
+                        and not self._command_panel_active
+                        and command not in {"/search", "/clear", "/level", "/export", "/rewind"}
+                    ):
+                        self._show_command_panel(
+                            f"/{command.removeprefix('/')}",
+                            self._last_activity,
+                        )
+                finally:
+                    self._command_running = False
+                    self._active_command = None
+            else:
+                await self._append_message(f"›  {prompt}", "user", context_text=prompt)
+                self._agent_running = True
+                self._agent_task = asyncio.create_task(self._ask_provider(prompt))
+                self._agent_task.add_done_callback(self._agent_task_finished)
+        finally:
+            self._dispatching_prompt = False
+        if self._queued_prompts:
+            self._schedule_next_queued_prompt()
