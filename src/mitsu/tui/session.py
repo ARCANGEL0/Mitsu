@@ -1366,3 +1366,264 @@ class SessionScreen(Screen):
             detail += " Workspace code restored." if not failed_paths else f" Some files could not be restored: {', '.join(failed_paths[:8])}"
         self._pending_rewind_checkpoint = None
         self._show_command_panel("Rewind complete", detail, [("Close", "close")])
+
+    async def _rebuild_conversation(self) -> None:
+        conversation = self.query_one("#conversation", VerticalScroll)
+        await conversation.remove_children()
+        self._message_widgets.clear()
+        messages = self.session.get("messages", [])
+        if not isinstance(messages, list) or not messages:
+            await conversation.mount(
+                Static(self._opening_greeting(), classes="system-message", markup=False)
+            )
+            return
+        for entry in messages:
+            if not isinstance(entry, dict):
+                continue
+            widget = Static(
+                self._message_renderable(str(entry.get("text", ""))),
+                classes=self._message_class(str(entry.get("role", "assistant"))),
+                markup=False,
+            )
+            self._message_widgets.append(widget)
+            await conversation.mount(widget)
+        conversation.scroll_end(animate=False)
+
+    def _schedule_next_queued_prompt(self) -> None:
+        if (
+            not self._queued_prompts
+            or self._agent_running
+            or self._command_running
+            or self._dispatching_prompt
+            or self._command_panel_active
+            or self._queue_drain_scheduled
+            or not self.is_mounted
+            or self.app.screen is not self
+        ):
+            return
+        self._queue_drain_scheduled = True
+        self.run_worker(self._run_next_queued_prompt(), name="queued-prompt")
+
+    async def _run_next_queued_prompt(self) -> None:
+        self._queue_drain_scheduled = False
+        if (
+            not self.is_mounted
+            or self.app.screen is not self
+            or self._agent_running
+            or self._command_running
+            or self._dispatching_prompt
+            or self._command_panel_active
+            or not self._queued_prompts
+        ):
+            return
+        prompt = self._queued_prompts.pop(0)
+        self._update_queue_status()
+        await self._dispatch_prompt(prompt)
+        if self.app.screen is self and not self._agent_running:
+            self.call_after_refresh(self._focus_prompt)
+
+    async def _ask_provider(self, prompt: str) -> None:
+        self._agent_running = True
+        self._agent_task = asyncio.current_task()
+        history_checkpoint = copy.deepcopy(self.agent_history)
+        messages = self.session.get("messages", [])
+        messages_before = len(messages) if isinstance(messages, list) else 0
+        if isinstance(messages, list) and messages:
+            last_message = messages[-1]
+            if (
+                isinstance(last_message, dict)
+                and last_message.get("role") == "user"
+                and str(last_message.get("text", "")).removeprefix("›  ") == prompt
+            ):
+                messages_before -= 1
+        chat_history = copy.deepcopy(self.session.get("chat_history", []))
+        chat_history_before = len(chat_history) if isinstance(chat_history, list) else 0
+        if isinstance(chat_history, list) and chat_history:
+            last_chat_entry = chat_history[-1]
+            if (
+                isinstance(last_chat_entry, dict)
+                and last_chat_entry.get("role") == "user"
+                and last_chat_entry.get("content") == prompt
+            ):
+                chat_history_before -= 1
+        agent_history_before = len(history_checkpoint)
+        workspace_root = Path.cwd().resolve()
+        workspace_before: dict[str, bytes] | None = None
+        prompt_input = self.query_one("#prompt-input", PromptTextArea)
+        provider_spec = PROVIDER_BY_ID.get(str(self.provider.get("provider_id", "")))
+        provider_name = provider_spec.name if provider_spec else "your configured provider"
+        self._set_activity(f"Preparing a request for {provider_name}…")
+        self._set_companion("thinking", "Working")
+        system_prompt = self._system_prompt()
+        self._start_thinking(prompt, system_prompt)
+
+        def save_history() -> None:
+            self.session["agent_history"] = self.agent_history
+            self.sessions.save_session(self.session)
+
+        def restore_history(note: str) -> None:
+            self.agent_history[:] = history_checkpoint
+            self.agent_history.append({"role": "user", "content": prompt})
+            self.agent_history.append({"role": "assistant", "content": note})
+            save_history()
+
+        was_cancelled = False
+        try:
+            workspace_before = await asyncio.to_thread(capture_workspace, workspace_root)
+            if self._tool_connection_task:
+                if self._tool_reconnect_task and not self._tool_reconnect_task.done():
+                    await self._tool_reconnect_task
+                await self._tool_host_ready.wait()
+            self._set_activity(f"Sending your message to {provider_name}…")
+            async for event in run_agent_turn(
+                self.provider,
+                system_prompt,
+                self.agent_history,
+                prompt,
+                self._tool_host,
+                self.mode,
+                self._approve_tool,
+                save_history,
+            ):
+                if event.kind == "assistant_turn":
+                    text = str(event.data.get("text", "")).strip()
+                    await self._remove_stream_preview()
+                    self._current_request_characters = 0
+                    if text:
+                        await self._append_message(text, "assistant", context_text=text)
+                    elif not event.data.get("tool_calls"):
+                        response_info = event.data.get("response_info", {})
+                        finish_reason = (
+                            str(response_info.get("finish_reason", ""))
+                            if isinstance(response_info, dict)
+                            else ""
+                        )
+                        if isinstance(response_info, dict) and response_info.get("reasoning_only"):
+                            message = (
+                                "The provider sent internal reasoning but no reply or tool call. "
+                                "That private reasoning was not shown. Try again or select a model "
+                                "with working tool-call support."
+                            )
+                        elif finish_reason == "length":
+                            message = "The provider stopped before returning a reply or tool call (output limit reached). Try again."
+                        elif finish_reason:
+                            message = f"The provider finished without a reply or tool call (finish reason: {finish_reason}). Try again or choose another model."
+                        else:
+                            message = (
+                                "The provider returned no reply or tool call. Try again or choose "
+                                "another model. Mitsu kept the conversation history valid."
+                            )
+                        self._set_activity("The provider returned an empty response.")
+                        await self._append_message(
+                            message,
+                            "error",
+                        )
+                elif event.kind == "delta":
+                    await self._show_stream_delta(str(event.data.get("text", "")))
+                elif event.kind == "usage":
+                    self._record_usage(event.data.get("usage", {}))
+                elif event.kind == "api_retry":
+                    await self._remove_stream_preview()
+                    self._stream_characters = max(
+                        0, self._stream_characters - self._current_request_characters
+                    )
+                    self._current_request_characters = 0
+                    delay = max(1, int(event.data.get("delay", 3)))
+                    self._retry_state = {
+                        "attempt": int(event.data.get("attempt", 1)),
+                        "maximum": int(event.data.get("max_attempts", 10)),
+                        "deadline": time.monotonic() + delay,
+                    }
+                    self._animate_thinking()
+                elif event.kind == "api_retrying":
+                    self._retry_state = None
+                    self._animate_thinking()
+                elif event.kind == "tool_started":
+                    name = str(event.data.get("name", "tool"))
+                    arguments = event.data.get("arguments", {})
+                    self._set_activity(f"Running {name}…")
+                    self._set_companion("running", "Running a tool")
+                    await self._append_message(self._format_tool_call(name, arguments), "tool")
+                elif event.kind == "tool_finished":
+                    name = str(event.data.get("name", "tool"))
+                    result = str(event.data.get("result", ""))
+                    if len(result) > 5000:
+                        result = result[:5000] + "\n… shown output truncated"
+                    self._current_input_estimate = max(
+                        1,
+                        len(
+                            json.dumps(
+                                [system_prompt, *self.agent_history],
+                                ensure_ascii=False,
+                                default=str,
+                            )
+                        )
+                        // 4,
+                    )
+                    failed = bool(event.data.get("is_error"))
+                    self._set_activity(f"{name} {'failed' if failed else 'finished'}.")
+                    await self._append_message(result, "tool-result")
+                    if failed:
+                        self._set_companion("error", "Tool failed", reset_after=1.5)
+                    elif name.endswith(("record_exploit", "remove_exploit")):
+                        self._set_companion("success", "Intel updated!", reset_after=1.5)
+                    else:
+                        self._set_companion("thinking", "Reviewing results")
+                    self._animate_thinking()
+                elif event.kind == "limit":
+                    message = str(event.data.get("message", "Tool loop stopped."))
+                    self._set_activity(message)
+                    await self._append_message(message, "system")
+                elif event.kind == "done":
+                    self._set_activity("Mitsu is Ready to Pwn!")
+                    self._set_companion("success", "Mitsu is Ready to Pwn!", reset_after=1.8)
+        except asyncio.CancelledError:
+            was_cancelled = True
+            await self._remove_stream_preview()
+            restore_history(
+                "This operator request was interrupted before completion. Keep it in context; resume only if the operator asks to continue."
+            )
+            self._set_activity("Stopped by operator.")
+            self._set_companion("idle", "Mitsu is Ready to Pwn!")
+            await self._append_message("Stopped the current action.", "system")
+        except ProviderRequestError as error:
+            await self._remove_stream_preview()
+            restore_history(
+                "The provider failed before this request finished. Keep the request in context; resume only if the operator asks to continue."
+            )
+            self._set_activity("The provider returned an error.")
+            self._set_companion("error", "Provider error", reset_after=2.2)
+            status = self.query_one("#thinking-status", Static)
+            status.update(Text("⚠ API Error (｡•́︿•̀｡) · retries exhausted", style="bold #f07882"))
+            await self._append_message(str(error), "error")
+        except Exception as error:
+            await self._remove_stream_preview()
+            restore_history(
+                "Mitsu stopped before this request finished. Keep the request in context; resume only if the operator asks to continue."
+            )
+            self._set_activity("The agent stopped after an internal error.")
+            self._set_companion("error", "Agent error", reset_after=2.2)
+            await self._append_message(f"Agent error: {type(error).__name__}: {error}", "error")
+        finally:
+            try:
+                await self._record_rewind_checkpoint(
+                    prompt,
+                    messages_before,
+                    chat_history_before,
+                    agent_history_before,
+                    workspace_root,
+                    workspace_before,
+                )
+            except Exception as error:
+                self._set_activity(f"Could not save a rewind point: {type(error).__name__}")
+            if not was_cancelled and self._thinking_started is not None:
+                visible_for = time.monotonic() - self._thinking_started
+                if visible_for < 0.28:
+                    await asyncio.sleep(0.28 - visible_for)
+            self._agent_running = False
+            self._agent_task = None
+            self._stop_thinking()
+            if self.is_mounted:
+                prompt_input.focus()
+                self._update_queue_status()
+                self._schedule_next_queued_prompt()
