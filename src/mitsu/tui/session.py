@@ -1627,3 +1627,204 @@ class SessionScreen(Screen):
                 prompt_input.focus()
                 self._update_queue_status()
                 self._schedule_next_queued_prompt()
+
+    async def _record_rewind_checkpoint(
+        self,
+        prompt: str,
+        messages_before: int,
+        chat_history_before: int,
+        agent_history_before: int,
+        workspace_root: Path,
+        workspace_before: dict[str, bytes] | None,
+    ) -> None:
+        workspace_after = await asyncio.to_thread(capture_workspace, workspace_root)
+        changes = diff_workspace(workspace_before, workspace_after)
+        points = self.session.get("rewind_points", [])
+        if not isinstance(points, list):
+            points = []
+        points.append(
+            {
+                "prompt": prompt,
+                "messages_before": messages_before,
+                "chat_history_before": chat_history_before,
+                "agent_history_before": agent_history_before,
+                "conversation_available": True,
+                "files_available": changes is not None,
+                "file_changes_active": True,
+                "file_changes": changes or {},
+            }
+        )
+        points[:] = points[-20:]
+        saved_delta_size = sum(
+            len(value)
+            for point in points
+            if isinstance(point, dict) and isinstance(point.get("file_changes"), dict)
+            for value in point["file_changes"].values()
+            if isinstance(value, str)
+        )
+        for point in points:
+            if saved_delta_size <= 12 * 1024 * 1024:
+                break
+            if isinstance(point, dict) and point.get("file_changes_active", True):
+                delta = point.get("file_changes", {})
+                saved_delta_size -= sum(
+                    len(value) for value in delta.values() if isinstance(value, str)
+                )
+                point["file_changes"] = {}
+                point["files_available"] = False
+        self.session["rewind_points"] = points
+        self.sessions.save_session(self.session)
+
+    def _start_thinking(self, prompt: str = "", system_prompt: str = "") -> None:
+        self._thinking_started = time.monotonic()
+        self._thinking_frame = 0
+        self._stream_characters = 0
+        self._current_request_characters = 0
+        self._stream_characters_at_usage = 0
+        self._stream_text = ""
+        self._exact_usage = {}
+        self._retry_state = None
+        serialized_context = json.dumps(
+            [system_prompt, *self.agent_history, {"role": "user", "content": prompt}],
+            ensure_ascii=False,
+            default=str,
+        )
+        self._current_input_estimate = max(1, len(serialized_context) // 4)
+        status = self.query_one("#thinking-status", Static)
+        status.display = True
+        self._animate_thinking()
+        self._thinking_timer = self.set_interval(0.18, self._animate_thinking)
+
+    def _stop_thinking(self) -> None:
+        if self._thinking_timer:
+            self._thinking_timer.stop()
+            self._thinking_timer = None
+        self._thinking_started = None
+        if self.is_mounted:
+            self.query_one("#thinking-status", Static).display = False
+
+    def _animate_thinking(self) -> None:
+        if not self.is_mounted or not self._agent_running or self._thinking_started is None:
+            return
+        frames = ("✧", "✦", "✧", "♡")
+        phrases = (
+            "hunting for clues",
+            "checking the tool results",
+            "connecting the dots",
+            "tidying up the findings",
+        )
+        elapsed = max(0, int(time.monotonic() - self._thinking_started))
+        minutes, seconds = divmod(elapsed, 60)
+        elapsed_text = f"{minutes}:{seconds:02d}" if minutes else f"{seconds}s"
+        if self._retry_state:
+            remaining = max(0, int(self._retry_state["deadline"] - time.monotonic() + 0.999))
+            retry_text = Text()
+            symbol = ("⚠", "✖", "☄", "✧")[(self._retry_state["attempt"] - 1) % 4]
+            retry_text.append(
+                f"{symbol} API Error (｡•́︿•̀｡)  {self._retry_state['attempt']}/{self._retry_state['maximum']}  ·  Retrying in {remaining}s…",
+                style="bold #f07882",
+            )
+            self.query_one("#thinking-status", Static).update(retry_text)
+            return
+        input_estimate = self._current_input_estimate
+        output_estimate = self._stream_characters // 4
+        input_text = f"~{input_estimate} est" if input_estimate is not None else "—"
+        count = f"  ·  in {input_text} · out ~{output_estimate} est"
+        if self._exact_usage:
+            input_tokens = self._exact_usage.get("prompt_tokens")
+            output_tokens = self._exact_usage.get("completion_tokens")
+            if input_tokens is not None or output_tokens is not None:
+                input_label = str(input_tokens) if input_tokens is not None else "—"
+                output_label = str(output_tokens) if output_tokens is not None else "—"
+                count = f"  ·  in {input_label} · out {output_label} tok"
+        frame = self._thinking_frame
+        self._thinking_frame += 1
+        accent = THEMES.get(self.theme_id, THEMES["ember"])["accent"]
+        renderable = Text()
+        renderable.append(
+            f"{frames[frame % len(frames)]}  Mitsu’s {phrases[(frame // 4) % len(phrases)]}…",
+            style=f"bold {accent}",
+        )
+        renderable.append(
+            f"  {elapsed_text}{count}",
+            style=THEMES.get(self.theme_id, THEMES["ember"])["ui"]["muted"],
+        )
+        self.query_one("#thinking-status", Static).update(renderable)
+
+    async def _show_stream_delta(self, text: str) -> None:
+        if not text:
+            return
+        self._stream_text += text
+        self._stream_characters += len(text)
+        self._current_request_characters += len(text)
+        self._set_activity("Receiving Mitsu’s response…")
+        if self._stream_preview is None:
+            self._stream_preview = Static(
+                self._message_renderable(self._stream_text),
+                classes="assistant-message streaming-message",
+                markup=False,
+            )
+            await self.query_one("#conversation", VerticalScroll).mount(self._stream_preview)
+        else:
+            self._stream_preview.update(self._message_renderable(self._stream_text))
+        self.query_one("#conversation", VerticalScroll).scroll_end(animate=False)
+        self._animate_thinking()
+
+    def _agent_task_finished(self, task: asyncio.Task) -> None:
+        if self._agent_task is task:
+            self._agent_task = None
+            self._agent_running = False
+            self._stop_thinking()
+            if self.is_mounted:
+                prompt = self.query_one("#prompt-input", PromptTextArea)
+                prompt.focus()
+                self._update_queue_status()
+                self._schedule_next_queued_prompt()
+
+    async def _remove_stream_preview(self) -> None:
+        preview = self._stream_preview
+        self._stream_preview = None
+        self._stream_text = ""
+        if preview is not None and preview.is_mounted:
+            await preview.remove()
+
+    def _record_usage(self, usage: object) -> None:
+        if not isinstance(usage, dict):
+            return
+        input_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
+        output_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
+        if isinstance(input_tokens, int) and not isinstance(input_tokens, bool):
+            self._exact_usage["prompt_tokens"] = self._exact_usage.get("prompt_tokens", 0) + input_tokens
+        if isinstance(output_tokens, int) and not isinstance(output_tokens, bool):
+            self._exact_usage["completion_tokens"] = self._exact_usage.get("completion_tokens", 0) + output_tokens
+        self._stream_characters_at_usage = self._stream_characters
+        self._animate_thinking()
+
+    async def _ask_user(self, question: str, choices: list[str]) -> str:
+        answer = await self._await_modal(AskUserDialog(question, choices))
+        return str(answer)
+
+    async def _approve_tool(self, name: str, arguments: dict) -> bool:
+        if name.endswith("__bash"):
+            command = str(arguments.get("command", "")).strip()
+            if any(command.startswith(prefix) for prefix in self.trusted_command_prefixes):
+                return True
+        elif name in self.trusted_tool_names:
+            return True
+
+        decision = await self._await_modal(ToolApprovalDialog(name, arguments, self.mode))
+        if decision == "allow_always":
+            if name.endswith("__bash"):
+                prefix = str(arguments.get("command", "")).strip()[:64]
+                if not prefix:
+                    return False
+                if prefix not in self.trusted_command_prefixes:
+                    self.trusted_command_prefixes.append(prefix)
+                self.session["trusted_command_prefixes"] = self.trusted_command_prefixes
+            else:
+                if name not in self.trusted_tool_names:
+                    self.trusted_tool_names.append(name)
+                self.session["trusted_tool_names"] = self.trusted_tool_names
+            self.sessions.save_session(self.session)
+            return True
+        return decision == "allow_once"
