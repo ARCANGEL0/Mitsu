@@ -1828,3 +1828,462 @@ class SessionScreen(Screen):
             self.sessions.save_session(self.session)
             return True
         return decision == "allow_once"
+
+    async def _permissions_command(self, argument: str) -> None:
+        if not argument:
+            self._show_permissions_panel()
+            return
+        if argument.casefold() in {"clear", "reset", "revoke"}:
+            self.trusted_command_prefixes.clear()
+            self.trusted_tool_names.clear()
+            self.session["trusted_command_prefixes"] = []
+            self.session["trusted_tool_names"] = []
+            self.sessions.save_session(self.session)
+            await self._append_message("Saved approvals cleared for this session.", "success")
+            return
+        await self._append_message("Use /permissions to review saved approvals.", "system")
+
+    async def _update_session_intel(self, action: str, values: dict) -> str:
+        if action == "record_exploit":
+            title = str(values.get("title", "")).strip()[:180]
+            target = str(values.get("target", "")).strip()[:255]
+            evidence = str(values.get("evidence", "")).strip()[:1000]
+            status = str(values.get("status", "candidate")).casefold()
+            if not title or not target or not evidence:
+                return "Exploit not recorded: title, target, and evidence are required."
+            if status not in {"candidate", "confirmed"}:
+                return "Exploit not recorded: status must be candidate or confirmed."
+            line = f"[{status.upper()}] {title} · {target} — {evidence}"
+            match_index = next(
+                (
+                    index
+                    for index, item in enumerate(self.exploits)
+                    if title.casefold() in str(item).casefold()
+                    and target.casefold() in str(item).casefold()
+                ),
+                None,
+            )
+            if match_index is None:
+                self.exploits.append(line)
+                outcome = "Recorded"
+            else:
+                self.exploits[match_index] = line
+                outcome = "Updated"
+            self.session["exploits"] = self.exploits
+            self.sessions.save_session(self.session)
+            self._update_context()
+            self._set_activity(f"{outcome} {status} exploit intel for {target}.")
+            return f"{outcome} exploit intel: {line}"
+
+        if action == "remove_exploit":
+            title = str(values.get("title", "")).strip()
+            target = str(values.get("target", "")).strip()
+            reason = str(values.get("reason", "")).strip()
+            if not title or not reason:
+                return "Exploit was not removed: title and evidence-based reason are required."
+            match = next(
+                (
+                    item
+                    for item in self.exploits
+                    if title.casefold() in str(item).casefold()
+                    and (not target or target.casefold() in str(item).casefold())
+                ),
+                None,
+            )
+            if match is None:
+                return f"No recorded exploit matched {title!r}; Intel was unchanged."
+            self.exploits.remove(match)
+            self.session["exploits"] = self.exploits
+            self.sessions.save_session(self.session)
+            self._update_context()
+            self._set_activity(f"Removed exploit intel for {title}: {reason[:120]}")
+            return f"Removed {match!s} from Exploits. Reason: {reason}"
+
+        return f"Unknown session Intel operation: {action}."
+
+    async def _await_modal(self, screen: ModalScreen) -> object:
+        answer = asyncio.get_running_loop().create_future()
+
+        def dismissed(value: object) -> None:
+            if not answer.done():
+                answer.set_result(value)
+
+        self.app.push_screen(screen, dismissed)
+        try:
+            return await answer
+        except asyncio.CancelledError:
+            if self.app.screen is screen:
+                self.app.pop_screen()
+            raise
+
+    @staticmethod
+    def _format_tool_call(name: str, arguments: object) -> str:
+        if name.endswith("__bash") and isinstance(arguments, dict):
+            command = str(arguments.get("command", ""))
+            purpose = str(arguments.get("purpose", ""))
+            return f"$ {command}" + (f"\n{purpose}" if purpose else "")
+        if isinstance(arguments, dict):
+            tool = name.rsplit("__", 1)[-1].replace("_", " ")
+            if tool == "read file":
+                return f"Reading {arguments.get('path', 'file')}"
+            if tool == "list files":
+                return f"Listing {arguments.get('path', '.')}"
+            if tool == "web search":
+                return f"Searching the web · {arguments.get('query', '')}"
+            if tool == "system info":
+                return "Checking system information"
+        try:
+            serialized = json.dumps(arguments, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            serialized = str(arguments)
+        if len(serialized) > 1200:
+            serialized = serialized[:1200] + "…"
+        return f"↳ {name} {serialized}"
+
+    async def _handle_command(self, prompt: str) -> None:
+        command, _, argument = prompt.partition(" ")
+        command = command.lower()
+        argument = argument.strip()
+        if command in {"/menu", "/exit", "/quit"}:
+            await self.app.open_menu()
+            return
+        if command == "/config":
+            self.app.push_screen(
+                ConfigurationDialog(),
+                self._configuration_dialog_closed,
+            )
+            return
+        if command == "/connect":
+            self.app.push_screen(ProviderDialog(self.app.credentials, "connect"), self._provider_dialog_closed)
+            return
+        if command == "/model":
+            self.app.push_screen(ProviderDialog(self.app.credentials, "model"), self._provider_dialog_closed)
+            return
+        if command == "/theme":
+            if argument:
+                normalized = argument.casefold().strip()
+                theme_id = next(
+                    (
+                        candidate_id
+                        for candidate_id, palette in THEMES.items()
+                        if normalized in {candidate_id.casefold(), palette["name"].casefold()}
+                    ),
+                    None,
+                )
+                if theme_id is None:
+                    await self._fail(
+                        "Choose a theme with /theme, or use one of: " + ", ".join(THEMES),
+                        "Theme not found",
+                    )
+                else:
+                    self._apply_session_theme(theme_id)
+                    self._set_activity(f"Theme changed to {THEMES[theme_id]['name']}.")
+                return
+            self.app.push_screen(SessionThemeDialog(self.theme_id), self._theme_dialog_closed)
+            return
+        if command == "/pet":
+            if argument:
+                normalized = " ".join(argument.casefold().split())
+                selected = next(
+                    (
+                        companion
+                        for companion in COMPANIONS
+                        if normalized in {companion.id.casefold(), companion.name.casefold()}
+                    ),
+                    None,
+                )
+                if selected is None:
+                    self._set_activity("Pick a pet with /pet, or use a listed companion name.")
+                else:
+                    self._apply_companion(selected.id)
+                return
+            self.app.push_screen(CompanionDialog(self.companion_id), self._companion_dialog_closed)
+            return
+        if command == "/new":
+            await self.app.open_session()
+            return
+        if command == "/rename":
+            if argument:
+                self._rename_session(argument)
+            else:
+                self.app.push_screen(
+                    SessionRenameDialog(str(self.session.get("title", "New session"))),
+                    self._rename_dialog_closed,
+                )
+            return
+        if command == "/clear":
+            self.session["messages"] = []
+            self.session["chat_history"] = []
+            self.session["rewind_points"] = []
+            self.agent_history.clear()
+            self.session["agent_history"] = self.agent_history
+            self._message_widgets.clear()
+            self.sessions.save_session(self.session)
+            await self.query_one("#conversation", VerticalScroll).remove_children()
+            await self._append_message(
+                self._opening_greeting(),
+                "system",
+            )
+            self._set_activity("Conversation cleared.")
+            self._set_companion("idle", "Mitsu is Ready to Pwn!")
+            return
+        if command == "/help":
+            await self._append_message(
+                "Commands: /connect, /model, /config, /theme, /mcp, /new, /rename [name], /target [add|select|remove|clear|list], "
+                "/level, /pet, /export, /rewind, /reasoning [on|off|low|medium|high], /verbose, /permissions [clear], /search <text>, /report, /map, "
+                "/vulnsearch <criteria>, /mode [recon|guided|autopwn], /delete-session, /clear, /menu. "
+                "Shift+Tab cycles modes. Ask naturally to inspect files, search the web, or run a shell command. "
+                "Ctrl+F opens transcript search; press it again for the next match. Esc exits search mode. "
+                "Recon favors passive and low-impact checks; Guided reviews shell and external MCP tools; AutoPwn runs autonomously within scope."
+            )
+            return
+        if command == "/mcp":
+            path = self.app.credentials.path.parent / "mcp_servers.json"
+            self.app.push_screen(MCPConfigDialog(path), self._mcp_dialog_closed)
+            return
+        if command == "/setup":
+            await self.app.open_setup()
+            return
+        if command == "/mode":
+            await self._set_mode(argument)
+            return
+        if command == "/permissions":
+            if not argument:
+                self._show_permissions_panel()
+                return
+            await self._permissions_command(argument)
+            return
+        if command in {"/target", "/targets", "/scope"}:
+            await self._target_command(argument)
+            return
+        if command == "/level":
+            await self._level_command(argument)
+            return
+        if command == "/export":
+            self._show_export_panel()
+            return
+        if command == "/rewind":
+            self._show_rewind_panel()
+            return
+        if command == "/verbose":
+            await self._verbose_command(argument)
+            return
+        if command == "/reasoning":
+            await self._reasoning_command(argument)
+            return
+        if command == "/search":
+            if argument:
+                self._search_command(argument)
+            else:
+                self._open_search_dialog()
+            return
+        if command == "/delete-session":
+            self.app.push_screen(
+                DeleteSessionDialog(
+                    session_title=str(self.session.get("title", "this session"))
+                ),
+                self._delete_session_confirmation_closed,
+            )
+            return
+        if command == "/report":
+            await self._report_command()
+            return
+        if command == "/map":
+            await self._map_command()
+            return
+        if command == "/vulnsearch":
+            await self._vulnsearch_command(argument)
+            return
+        if command in {"/scan", "/recon", "/nmap", "/scrape"}:
+            await self._tool_command(command.lstrip("/"), argument)
+            return
+        await self._fail(f"Unknown command: {command}. Use /help for the command list.", "Unknown command")
+
+    def _delete_session_confirmation_closed(self, confirmed: bool) -> None:
+        if not confirmed:
+            self._set_activity("Session deletion canceled.")
+            self.call_after_refresh(self._focus_prompt)
+            return
+        self.app.run_worker(self._delete_current_session(), name="delete-current-session")
+
+    async def _delete_current_session(self) -> None:
+        session_id = str(self.session.get("id", ""))
+        try:
+            deleted = self.sessions.delete_session(session_id)
+        except OSError as error:
+            await self._fail(f"Could not delete this session: {error}", "Delete failed")
+            self.call_after_refresh(self._focus_prompt)
+            return
+        if not deleted:
+            await self._fail("This session could not be found on disk.", "Delete failed")
+            self.call_after_refresh(self._focus_prompt)
+            return
+        await self.app.open_menu()
+
+    async def _target_command(self, argument: str) -> None:
+        action, _, value = argument.partition(" ")
+        action = action.lower()
+        value = value.strip()
+        if action not in {"add", "set", "select", "remove", "clear", "list"} and action:
+            value = argument.strip()
+            action = "set"
+        if action == "set":
+            if not self._valid_target(value):
+                await self._fail("Enter a hostname, IP, CIDR, or http(s) URL without spaces.", "Invalid target")
+                return
+            if value not in self.targets:
+                self.targets.append(value)
+            self.active_target = value
+            self._persist_scope()
+            self._set_activity(f"Main target set to {value}.")
+            await self._append_message(f"Main target set to {value}; it is now in this session’s authorized scope.", "success")
+            return
+        if action == "add":
+            if not self._valid_target(value):
+                await self._fail("Enter a hostname, IP, CIDR, or http(s) URL without spaces.", "Invalid target")
+                return
+            if value in self.targets:
+                await self._append_message(f"{value} is already in the authorized scope.")
+                return
+            self.targets.append(value)
+            self.active_target = value
+            self._persist_scope()
+            self._set_activity(f"Added {value} to scope.")
+            self._set_companion("success", "Scope updated", reset_after=1.8)
+            await self._append_message(f"Added {value} to this session’s authorized scope.", "success")
+            return
+        if action == "select":
+            if value not in self.targets:
+                await self._fail(f"Target is not in scope: {value or '(empty)'}", "Target not found")
+                return
+            self.active_target = value
+            self._persist_scope()
+            self._set_activity(f"Selected {value}.")
+            self._set_companion("success", "Target selected", reset_after=1.8)
+            await self._append_message(f"Selected {value} as the active target.", "success")
+            return
+        if action == "remove":
+            if value not in self.targets:
+                await self._fail(f"Target is not in scope: {value or '(empty)'}", "Target not found")
+                return
+            self.targets.remove(value)
+            if self.active_target == value:
+                self.active_target = self.targets[-1] if self.targets else None
+            self._persist_scope()
+            self._set_activity(f"Removed {value} from scope.")
+            self._set_companion("success", "Scope updated", reset_after=1.8)
+            await self._append_message(f"Removed {value} from this session’s authorized scope.", "success")
+            return
+        if action == "clear":
+            self.targets.clear()
+            self.active_target = None
+            self._persist_scope()
+            self._set_activity("Target scope cleared.")
+            self._set_companion("success", "Scope cleared", reset_after=1.8)
+            await self._append_message("Cleared the authorized target list.", "success")
+            return
+        if action in {"list", ""}:
+            lines = "\n".join(
+                f"{'›' if target == self.active_target else ' '} {target}"
+                for target in self.targets
+            ) or "No targets in scope."
+            await self._append_message(f"Authorized targets:\n{lines}")
+            return
+        await self._fail("Use /target <domain-or-IP>, add, select, remove, clear, or list.", "Invalid target command")
+
+    async def _level_command(self, argument: str) -> None:
+        if not argument:
+            self._show_level_panel()
+            return
+        try:
+            level = int(argument)
+        except ValueError:
+            level = 0
+        if level not in range(1, 6):
+            self._show_level_panel()
+            return
+        self._apply_level(level)
+
+    def _apply_level(self, level: int) -> None:
+        self.level = level
+        self.session["level"] = level
+        self.sessions.save_session(self.session)
+        self._update_context()
+        label = LEVEL_NAMES[level]
+        self._set_activity(f"Aggressive level set to {level}/5 · {label}.")
+
+    def _companion_dialog_closed(self, companion_id: str | None) -> None:
+        if companion_id:
+            self._apply_companion(companion_id)
+        self.call_after_refresh(self._focus_prompt)
+
+    def _apply_companion(self, companion_id: str) -> None:
+        companion = companion_by_id(companion_id)
+        self.companion_id = companion.id
+        self.companion_path = companion.path
+        self.app.preferences.save({"companion": companion.id})
+        mascot = self.query_one("#session-companion", MitsuCompanion)
+        mascot.set_companion(companion.path)
+        mascot.set_state("idle")
+        self._set_activity(f"{companion.name} is on companion duty! ✧")
+
+    async def _verbose_command(self, argument: str) -> None:
+        choice = argument.casefold()
+        if choice in {"on", "true", "1"}:
+            self.verbose = True
+        elif choice in {"off", "false", "0"}:
+            self.verbose = False
+        elif not choice or choice == "toggle":
+            self.verbose = not self.verbose
+        else:
+            await self._fail("Use /verbose, /verbose on, or /verbose off.", "Invalid verbose setting")
+            return
+        self.session["verbose"] = self.verbose
+        self.sessions.save_session(self.session)
+        state = "on" if self.verbose else "off"
+        self._set_activity(f"Expanded explanations {state}.")
+        await self._append_message(f"Expanded explanations are {state}. Private internal reasoning is not displayed.", "success")
+
+    async def _reasoning_command(self, argument: str) -> None:
+        choice = argument.casefold()
+        if choice not in {"", "status", "check", "on", "off", "enable", "enabled", "disable", "disabled", "low", "medium", "high"}:
+            await self._fail("Use /reasoning, /reasoning on|off, or /reasoning low|medium|high.", "Invalid reasoning setting")
+            return
+        effort = choice if choice in {"low", "medium", "high"} else "medium"
+        if choice in {"off", "disable", "disabled"}:
+            self.provider["reasoning_enabled"] = False
+            self.sessions.save_session(self.session)
+            credentials = getattr(self.app, "credentials", None)
+            if isinstance(credentials, CredentialStore):
+                credentials.save_profile(self.provider)
+            await self._append_message("Provider reasoning is off.", "success")
+            return
+        self._set_activity("Checking the model catalog for reasoning support…")
+        try:
+            capability = await asyncio.to_thread(check_reasoning_support, self.provider)
+        except ProviderRequestError as error:
+            await self._fail(str(error), "Reasoning capability check failed")
+            return
+        if capability == "unsupported":
+            self.provider["reasoning_enabled"] = False
+            detail = "The provider explicitly reports that this model does not support reasoning. It remains off."
+        elif capability is None:
+            self.provider["reasoning_enabled"] = False
+            detail = "The provider did not expose reasoning capability metadata for this model, so support is unknown and remains off."
+        elif choice in {"", "status", "check"}:
+            detail = f"This model advertises {capability} support. Use /reasoning on or /reasoning low|medium|high to enable it."
+        elif choice not in {"on", "enable", "enabled", "low", "medium", "high"}:
+            await self._fail("Use /reasoning, /reasoning on|off, or /reasoning low|medium|high.", "Invalid reasoning setting")
+            return
+        else:
+            self.provider["reasoning_enabled"] = True
+            self.provider["reasoning_parameter"] = capability
+            self.provider["reasoning_effort"] = effort
+            detail = f"Provider reasoning enabled ({effort}). The model catalog advertised {capability}."
+        credentials = getattr(self.app, "credentials", None)
+        if isinstance(credentials, CredentialStore):
+            credentials.save_profile(self.provider)
+            self.provider = credentials.active() or self.provider
+        self.sessions.save_session(self.session)
+        self._set_activity(detail)
+        await self._append_message(detail, "success" if self.provider.get("reasoning_enabled") else "assistant")
