@@ -2287,3 +2287,445 @@ class SessionScreen(Screen):
         self.sessions.save_session(self.session)
         self._set_activity(detail)
         await self._append_message(detail, "success" if self.provider.get("reasoning_enabled") else "assistant")
+
+    def _open_search_dialog(self) -> None:
+        self.app.push_screen(ConversationSearchDialog(), self._search_dialog_closed)
+
+    def _search_dialog_closed(self, query: str | None) -> None:
+        if query:
+            self._search_command(query)
+            self.call_after_refresh(self._focus_prompt)
+        elif self._search_mode:
+            self._exit_search_mode()
+        else:
+            self.call_after_refresh(self._focus_prompt)
+
+    def action_search_chat(self) -> None:
+        if self._search_mode and self._search_matches:
+            self._advance_search()
+        else:
+            self._open_search_dialog()
+
+    def _search_command(self, query: str) -> None:
+        query = query.strip()
+        if not query:
+            self._open_search_dialog()
+            return
+        self._search_mode = True
+        self._search_query = query
+        records = self.session.get("messages", [])
+        matches = [
+            index
+            for index, entry in enumerate(records if isinstance(records, list) else [])
+            if isinstance(entry, dict)
+            and query.casefold() in str(entry.get("text", "")).casefold()
+        ]
+        if not matches:
+            self._clear_search_highlights()
+            self._search_matches = []
+            self._search_cursor = -1
+            self._update_search_sidebar()
+            return
+        self._search_matches = matches
+        self._search_cursor = 0
+        self._update_search_sidebar()
+        self._jump_to_search_match()
+
+    def _advance_search(self) -> None:
+        if not self._search_matches:
+            self._open_search_dialog()
+            return
+        self._search_cursor = (self._search_cursor + 1) % len(self._search_matches)
+        self._jump_to_search_match()
+
+    def _jump_to_search_match(self) -> None:
+        self._clear_search_highlights()
+        for index in self._search_matches:
+            if index < len(self._message_widgets):
+                self._message_widgets[index].add_class("search-hit")
+        if not 0 <= self._search_cursor < len(self._search_matches):
+            return
+        message_index = self._search_matches[self._search_cursor]
+        if message_index >= len(self._message_widgets):
+            return
+        widget = self._message_widgets[message_index]
+        widget.add_class("search-current")
+        self.query_one("#conversation", VerticalScroll).scroll_to_widget(
+            widget, animate=False, top=True
+        )
+        records = self.session.get("messages", [])
+        excerpt = str(records[message_index].get("text", "")) if message_index < len(records) else ""
+        excerpt = " ".join(excerpt.split())[:96]
+        self._update_search_sidebar(excerpt)
+
+    def _update_search_sidebar(self, excerpt: str = "") -> None:
+        if not self.is_mounted:
+            return
+        shortcut = self.query_one("#shortcut-hint", Static)
+        label = self.query_one("#search-label", Static)
+        status = self.query_one("#search-status", Static)
+        label.display = self._search_mode
+        status.display = self._search_mode
+        if not self._search_mode:
+            status.update("")
+            shortcut.update(
+                "Enter send    Shift+Enter new line    Shift+Tab mode    Esc stop    PgUp/PgDn history    Ctrl+B sessions"
+            )
+            return
+        shortcut.update("Ctrl+F next match    Esc exit search")
+        matches = len(self._search_matches)
+        if matches:
+            noun = "match" if matches == 1 else "matches"
+            summary = f"Found {matches} {noun} · {self._search_cursor + 1}/{matches}"
+            query_preview = self._search_query[:28]
+            excerpt_preview = excerpt[:48]
+            status.update(f"{summary}\n{query_preview}\n{excerpt_preview}".rstrip())
+        else:
+            status.update(f"Found 0 matches\n{self._search_query[:28]}")
+
+    def _exit_search_mode(self) -> None:
+        if not self._search_mode:
+            return
+        self._clear_search_highlights()
+        self._search_mode = False
+        self._search_query = ""
+        self._search_matches = []
+        self._search_cursor = -1
+        self._update_search_sidebar()
+        self.call_after_refresh(self._focus_prompt)
+
+    def _clear_search_highlights(self) -> None:
+        for widget in self._message_widgets:
+            widget.remove_class("search-hit", "search-current")
+
+    async def _report_command(self) -> None:
+        targets = self.targets or []
+        findings = self.findings or []
+        exploits = self.exploits or []
+        ips = self.ips or []
+        harvested = self.harvested_data or []
+        title = str(self.session.get("title", "Untitled session"))
+        summary = str(self.session.get("summary", "") or "").strip()
+        lines = [
+            f"VULNERABILITY ASSESSMENT · {title}",
+            f"Generated {__version__} from Mitsu session data.",
+            "",
+            "EXECUTIVE SUMMARY",
+            (
+                f"The session contains {len(findings)} recorded finding(s) across {len(targets)} scoped target(s)."
+                if findings else "No findings are recorded in this session. This is not evidence that the target is secure."
+            ),
+            *( ["", "SESSION SUMMARY", summary] if summary else [] ),
+            "",
+            "SCOPE",
+        ]
+        lines.extend(f"• {target}" for target in targets) if targets else lines.append("No target was recorded.")
+        lines.extend(["", "FINDINGS"])
+        lines.extend(f"• {item}" for item in findings) if findings else lines.append("No findings recorded.")
+        lines.extend(["", "EXPLOIT REFERENCES"])
+        lines.extend(f"• {item}" for item in exploits) if exploits else lines.append("No exploit references were recorded.")
+        lines.extend(["", "OBSERVED IP ADDRESSES"])
+        lines.extend(f"• {item}" for item in ips) if ips else lines.append("No IP addresses recorded.")
+        lines.extend(["", "HARVESTED DATA"])
+        lines.extend(f"• {item}" for item in harvested) if harvested else lines.append("No harvested data recorded.")
+        lines.extend([
+            "",
+            "LIMITATIONS",
+            "This report only summarizes data explicitly stored in the session. It does not infer or validate findings, and tool output that was not added to session intel may be absent.",
+        ])
+        self._set_activity("Generated a report from recorded session intel.")
+        await self._append_message("\n".join(lines))
+
+    async def _map_command(self) -> None:
+        lines = [
+            "ATTACK SURFACE MAP",
+            "└─ Session: " + str(self.session.get("title", "Untitled session")),
+            "   ├─ Scope",
+        ]
+        if not self.targets:
+            lines.append("   │  └─ No targets recorded")
+        else:
+            lines.extend(f"   │  {'└─' if index == len(self.targets) - 1 else '├─'} {target}" for index, target in enumerate(self.targets))
+        lines.append("   └─ Recorded intel")
+        for label, entries in (
+            ("Findings", self.findings),
+            ("Exploit references", self.exploits),
+            ("IPs", self.ips),
+            ("Harvested data", self.harvested_data),
+        ):
+            lines.append(f"      ├─ {label}")
+            lines.extend(f"      │  └─ {item}" for item in entries) if entries else lines.append("      │  └─ None recorded")
+        lines.append("\nOnly stored session data is shown; relationships are not inferred or validated.")
+        self._set_activity("Rendered the session attack surface map.")
+        await self._append_message("\n".join(lines))
+
+    async def _vulnsearch_command(self, query: str) -> None:
+        if not query:
+            await self._fail("Use /vulnsearch <product, version, or vulnerability criteria>.", "Search criteria required")
+            return
+        self._set_activity(f"Searching local exploit references for {query}…")
+        result = await asyncio.to_thread(self._searchsploit, query)
+        await self._append_message(result)
+        self._set_activity("Exploit references searched; results were not added to target Intel.")
+
+    @staticmethod
+    def _searchsploit(query: str) -> str:
+        if len(query) > 200 or any(token.startswith("-") for token in query.split()):
+            return "Use search terms up to 200 characters; command-line options are not accepted."
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._:/+-]*", query):
+            return "Use plain product, version, CVE, or vulnerability terms for this local lookup."
+        executable = shutil.which("searchsploit")
+        if not executable:
+            return "searchsploit is not installed, so local exploit references could not be searched. No network lookup or exploit execution was attempted."
+        try:
+            completed = subprocess.run(
+                [executable, "--json", query],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            return f"Could not search the local exploit database: {error}"
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            detail = completed.stderr.strip() or completed.stdout.strip() or "No results returned."
+            return f"searchsploit returned an unreadable result: {detail[:800]}"
+        results = payload.get("RESULTS_EXPLOIT", []) if isinstance(payload, dict) else []
+        if not isinstance(results, list) or not results:
+            return f"No local exploit references matched “{query}”. No exploit was run."
+        lines = [f"LOCAL EXPLOIT REFERENCES · {query}"]
+        for item in results[:10]:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("Title", "Untitled reference"))
+            exploit_id = str(item.get("EDB-ID", ""))
+            path = str(item.get("Path", ""))
+            suffix = f" [EDB-{exploit_id}]" if exploit_id else ""
+            if path:
+                suffix += f" · {path}"
+            lines.append(f"• {title}{suffix}")
+        lines.append("\nThese are unverified references from the local database. No exploit was opened or executed.")
+        return "\n".join(lines)
+
+    async def _tool_command(self, tool: str, target: str) -> None:
+        if target and target not in self.targets:
+            await self._fail(f"{target} is outside the authorized scope.", "Out of scope")
+            return
+        if not self.active_target:
+            await self._fail("Add an authorized target before running a tool.", "Scope required")
+            return
+        await self._fail(f"The {tool} runner is not connected, so nothing was executed.", "Tool unavailable")
+
+    def _provider_dialog_closed(self, profile: dict | None) -> None:
+        if not profile:
+            self.call_after_refresh(self._focus_prompt)
+            return
+        if self.provider.get("protocol", "openai") != profile.get("protocol", "openai"):
+            self.agent_history = self._history_for_new_protocol()
+            self.session["agent_history"] = self.agent_history
+            points = self.session.get("rewind_points", [])
+            if isinstance(points, list):
+                for point in points:
+                    if isinstance(point, dict):
+                        point["agent_history_before"] = None
+        self.provider = profile
+        self.session["provider_id"] = str(profile.get("provider_id", ""))
+        self.session["model"] = str(profile.get("model", ""))
+        self.sessions.save_session(self.session)
+        self._update_context()
+        provider_spec = PROVIDER_BY_ID.get(self.session["provider_id"])
+        provider_name = provider_spec.name if provider_spec else "Custom provider"
+        self._set_activity(f"Active model: {provider_name} · {self.session['model']}")
+        self.call_after_refresh(self._focus_prompt)
+
+    def _history_for_new_protocol(self) -> list[dict]:
+        entries = []
+        for message in self.session.get("messages", []):
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role")
+            text = str(message.get("text", "")).strip()
+            if not text:
+                continue
+            if role == "user":
+                content = text.removeprefix("›  ").strip()
+                entries.append({"role": "user", "content": content})
+            elif role in {"assistant", "tool", "tool-result", "success", "error"}:
+                if role in {"tool", "tool-result"}:
+                    content = f"Tool activity:\n{text}"
+                else:
+                    content = text
+                entries.append({"role": "assistant", "content": content})
+        return history_from_legacy(entries)
+
+    def _rename_dialog_closed(self, title: str | None) -> None:
+        if title:
+            self._rename_session(title)
+        self.call_after_refresh(self._focus_prompt)
+
+    def _configuration_dialog_closed(self, selection: str | None) -> None:
+        if selection == "search":
+            self.app.push_screen(
+                SearchEngineDialog(self.app.credentials),
+                self._search_engines_dialog_closed,
+            )
+        elif selection == "provider":
+            self.app.push_screen(
+                ProviderDialog(self.app.credentials, "connect"),
+                self._provider_dialog_closed,
+            )
+        elif selection == "mcp":
+            self.app.push_screen(
+                MCPConfigDialog(self.app.credentials.path.parent / "mcp_servers.json"),
+                self._mcp_dialog_closed,
+            )
+        else:
+            self.call_after_refresh(self._focus_prompt)
+
+    def _mcp_dialog_closed(self, saved: bool) -> None:
+        self.call_after_refresh(self._focus_prompt)
+        if saved:
+            self._set_activity("MCP definitions saved. Reconnecting configured servers…")
+            self._tool_reconnect_task = asyncio.create_task(self._reconnect_tool_host())
+
+    def _search_engines_dialog_closed(self, saved: bool | None) -> None:
+        self.call_after_refresh(self._focus_prompt)
+        if saved:
+            configured = len(self.app.credentials.search_engines())
+            self._set_activity(f"Saved {configured} configured web search engine(s).")
+
+    async def _reconnect_tool_host(self) -> None:
+        old_task = self._tool_connection_task
+        shutdown = self._tool_host_shutdown
+        shutdown.set()
+        if old_task and not old_task.done():
+            await asyncio.shield(old_task)
+        if not self.is_mounted:
+            return
+        self._tool_host = AgentToolHost(
+            Path.cwd(),
+            self._ask_user,
+            self._update_session_intel,
+            search_settings=self.app.credentials.search_engines,
+        )
+        self._tool_host_ready = asyncio.Event()
+        self._tool_host_shutdown = asyncio.Event()
+        self._tool_connection_task = asyncio.create_task(self._connect_tool_host())
+
+    def _rename_session(self, title: str) -> None:
+        normalized = " ".join(title.split())[:80]
+        if not normalized:
+            return
+        self.session["title"] = normalized
+        self.session["title_source"] = "operator"
+        self.sessions.save_session(self.session)
+        self.query_one("#session-title", Static).update(self._session_title_renderable(normalized))
+        self._set_activity(f"Session renamed to {normalized}.")
+
+    def _theme_dialog_closed(self, theme_id: str | None) -> None:
+        if theme_id in THEMES:
+            self._apply_session_theme(theme_id)
+            self._set_activity(f"Theme changed to {THEMES[theme_id]['name']}.")
+        self.call_after_refresh(self._focus_prompt)
+
+    def _apply_session_theme(self, theme_id: str) -> None:
+        if theme_id not in THEMES:
+            return
+        self.theme_id = theme_id
+        for known_theme in THEMES:
+            self.remove_class(f"theme-{known_theme}")
+        self.add_class(f"theme-{theme_id}")
+        self.app.set_mitsu_theme(theme_id)
+        self.app.preferences.save({"theme": theme_id})
+        self.query_one("#session-topbar", SessionTopBar).set_theme(theme_id)
+        self._update_context()
+        self.query_one("#session-title", Static).update(self._session_title_renderable())
+        entries = [entry for entry in self.session.get("messages", []) if isinstance(entry, dict)]
+        for widget, entry in zip(self._message_widgets, entries):
+            widget.update(self._message_renderable(str(entry.get("text", ""))))
+        if self._stream_preview is not None:
+            self._stream_preview.update(self._message_renderable(self._stream_text))
+        self._render_slash_suggestions(self.query_one("#prompt-input", PromptTextArea))
+        if self._thinking_started is not None:
+            self._animate_thinking()
+
+    def _session_title_renderable(self, requested_title: str | None = None) -> Text:
+        title = str(
+            requested_title if requested_title is not None else self.session.get("title", "New session")
+        ).strip()
+        if not title or title.casefold() == "new session":
+            title = "New Session"
+        elif self.session.get("title_source") != "operator":
+            first_user_message = next(
+                (
+                    str(entry.get("text", ""))
+                    for entry in self.session.get("messages", [])
+                    if isinstance(entry, dict) and entry.get("role") == "user"
+                ),
+                "",
+            )
+            original_prompt = first_user_message.removeprefix("›  ").removeprefix("› ").strip()
+            if len(title) <= 48 and title == original_prompt[:48]:
+                title = "New Session"
+        palette = THEMES.get(self.theme_id, THEMES["ember"])
+        rendered = Text("✧  ", style=f"bold {palette['code']['function']}")
+        rendered.append(title, style=f"bold {palette['accent']}")
+        rendered.append("  ✧", style=f"bold {palette['code']['function']}")
+        return rendered
+
+    def _opening_greeting(self) -> str:
+        session_id = str(self.session.get("id", ""))
+        try:
+            greeting_index = int(session_id[:8], 16) % len(OPENING_GREETINGS)
+        except ValueError:
+            greeting_index = 0
+        return OPENING_GREETINGS[greeting_index]
+
+    @staticmethod
+    def _normalized_chat_history(entries: list) -> list[dict[str, str]]:
+        normalized: list[dict[str, str]] = []
+        for entry in (entries if isinstance(entries, list) else []):
+            if not isinstance(entry, dict):
+                continue
+            role = entry.get("role")
+            content = str(entry.get("content", ""))
+            if role not in {"user", "assistant"} or not content:
+                continue
+            if normalized and normalized[-1]["role"] == role:
+                normalized[-1]["content"] += "\n\n" + content
+            else:
+                normalized.append({"role": role, "content": content})
+        while normalized and normalized[0]["role"] == "assistant":
+            normalized.pop(0)
+        if len(normalized) > 40:
+            normalized = normalized[-40:]
+            if normalized and normalized[0]["role"] == "assistant":
+                normalized.pop(0)
+        return normalized
+
+    async def _set_mode(self, requested: str) -> None:
+        modes = ("Recon", "Guided", "AutoPwn")
+        if requested:
+            aliases = {mode.lower(): mode for mode in modes}
+            aliases.update(
+                {
+                    "investigate": "Recon",
+                    "autopwn": "AutoPwn",
+                    "auto-pwn": "AutoPwn",
+                    "auto pwn": "AutoPwn",
+                }
+            )
+            selected = aliases.get(requested.strip().lower().replace("_", " "))
+            if selected is None:
+                await self._fail("Modes: Recon, Guided, AutoPwn.", "Unknown mode")
+                return
+            self.mode = selected
+        else:
+            self.mode = modes[(modes.index(self.mode) + 1) % len(modes)]
+        self.session["mode"] = self.mode
+        self.sessions.save_session(self.session)
+        self._update_context()
+        self._set_activity(f"Mode changed to {self.mode}.")
+        self._set_companion("idle", "Mitsu is Ready to Pwn!")
