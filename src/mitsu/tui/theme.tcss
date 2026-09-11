@@ -1103,3 +1103,403 @@ DeleteSessionDialog {
     border: round #403633;
     background: #111115;
 }
+
+#ask-user-choices > .option-list--option-highlighted,
+#ask-user-choices:focus > .option-list--option-highlighted,
+#tool-approval-options > .option-list--option-highlighted,
+#tool-approval-options:focus > .option-list--option-highlighted {
+    color: #55e5e8;
+    background: transparent;
+    text-style: bold underline;
+}
+
+#tool-approval-detail {
+    width: 100%;
+    height: auto;
+    max-height: 6;
+    overflow-y: auto;
+    margin-bottom: 1;
+    padding: 0 1;
+    border: round #403633;
+    background: #0b0a0b;
+    color: #e7e2dc;
+}
+
+#tool-approval-dialog {
+    width: 96;
+    max-width: 94%;
+    height: auto;
+    max-height: 70%;
+    margin-bottom: 3;
+    padding: 1 1;
+    border: round #55e5e8;
+    background: #111115;
+}
+
+#tool-approval-options {
+    max-height: 5;
+    margin-bottom: 1;
+}
+
+#ask-user-input {
+    width: 100%;
+    height: 3;
+    margin-bottom: 1;
+    padding: 0 1;
+    border: round #514642;
+    background: #0b0a0b;
+    color: #e7e2dc;
+}
+
+#ask-user-input:focus {
+    border: round #55e5e8;
+}
+
+#ask-user-hint,
+#tool-approval-hint,
+#conversation-search-hint,
+#delete-session-hint {
+    height: 1;
+    color: #8c817c;
+    text-align: center;
+}
+
+#provider-dialog-detail,
+#general-config-description,
+#general-config-detail,
+#search-engine-detail,
+#search-engine-editor-detail,
+#rename-dialog-detail {
+    width: 100%;
+    height: auto;
+    min-height: 2;
+    color: #c7c1bb;
+    text-align: center;
+}
+
+#mcp-dialog-detail {
+    width: 100%;
+    height: 2;
+    color: #c7c1bb;
+    text-align: center;
+}
+
+#provider-dialog-list {
+    width: 100%;
+    max-height: 16;
+    margin-top: 1;
+    border: round #403633;
+    background: #111115;
+}
+
+#general-config-title {
+    height: 1;
+    margin-bottom: 1;
+    color: #55e5e8;
+    text-style: bold;
+    text-align: center;
+}
+
+#general-config-description,
+#general-config-detail {
+    width: 100%;
+    height: auto;
+    min-height: 1;
+    margin-bottom: 1;
+    color: #aaa6a0;
+    text-align: center;
+}
+
+#general-config-options {
+    width: 100%;
+    max-height: 18;
+    border: round #403633;
+    background: #111115;
+}
+
+#general-config-options > .option-list--option-highlighted,
+#general-config-options:focus > .option-list--option-highlighted {
+    color: #55e5e8;
+    background: transparent;
+    text-style: bold underline;
+}
+
+#general-config-hint {
+    height: 1;
+    margin-top: 1;
+    color: #8c817c;
+    text-align: center;
+}
+
+#search-engine-dialog {
+    width: 96;
+    max-width: 94%;
+    height: auto;
+    max-height: 92%;
+    padding: 1 2;
+    border: round #55e5e8;
+    background: #111115;
+}
+
+#search-engine-title,
+#search-engine-editor-title {
+    width: 100%;
+    height: 1;
+    margin-bottom: 1;
+    color: #55e5e8;
+    text-style: bold;
+    text-align: center;
+}
+
+#search-engine-detail,
+#search-engine-editor-detail {
+    min-height: 1;
+    margin-bottom: 1;
+    color: #aaa6a0;
+    text-align: center;
+}
+
+#search-engine-list {
+    width: 100%;
+    max-height: 13;
+    border: round #403633;
+    background: #111115;
+}
+
+#search-engine-list > .option-list--option-highlighted,
+#search-engine-list:focus > .option-list--option-highlighted,
+#search-engine-actions > .option-list--option-highlighted,
+#search-engine-actions:focus > .option-list--option-highlighted {
+    color: #55e5e8;
+    background: transparent;
+    text-style: bold underline;
+}
+
+#search-engine-editor {
+    width: 100%;
+    height: auto;
+}
+
+#docker-password-slot {
+    width: 100%;
+    height: auto;
+}
+
+#docker-password-card {
+    width: 56%;
+    margin-top: 2;
+    padding: 1 2;
+    border: round #315459;
+    background: #0d1215;
+}
+
+#docker-password-card .search-field-label {
+    margin-top: 0;
+    color: #91a7ad;
+}
+
+#search-engine-sudo-password {
+    width: 100%;
+    height: 3;
+    padding: 0 1;
+    border: round #315459;
+    background: #0b1114;
+    color: #e7e2dc;
+}
+
+#search-engine-sudo-password:focus {
+    border: round #55e5e8;
+}
+
+.search-field-label {
+    height: 1;
+    margin-top: 1;
+    color: #aaa6a0;
+}
+
+#search-engine-base-url,
+#search-engine-api-key,
+#search-engine-cx,
+#search-engine-port {
+    width: 100%;
+    height: 3;
+    padding: 0 1;
+    border: round #514642;
+    background: #0b0a0b;
+    color: #e7e2dc;
+}
+
+#search-engine-base-url:focus,
+#search-engine-api-key:focus,
+#search-engine-cx:focus,
+#search-engine-port:focus {
+    border: round #55e5e8;
+}
+
+#search-engine-actions {
+    width: 100%;
+    max-height: 6;
+    margin-top: 1;
+    border: round #403633;
+    background: #111115;
+}
+
+#search-engine-status {
+    width: 100%;
+    min-height: 1;
+    height: auto;
+    margin-top: 1;
+    color: #e9c46a;
+    text-align: center;
+}
+
+#search-engine-hint {
+    height: 1;
+    margin-top: 1;
+    color: #8c817c;
+    text-align: center;
+}
+
+#provider-dialog-list > .option-list--option-highlighted,
+#provider-dialog-list:focus > .option-list--option-highlighted {
+    color: #55e5e8;
+    background: transparent;
+    text-style: bold underline;
+}
+
+#provider-dialog-input,
+#rename-dialog-input {
+    width: 100%;
+    height: 3;
+    margin-top: 1;
+    padding: 0 1;
+    border: round #514642;
+    background: #0b0a0b;
+    color: #e7e2dc;
+}
+
+#provider-dialog-input:focus,
+#rename-dialog-input:focus {
+    border: round #55e5e8;
+}
+
+#mcp-dialog-editor {
+    width: 100%;
+    height: 12;
+    margin-top: 1;
+    border: round #514642;
+    background: #0b0a0b;
+    color: #e7e2dc;
+}
+
+#mcp-dialog-editor:focus {
+    border: round #55e5e8;
+}
+
+#mcp-dialog-hint {
+    height: 1;
+    margin-top: 1;
+    color: #8c817c;
+    text-align: center;
+}
+
+#provider-dialog-hint {
+    height: 1;
+    margin-top: 1;
+    color: #8c817c;
+    text-align: center;
+}
+
+#shortcut-hint {
+    height: 1;
+    padding-left: 2;
+    color: #789496;
+    margin-top: 0;
+}
+
+#session-right {
+    scrollbar-size-vertical: 1;
+}
+
+#session-right:focus,
+#conversation:focus {
+    scrollbar-color: #55e5e8;
+}
+
+.theme-moss .brand-sparkles,
+.theme-moss .mascot-flourish,
+.theme-moss .wizard-title,
+.theme-moss .menu-section-title,
+.theme-moss .session-section-title,
+.theme-moss #session-title,
+.theme-moss #prompt-symbol {
+    color: #91bd9b;
+}
+
+.theme-lilac .brand-sparkles,
+.theme-lilac .mascot-flourish,
+.theme-lilac .wizard-title,
+.theme-lilac .menu-section-title,
+.theme-lilac .session-section-title,
+.theme-lilac #session-title,
+.theme-lilac #prompt-symbol {
+    color: #b8a4d7;
+}
+
+.theme-ocean .brand-sparkles,
+.theme-ocean .mascot-flourish,
+.theme-ocean .wizard-title,
+.theme-ocean .menu-section-title,
+.theme-ocean .session-section-title,
+.theme-ocean #session-title,
+.theme-ocean #prompt-symbol {
+    color: #67c9e4;
+}
+
+.theme-rose .brand-sparkles,
+.theme-rose .mascot-flourish,
+.theme-rose .wizard-title,
+.theme-rose .menu-section-title,
+.theme-rose .session-section-title,
+.theme-rose #session-title,
+.theme-rose #prompt-symbol {
+    color: #e996b4;
+}
+
+.theme-gold .brand-sparkles,
+.theme-gold .mascot-flourish,
+.theme-gold .wizard-title,
+.theme-gold .menu-section-title,
+.theme-gold .session-section-title,
+.theme-gold #session-title,
+.theme-gold #prompt-symbol {
+    color: #e9c46a;
+}
+
+.theme-blue .brand-sparkles,
+.theme-blue .mascot-flourish,
+.theme-blue .wizard-title,
+.theme-blue .menu-section-title,
+.theme-blue .session-section-title,
+.theme-blue #session-title,
+.theme-blue #prompt-symbol {
+    color: #8baceb;
+}
+
+.theme-moss OptionList:focus > .option-list--option-highlighted {
+    color: #91bd9b;
+    background: transparent;
+    text-style: bold underline;
+}
+
+.theme-lilac OptionList:focus > .option-list--option-highlighted {
+    color: #b8a4d7;
+    background: transparent;
+    text-style: bold underline;
+}
+
+.theme-ocean OptionList:focus > .option-list--option-highlighted {
+    color: #67c9e4;
+    background: transparent;
+    text-style: bold underline;
+}
