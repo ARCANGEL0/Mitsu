@@ -1503,3 +1503,401 @@ DeleteSessionDialog {
     background: transparent;
     text-style: bold underline;
 }
+
+.theme-rose OptionList:focus > .option-list--option-highlighted {
+    color: #e996b4;
+    background: transparent;
+    text-style: bold underline;
+}
+
+.theme-gold OptionList:focus > .option-list--option-highlighted {
+    color: #e9c46a;
+    background: transparent;
+    text-style: bold underline;
+}
+
+.theme-blue OptionList:focus > .option-list--option-highlighted {
+    color: #8baceb;
+    background: transparent;
+    text-style: bold underline;
+}
+
+/* Palette tokens shared by every screen, dialog, and session element. */
+Screen {
+    background: $background;
+    color: $foreground;
+}
+
+ToolApprovalDialog {
+    align: center bottom;
+    background: transparent;
+}
+
+#boot-screen,
+#wizard-shell,
+#menu-shell {
+    background: $background;
+}
+
+.wizard-title,
+.menu-section-title,
+.session-section-title,
+#menu-right-title,
+#provider-dialog-title,
+#search-engine-title,
+#search-engine-editor-title,
+#search-engine-list > .option-list--option-highlighted,
+#search-engine-list:focus > .option-list--option-highlighted,
+#search-engine-actions > .option-list--option-highlighted,
+#search-engine-actions:focus > .option-list--option-highlighted,
+#rename-dialog-title,
+#mcp-dialog-title,
+#ask-user-title,
+#tool-approval-title,
+#conversation-search-title,
+#delete-session-title,
+#pet-dialog-title,
+#session-theme-title {
+    color: $primary;
+}
+
+OptionList > .option-list--option-highlighted,
+OptionList:focus > .option-list--option-highlighted {
+    color: $primary;
+}
+
+#menu-shell,
+#wizard-shell,
+#session-left,
+#session-right,
+#session-heading,
+#composer,
+#prompt-line,
+#prompt-input,
+#slash-suggestions,
+#thinking-status,
+#queue-status,
+#provider-dialog,
+#search-engine-dialog,
+#rename-dialog,
+#mcp-dialog,
+#ask-user-dialog,
+#tool-approval-dialog,
+#conversation-search-dialog,
+#delete-session-dialog,
+#provider-dialog-list,
+#search-engine-list,
+#search-engine-actions,
+#menu-model-search,
+#ask-user-choices,
+#tool-approval-options,
+#tool-approval-detail,
+#ask-user-input,
+#conversation-search-input,
+#provider-dialog-input,
+#rename-dialog-input,
+#mcp-dialog-editor,
+#session-theme-dialog,
+#session-theme-preview {
+    background: $surface;
+}
+
+#menu-right-panel,
+#session-topbar {
+    background: $panel;
+}
+
+#wizard-copy,
+.wizard-copy,
+.session-label,
+#menu-runtime-info,
+#menu-right-detail,
+#project-path,
+#session-subtitle,
+#shortcut-hint,
+#provider-dialog-detail,
+#search-engine-detail,
+#search-engine-editor-detail,
+#rename-dialog-detail,
+#mcp-dialog-detail,
+#ask-user-hint,
+#tool-approval-hint,
+#conversation-search-hint,
+#delete-session-hint,
+#provider-dialog-hint,
+#search-engine-hint,
+#session-theme-copy,
+#session-theme-help {
+    color: $text-muted;
+}
+
+#menu-secret-input:focus,
+#menu-text-input:focus,
+#custom-base-url:focus,
+#provider-api-key:focus,
+#cloudflare-account-id:focus,
+#custom-model-name:focus {
+    border-bottom: solid $primary;
+}
+
+#welcome-prompt {
+    border-top: solid $primary;
+}
+
+#session-topbar,
+#session-heading,
+#session-left,
+#session-right,
+#conversation,
+#composer,
+#prompt-line,
+#prompt-input,
+#slash-suggestions,
+#thinking-status,
+#queue-status,
+#provider-dialog,
+#rename-dialog,
+#mcp-dialog,
+#ask-user-dialog,
+#tool-approval-dialog,
+#conversation-search-dialog,
+#delete-session-dialog,
+#provider-dialog-list,
+#ask-user-choices,
+#tool-approval-options,
+#tool-approval-detail,
+#ask-user-input,
+#conversation-search-input,
+#provider-dialog-input,
+#rename-dialog-input,
+#mcp-dialog-editor,
+#session-theme-dialog,
+#session-theme-preview {
+    color: $foreground;
+}
+
+#session-heading,
+#prompt-line,
+#prompt-input,
+#slash-suggestions,
+#thinking-status,
+#queue-status,
+#provider-dialog,
+#rename-dialog,
+#mcp-dialog,
+#ask-user-dialog,
+#tool-approval-dialog,
+#conversation-search-dialog,
+#delete-session-dialog,
+#provider-dialog-list,
+#ask-user-choices,
+#tool-approval-options,
+#tool-approval-detail,
+#ask-user-input,
+#conversation-search-input,
+#provider-dialog-input,
+#rename-dialog-input,
+#mcp-dialog-editor,
+#session-theme-dialog,
+#session-theme-preview {
+    background: $surface;
+}
+
+#session-theme-dialog {
+    width: 76;
+    max-width: 90%;
+    height: auto;
+    max-height: 80%;
+    padding: 1 2;
+    border: round $primary;
+}
+
+#delete-session-dialog {
+    border: round $primary;
+}
+
+#delete-session-title {
+    color: $error;
+}
+
+#delete-session-cancel {
+    color: $primary;
+    border: tall $secondary;
+    background: $surface;
+}
+
+#delete-session-cancel:focus {
+    color: $foreground;
+    border: tall $primary;
+    background: $boost;
+}
+
+#delete-session-confirm {
+    color: $error;
+    border: tall $error;
+    background: $surface;
+}
+
+#delete-session-confirm:focus {
+    color: $background;
+    border: tall $error;
+    background: $error;
+    text-style: bold;
+}
+
+#session-theme-title {
+    height: 1;
+    margin-bottom: 1;
+    text-style: bold;
+    text-align: center;
+}
+
+#session-theme-copy {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+    text-align: center;
+}
+
+#session-theme-layout {
+    width: 100%;
+    height: auto;
+}
+
+#session-theme-list {
+    width: 34;
+    max-height: 12;
+}
+
+#session-theme-preview {
+    width: 1fr;
+    min-width: 30;
+    height: 8;
+    padding: 0 2;
+    border-left: solid $secondary;
+    content-align: left middle;
+}
+
+#session-theme-help {
+    height: 1;
+    margin-top: 1;
+    text-align: center;
+}
+
+#session-topbar {
+    border-bottom: solid $secondary;
+}
+
+#session-left {
+    border-right: solid $secondary;
+}
+
+#session-right {
+    border-left: solid $secondary;
+}
+
+#session-heading {
+    border-bottom: solid $secondary;
+}
+
+#conversation {
+    scrollbar-color: $primary;
+    scrollbar-color-hover: $accent;
+    scrollbar-color-active: $accent;
+    scrollbar-background: $background;
+    scrollbar-background-hover: $background;
+    scrollbar-background-active: $background;
+}
+
+.system-message,
+.assistant-message {
+    border-left: solid $secondary;
+    background: $surface;
+    color: $foreground;
+}
+
+.streaming-message {
+    border-left: tall $primary;
+    background: $panel;
+}
+
+.user-message {
+    border-left: solid $accent;
+    background: $boost;
+    color: $foreground;
+}
+
+.tool-message {
+    border-left: solid $primary;
+    color: $primary;
+}
+
+.tool-result-message {
+    border-left: solid $secondary;
+    color: $text-muted;
+}
+
+.search-hit {
+    background: $panel;
+}
+
+.search-current {
+    border-left: tall $accent;
+    background: $boost;
+    text-style: bold;
+}
+
+.success-message {
+    color: $success;
+}
+
+.error-message {
+    color: $error;
+}
+
+#conversation-search-input {
+    width: 100%;
+    height: 3;
+    margin-bottom: 1;
+    padding: 0 1;
+    border: round $secondary;
+    background: $surface;
+    color: $foreground;
+}
+
+#conversation-search-input:focus {
+    border: round $primary;
+}
+
+#intel-summary,
+#target-summary,
+#target-list,
+#findings-summary,
+#exploits-summary,
+#ips-summary,
+#harvested-summary,
+#activity-summary,
+#aggressive-level {
+    color: $text-muted;
+}
+
+#companion-status {
+    color: $success;
+}
+
+#thinking-status {
+    border-left: tall $primary;
+}
+
+#slash-suggestions {
+    border-left: tall $primary;
+}
+
+#prompt-symbol {
+    color: $primary;
+    background: $surface;
+}
+
+#prompt-input {
+    border: solid $secondary;
+}
