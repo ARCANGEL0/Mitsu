@@ -226,3 +226,108 @@ def ensure_intel(session: dict[str, Any]) -> tuple[dict[str, Any], bool]:
             known_exploits.add(rendered.casefold())
             changed = True
     return value, changed
+
+
+def record_evidence(source: str, details: str, confidence: str) -> dict[str, str]:
+    source = _required_text(source, "source", 500)
+    details = _required_text(details, "evidence", 8_000)
+    confidence = _choice(confidence, CONFIDENCE_LEVELS, "confidence")
+    return {
+        "source": source,
+        "details": details,
+        "confidence": confidence,
+        "recorded_at": _now(),
+    }
+
+
+def upsert_asset(
+    intel: dict[str, Any],
+    *,
+    asset_type: str,
+    value: str,
+    source: str,
+    evidence: str,
+    parent: str = "",
+    verification: str | None = None,
+    scope: str | None = None,
+    confidence: str = "medium",
+    attributes: dict[str, str] | None = None,
+    primary: bool = False,
+) -> tuple[dict[str, Any], bool]:
+    asset_type = _choice(asset_type, ASSET_TYPES, "asset type")
+    value = _required_text(value, "asset value", 1_000)
+    parent = parent.strip()[:1_000]
+    if any(ord(character) < 32 for character in value + parent):
+        raise ValueError("asset values and parents cannot contain control characters")
+    if verification is not None:
+        verification = _choice(verification, ASSET_VERIFICATION_STATES, "verification status")
+    confidence = _choice(confidence, CONFIDENCE_LEVELS, "confidence")
+    if scope is not None:
+        scope = _choice(scope, SCOPE_STATES, "scope status")
+    if primary and scope != "in_scope":
+        raise ValueError("a primary target must be explicitly marked in_scope")
+    if attributes is None:
+        attributes = {}
+    if not isinstance(attributes, dict) or any(
+        not isinstance(key, str) or not isinstance(item, str)
+        for key, item in attributes.items()
+    ):
+        raise ValueError("attributes must be a string-to-string object")
+    if len(attributes) > 64 or any(len(key) > 100 or len(item) > 2_000 for key, item in attributes.items()):
+        raise ValueError("attributes may contain at most 64 short string values")
+
+    entries = intel["assets"]
+    asset = next(
+        (
+            item
+            for item in entries
+            if isinstance(item, dict)
+            and str(item.get("type", "")).casefold() == asset_type
+            and str(item.get("value", "")).casefold() == value.casefold()
+            and str(item.get("parent", "")).casefold() == parent.casefold()
+        ),
+        None,
+    )
+    now = _now()
+    evidence_record = record_evidence(source, evidence, confidence)
+    created = asset is None
+    if asset is None:
+        if len(entries) >= MAX_ASSETS:
+            raise ValueError(f"session Intel already contains the maximum of {MAX_ASSETS} assets")
+        asset = {
+            "id": _stable_id(asset_type, value, parent),
+            "type": asset_type,
+            "value": value,
+            "parent": parent,
+            "verification": verification or "discovered",
+            "scope": scope or "unknown",
+            "confidence": confidence,
+            "attributes": {},
+            "evidence": [],
+            "first_seen": now,
+        }
+        entries.append(asset)
+    else:
+        if verification is not None:
+            asset["verification"] = verification
+        asset["confidence"] = confidence
+        if scope is not None:
+            asset["scope"] = scope
+    if primary:
+        for item in entries:
+            if isinstance(item, dict) and item is not asset:
+                item["primary"] = False
+    elif scope == "out_of_scope":
+        asset["primary"] = False
+    asset.setdefault("attributes", {}).update(attributes)
+    evidence_items = asset.setdefault("evidence", [])
+    if not any(
+        item.get("source") == evidence_record["source"] and item.get("details") == evidence_record["details"]
+        for item in evidence_items
+        if isinstance(item, dict)
+    ):
+        evidence_items.append(evidence_record)
+        del evidence_items[:-MAX_EVIDENCE_PER_RECORD]
+    asset["primary"] = primary if primary else bool(asset.get("primary", False))
+    asset["updated_at"] = now
+    return asset, created
