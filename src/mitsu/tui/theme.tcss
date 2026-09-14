@@ -1901,3 +1901,243 @@ OptionList:focus > .option-list--option-highlighted {
 #prompt-input {
     border: solid $secondary;
 }
+
+#prompt-input:focus {
+    border: solid $primary;
+    background: $surface;
+}
+
+#provider-dialog-input:focus,
+#search-engine-base-url:focus,
+#search-engine-api-key:focus,
+#search-engine-cx:focus,
+#search-engine-port:focus,
+#rename-dialog-input:focus,
+#mcp-dialog-editor:focus,
+#ask-user-input:focus,
+#conversation-search-input:focus {
+    border: round $primary;
+}
+
+#session-right:focus,
+#conversation:focus {
+    scrollbar-color: $accent;
+}
+
+#provider-dialog,
+#general-config-dialog,
+#search-engine-dialog,
+#rename-dialog,
+#mcp-dialog,
+#ask-user-dialog,
+#tool-approval-dialog,
+#conversation-search-dialog {
+    border: round $primary;
+}
+
+#provider-dialog-title,
+#general-config-title,
+#rename-dialog-title,
+#mcp-dialog-title,
+#ask-user-title,
+#tool-approval-title,
+#conversation-search-title,
+#ask-user-choices > .option-list--option-highlighted,
+#ask-user-choices:focus > .option-list--option-highlighted,
+#tool-approval-options > .option-list--option-highlighted,
+#tool-approval-options:focus > .option-list--option-highlighted,
+#provider-dialog-list > .option-list--option-highlighted,
+#provider-dialog-list:focus > .option-list--option-highlighted {
+    color: $primary;
+}
+
+#theme-preview {
+    border-left: solid $secondary;
+}
+
+#wizard-page-welcome {
+    border: round $secondary;
+}
+
+#menu-dashboard {
+    border-top: solid $secondary;
+}
+
+#menu-left-panel {
+    border-right: solid $secondary;
+}
+
+#menu-left-rule {
+    color: $secondary;
+}
+
+#menu-right-panel {
+    border: round $secondary;
+}
+
+#docker-password-card {
+    border: round $secondary;
+    background: $panel;
+}
+
+#search-engine-sudo-password {
+    border: round $secondary;
+    background: $surface;
+    color: $foreground;
+}
+
+#search-engine-sudo-password:focus {
+    border: round $primary;
+}
+
+#menu-model-search {
+    border: round $secondary;
+    background: $surface;
+    color: $foreground;
+}
+
+#menu-model-search:focus {
+    border: round $primary;
+}
+
+#menu-secret-input,
+#menu-text-input,
+#custom-base-url,
+#provider-api-key,
+#cloudflare-account-id,
+#custom-model-name {
+    color: $foreground;
+    border-bottom: solid $secondary;
+}
+
+#composer {
+    border-top: solid $secondary;
+}
+
+#prompt-symbol {
+    background: $surface;
+}
+
+#prompt-input,
+#provider-dialog-input,
+#rename-dialog-input,
+#mcp-dialog-editor,
+#ask-user-input {
+    border: round $secondary;
+}
+
+#provider-dialog-list,
+#ask-user-choices,
+#tool-approval-options {
+    border: round $secondary;
+}
+
+#tool-approval-detail {
+    border: round $secondary;
+}
+
+#wizard-page-welcome .wizard-title,
+#welcome-prompt,
+#theme-preview,
+#menu-left-rule,
+#menu-runtime-info,
+#menu-right-detail,
+#menu-footer,
+#shortcut-hint,
+#provider-dialog-hint,
+#ask-user-hint,
+#tool-approval-hint,
+#mcp-dialog-hint {
+    color: $text-muted;
+}
+
+.menu-section-title,
+.session-section-title,
+#session-title,
+#menu-right-title,
+#provider-dialog-title,
+#general-config-title,
+#rename-dialog-title,
+#mcp-dialog-title,
+#ask-user-title,
+#tool-approval-title {
+    color: $primary;
+}
+
+.theme-moss #thinking-status,
+.theme-lilac #thinking-status,
+.theme-ocean #thinking-status,
+.theme-rose #thinking-status,
+.theme-gold #thinking-status,
+.theme-blue #thinking-status,
+.theme-moss #prompt-symbol,
+.theme-lilac #prompt-symbol,
+.theme-ocean #prompt-symbol,
+.theme-rose #prompt-symbol,
+.theme-gold #prompt-symbol,
+.theme-blue #prompt-symbol {
+    background: $surface;
+    color: $primary;
+}
+
+.theme-moss #prompt-input:focus,
+.theme-lilac #prompt-input:focus,
+.theme-ocean #prompt-input:focus,
+.theme-rose #prompt-input:focus,
+.theme-gold #prompt-input:focus,
+.theme-blue #prompt-input:focus {
+    border: round $primary;
+    background: $surface;
+}
+
+.theme-moss #slash-suggestions,
+.theme-lilac #slash-suggestions,
+.theme-ocean #slash-suggestions,
+.theme-rose #slash-suggestions,
+.theme-gold #slash-suggestions,
+.theme-blue #slash-suggestions {
+    border-left: tall $primary;
+    background: $surface;
+}
+
+.theme-moss .brand-sparkles,
+.theme-lilac .brand-sparkles,
+.theme-ocean .brand-sparkles,
+.theme-rose .brand-sparkles,
+.theme-gold .brand-sparkles,
+.theme-blue .brand-sparkles,
+.theme-moss .mascot-flourish,
+.theme-lilac .mascot-flourish,
+.theme-ocean .mascot-flourish,
+.theme-rose .mascot-flourish,
+.theme-gold .mascot-flourish,
+.theme-blue .mascot-flourish,
+.theme-moss .wizard-title,
+.theme-lilac .wizard-title,
+.theme-ocean .wizard-title,
+.theme-rose .wizard-title,
+.theme-gold .wizard-title,
+.theme-blue .wizard-title,
+.theme-moss .menu-section-title,
+.theme-lilac .menu-section-title,
+.theme-ocean .menu-section-title,
+.theme-rose .menu-section-title,
+.theme-gold .menu-section-title,
+.theme-blue .menu-section-title,
+.theme-moss .session-section-title,
+.theme-lilac .session-section-title,
+.theme-ocean .session-section-title,
+.theme-rose .session-section-title,
+.theme-gold .session-section-title,
+.theme-blue .session-section-title {
+    color: $primary;
+}
+
+.theme-moss OptionList:focus > .option-list--option-highlighted,
+.theme-lilac OptionList:focus > .option-list--option-highlighted,
+.theme-ocean OptionList:focus > .option-list--option-highlighted,
+.theme-rose OptionList:focus > .option-list--option-highlighted,
+.theme-gold OptionList:focus > .option-list--option-highlighted,
+.theme-blue OptionList:focus > .option-list--option-highlighted {
+    color: $primary;
+}
