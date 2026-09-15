@@ -458,3 +458,161 @@ def upsert_observation(
         del evidence_items[:-MAX_EVIDENCE_PER_RECORD]
     observation["updated_at"] = now
     return observation, created
+
+
+def upsert_exploit(
+    intel: dict[str, Any],
+    *,
+    title: str,
+    asset: str,
+    evidence: str,
+    status: str,
+) -> tuple[dict[str, Any], bool]:
+    title = _required_text(title, "exploit title", 240)
+    asset = _required_text(asset, "affected asset", 1_000)
+    evidence = _required_text(evidence, "exploit evidence", 4_000)
+    status = _choice(status, EXPLOIT_STATES, "exploit status")
+    evidence_record = record_evidence("Mitsu session analysis", evidence, "high" if status == "confirmed" else "medium")
+    entries = intel["exploits"]
+    exploit = next(
+        (
+            item for item in entries
+            if isinstance(item, dict)
+            and str(item.get("title", "")).casefold() == title.casefold()
+            and str(item.get("asset", "")).casefold() == asset.casefold()
+        ),
+        None,
+    )
+    now = _now()
+    created = exploit is None
+    if exploit is None:
+        if len(entries) >= MAX_EXPLOITS:
+            raise ValueError(f"session Intel already contains the maximum of {MAX_EXPLOITS} exploit records")
+        exploit = {
+            "id": _stable_id("exploit", title, asset),
+            "title": title,
+            "asset": asset,
+            "evidence": [],
+            "first_seen": now,
+        }
+        entries.append(exploit)
+    exploit["status"] = status
+    exploit["confidence"] = "high" if status == "confirmed" else "medium"
+    exploit["legacy_value"] = f"[{status.upper()}] {title} · {asset} — {evidence}"
+    evidence_items = exploit.setdefault("evidence", [])
+    if not any(
+        item.get("source") == evidence_record["source"] and item.get("details") == evidence_record["details"]
+        for item in evidence_items
+        if isinstance(item, dict)
+    ):
+        evidence_items.append(evidence_record)
+        del evidence_items[:-MAX_EVIDENCE_PER_RECORD]
+    exploit["updated_at"] = now
+    return exploit, created
+
+
+def _required_text(value: str, label: str, maximum: int) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value) > maximum or "\0" in value:
+        raise ValueError(f"{label} must be non-empty text of at most {maximum} characters")
+    return value.strip()
+
+
+def _choice(value: str, allowed: set[str], label: str) -> str:
+    if not isinstance(value, str) or value not in allowed:
+        choices = ", ".join(sorted(allowed))
+        raise ValueError(f"{label} must be one of: {choices}")
+    return value
+
+
+def intel_page(intel: dict[str, Any], section: str, offset: int = 0, limit: int = 8) -> str:
+    """Return a bounded JSON view so larger session maps remain readable by an LLM."""
+    if section not in {"summary", "assets", "observations", "findings", "exploits"}:
+        raise ValueError('section must be "summary", "assets", "observations", "findings", or "exploits"')
+    offset = max(0, int(offset))
+    limit = min(8, max(1, int(limit)))
+    assets = [item for item in intel.get("assets", []) if isinstance(item, dict)]
+    findings = [item for item in intel.get("findings", []) if isinstance(item, dict)]
+    observations = [item for item in intel.get("observations", []) if isinstance(item, dict)]
+    exploits = [item for item in intel.get("exploits", []) if isinstance(item, dict)]
+    if section == "summary":
+        return json.dumps(
+            {
+                "schema_version": intel.get("schema_version", 1),
+                "updated_at": intel.get("updated_at"),
+                "asset_count": len(assets),
+                "asset_types": _count_values(assets, "type"),
+                "scope_statuses": _count_values(assets, "scope"),
+                "finding_count": len(findings),
+                "finding_severities": _count_values(findings, "severity"),
+                "finding_statuses": _count_values(findings, "status"),
+                "observation_count": len(observations),
+                "observation_categories": _count_values(observations, "category"),
+                "exploit_count": len(exploits),
+                "exploit_statuses": _count_values(exploits, "status"),
+                "primary_assets": [
+                    {"type": item.get("type"), "value": item.get("value"), "scope": item.get("scope")}
+                    for item in assets if item.get("primary")
+                ],
+                "usage": "Request section=assets, observations, findings, or exploits with offset to read paginated records.",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    records = {
+        "assets": assets,
+        "observations": observations,
+        "findings": findings,
+        "exploits": exploits,
+    }[section]
+    page = [_bounded_record(record) for record in records[offset : offset + limit]]
+    next_offset = offset + len(page)
+    return json.dumps(
+        {
+            "section": section,
+            "total": len(records),
+            "offset": offset,
+            "records": page,
+            "next_offset": next_offset if next_offset < len(records) else None,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _count_values(records: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for record in records:
+        value = str(record.get(key, "unknown"))
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _bounded_record(record: dict[str, Any]) -> dict[str, Any]:
+    bounded = {
+        key: value[:1_200] if key in {"summary", "recommendation"} and isinstance(value, str)
+        else value
+        for key, value in record.items()
+        if key not in {"evidence", "attributes"}
+    }
+    attributes = record.get("attributes")
+    if isinstance(attributes, dict):
+        bounded["attributes"] = {
+            str(key)[:100]: str(value)[:200]
+            for key, value in list(attributes.items())[:12]
+        }
+        if len(attributes) > 12:
+            bounded["attributes_truncated"] = len(attributes) - 12
+    evidence = record.get("evidence", [])
+    if isinstance(evidence, list):
+        bounded["evidence"] = [
+            {
+                "source": str(item.get("source", ""))[:300],
+                "details": str(item.get("details", ""))[:800],
+                "confidence": str(item.get("confidence", "unknown")),
+                "recorded_at": str(item.get("recorded_at", "")),
+            }
+            for item in evidence[-2:]
+            if isinstance(item, dict)
+        ]
+    return bounded
