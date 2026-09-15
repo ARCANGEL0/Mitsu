@@ -331,3 +331,130 @@ def upsert_asset(
     asset["primary"] = primary if primary else bool(asset.get("primary", False))
     asset["updated_at"] = now
     return asset, created
+
+
+def upsert_finding(
+    intel: dict[str, Any],
+    *,
+    title: str,
+    asset: str,
+    severity: str,
+    status: str,
+    summary: str,
+    source: str,
+    evidence: str,
+    recommendation: str = "",
+    confidence: str = "medium",
+) -> tuple[dict[str, Any], bool]:
+    title = _required_text(title, "finding title", 240)
+    asset = asset.strip()[:1_000]
+    severity = _choice(severity, FINDING_SEVERITIES, "severity")
+    status = _choice(status, FINDING_STATES, "finding status")
+    summary = _required_text(summary, "finding summary", 4_000)
+    recommendation = recommendation.strip()[:4_000]
+    confidence = _choice(confidence, CONFIDENCE_LEVELS, "confidence")
+    evidence_record = record_evidence(source, evidence, confidence)
+
+    entries = intel["findings"]
+    finding = next(
+        (
+            item
+            for item in entries
+            if isinstance(item, dict)
+            and str(item.get("title", "")).casefold() == title.casefold()
+            and str(item.get("asset", "")).casefold() == asset.casefold()
+        ),
+        None,
+    )
+    now = _now()
+    created = finding is None
+    if finding is None:
+        if len(entries) >= MAX_FINDINGS:
+            raise ValueError(f"session Intel already contains the maximum of {MAX_FINDINGS} findings")
+        finding = {
+            "id": _stable_id("finding", title, asset),
+            "title": title,
+            "asset": asset,
+            "evidence": [],
+            "first_seen": now,
+        }
+        entries.append(finding)
+    finding.update(
+        {
+            "severity": severity,
+            "status": status,
+            "summary": summary,
+            "recommendation": recommendation,
+            "confidence": confidence,
+        }
+    )
+    evidence_items = finding.setdefault("evidence", [])
+    if not any(
+        item.get("source") == evidence_record["source"] and item.get("details") == evidence_record["details"]
+        for item in evidence_items
+        if isinstance(item, dict)
+    ):
+        evidence_items.append(evidence_record)
+        del evidence_items[:-MAX_EVIDENCE_PER_RECORD]
+    finding["updated_at"] = now
+    return finding, created
+
+
+def upsert_observation(
+    intel: dict[str, Any],
+    *,
+    title: str,
+    asset: str,
+    category: str,
+    status: str,
+    details: str,
+    source: str,
+    confidence: str = "medium",
+) -> tuple[dict[str, Any], bool]:
+    title = _required_text(title, "observation title", 240)
+    asset = asset.strip()[:1_000]
+    category = _choice(
+        category,
+        {"recon", "service", "authentication", "behavior", "configuration", "other"},
+        "observation category",
+    )
+    status = _choice(status, {"unverified", "validated", "rejected"}, "observation status")
+    details = _required_text(details, "observation details", 8_000)
+    confidence = _choice(confidence, CONFIDENCE_LEVELS, "confidence")
+    evidence_record = record_evidence(source, details, confidence)
+
+    entries = intel["observations"]
+    observation = next(
+        (
+            item
+            for item in entries
+            if isinstance(item, dict)
+            and str(item.get("title", "")).casefold() == title.casefold()
+            and str(item.get("asset", "")).casefold() == asset.casefold()
+        ),
+        None,
+    )
+    now = _now()
+    created = observation is None
+    if observation is None:
+        if len(entries) >= MAX_OBSERVATIONS:
+            raise ValueError(f"session Intel already contains the maximum of {MAX_OBSERVATIONS} observations")
+        observation = {
+            "id": _stable_id("observation", title, asset),
+            "title": title,
+            "asset": asset,
+            "evidence": [],
+            "first_seen": now,
+        }
+        entries.append(observation)
+    observation.update({"category": category, "status": status, "confidence": confidence})
+    evidence_items = observation.setdefault("evidence", [])
+    if not any(
+        item.get("source") == evidence_record["source"] and item.get("details") == evidence_record["details"]
+        for item in evidence_items
+        if isinstance(item, dict)
+    ):
+        evidence_items.append(evidence_record)
+        del evidence_items[:-MAX_EVIDENCE_PER_RECORD]
+    observation["updated_at"] = now
+    return observation, created
