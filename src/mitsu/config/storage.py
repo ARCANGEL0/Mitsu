@@ -209,6 +209,7 @@ class SessionStore:
             "mode": "Investigate",
             "targets": [],
             "active_target": None,
+            "intel": {"schema_version": 1, "assets": [], "observations": [], "findings": [], "exploits": []},
             "messages": [],
         }
         self.save_session(record)

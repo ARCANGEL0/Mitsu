@@ -238,7 +238,7 @@ def _package_action(manager_id: str, operation: str, packages: tuple[str, ...] |
     if manager_id == "apt-get":
         return ["apt-get", "install" if operation == "install" else "remove", "-y", *packages]
     if manager_id == "pacman":
-        return ["pacman", "-S", "--needed", *packages] if operation == "install" else ["pacman", "-R", *packages]
+        return ["pacman", "-S", "--needed", "--noconfirm", *packages] if operation == "install" else ["pacman", "-R", "--noconfirm", *packages]
     if manager_id in {"dnf", "yum"}:
         return [manager_id, "install" if operation == "install" else "remove", "-y", *packages]
     if manager_id == "zypper":
@@ -496,12 +496,12 @@ def _find_terminal() -> tuple[str, str] | None:
     )
 
 
-def open_install_terminal(
+def build_install_script(
     tool: ToolSpec,
     environment: HostEnvironment,
     operation: str,
-) -> tuple[subprocess.Popen, str]:
-    """Open a terminal for one allowlisted package or upstream installer."""
+) -> tuple[str, str, tuple[str, ...]]:
+    """Build a catalog-controlled package operation and report exact sudo commands."""
 
     if operation not in {"install", "uninstall"}:
         raise ArmoryError("Choose install or uninstall.")
@@ -515,11 +515,8 @@ def open_install_terminal(
         method_id = status.method_id
         method_name = _method_label(method_id)
 
-    terminal = _find_terminal()
-    if terminal is None:
-        raise ArmoryError("No supported terminal emulator was found to show the package operation.")
-
     preflight: list[str] = []
+    privileged_commands: list[str] = []
     if method_id.startswith("system:"):
         _, selected_manager, package = method_id.split(":", 2)
         manager_path = shutil.which(selected_manager)
@@ -532,6 +529,7 @@ def open_install_terminal(
             if not sudo:
                 raise ArmoryError("sudo is required to manage system packages, but it was not found.")
             package_command = [sudo, "--", *package_command]
+            privileged_commands.append(shlex.join(package_command))
         command = shlex.join(package_command)
         source = f"{package} · {environment.package_manager_name}"
     else:
@@ -567,6 +565,7 @@ def open_install_terminal(
                 if not sudo:
                     raise ArmoryError("sudo is required to install the toolchain prerequisite, but it was not found.")
                 prerequisite_command = [sudo, "--", *prerequisite_command]
+                privileged_commands.append(shlex.join(prerequisite_command))
             preflight.append(shlex.join(prerequisite_command))
         command = _method_command(method, operation, tool)
 
@@ -593,6 +592,19 @@ def open_install_terminal(
         "exit \"$result\"",
     ))
     script = "\n".join(script_lines)
+    return script, method_id, tuple(privileged_commands)
+
+
+def open_install_terminal(
+    tool: ToolSpec,
+    environment: HostEnvironment,
+    operation: str,
+) -> tuple[subprocess.Popen, str]:
+    """Open a terminal for one allowlisted package or upstream installer."""
+    script, method_id, _privileged_commands = build_install_script(tool, environment, operation)
+    terminal = _find_terminal()
+    if terminal is None:
+        raise ArmoryError("No supported terminal emulator was found to show the package operation.")
     terminal_id, terminal_path = terminal
     try:
         process = subprocess.Popen(
