@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import json
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 from mitsu.tools import AgentToolHost
@@ -39,6 +40,7 @@ async def run_agent_turn(
     history.append({"role": "user", "content": prompt})
     on_history()
     tool_calls_run = 0
+    seen_calls: set[str] = set()
     for _ in range(20):
         request_messages = [{"role": "system", "content": system_prompt}, *history]
         tools = tool_host.provider_tools(mode)
@@ -124,22 +126,34 @@ async def run_agent_turn(
             result = ""
             is_error = False
             try:
-                needs_approval = (
-                    mode == "Guided" and tool_host.requires_guided_approval(invocation.name)
-                ) or (
-                    mode == "Recon"
-                    and not tool_host.recon_action_is_low_impact(
-                        invocation.name, invocation.arguments
-                    )
+                fingerprint = json.dumps(
+                    [invocation.name, invocation.arguments],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
                 )
-                if needs_approval:
-                    allowed = await approve(invocation.name, invocation.arguments if isinstance(invocation.arguments, dict) else {})
-                    if not allowed:
-                        result, is_error = "The operator declined this action. Choose a lower-impact step or ask what to do differently.", True
+                if fingerprint in seen_calls:
+                    result = (
+                        "This exact tool call already ran during the current request. "
+                        "Review its earlier result and choose a different command or next step."
+                    )
+                    is_error = True
+                else:
+                    seen_calls.add(fingerprint)
+                    needs_approval = (mode == "Guided" and tool_host.requires_guided_approval(invocation.name)) or (
+                        mode == "Recon"
+                        and not tool_host.recon_action_is_low_impact(
+                            invocation.name, invocation.arguments
+                        )
+                    )
+                    if needs_approval:
+                        allowed = await approve(invocation.name, invocation.arguments if isinstance(invocation.arguments, dict) else {})
+                        if not allowed:
+                            result, is_error = "The operator declined this action. Choose a lower-impact step or ask what to do differently.", True
+                        else:
+                            result, is_error, _ = await tool_host.call(invocation.name, invocation.arguments)
                     else:
                         result, is_error, _ = await tool_host.call(invocation.name, invocation.arguments)
-                else:
-                    result, is_error, _ = await tool_host.call(invocation.name, invocation.arguments)
             except asyncio.CancelledError:
                 result = "The operator interrupted this tool call. Do not retry it unless asked."
                 is_error = True
