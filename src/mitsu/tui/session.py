@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import ipaddress
 import json
 import os
 import re
 import shutil
 import subprocess
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 import tempfile
 from urllib.parse import urlsplit
@@ -23,18 +22,30 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.events import Click
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, Input, OptionList, Static, TextArea
+from textual.widgets import Button, Input, OptionList, SelectionList, Static, TextArea
 
 from mitsu import __version__
+from mitsu.armory import CATEGORY_BY_ID, TOOLS, TOOLS_BY_CATEGORY, TOOL_BY_ID
 from mitsu.agents import history_from_legacy, run_agent_turn
 from mitsu.companions import COMPANIONS, companion_by_id
 from mitsu.config import PROVIDER_BY_ID, THEMES, CredentialStore, SessionStore
+from mitsu.intel import (
+    ensure_intel,
+    intel_page,
+    upsert_asset,
+    upsert_exploit,
+    upsert_finding,
+    upsert_observation,
+)
 from mitsu.providers import ProviderRequestError, check_reasoning_support
 from mitsu.history import apply_undo_changes, capture_workspace, diff_workspace
 from mitsu.tui.widgets import MitsuCompanion
 from mitsu.tools import AgentToolHost
+from mitsu.tools.redaction import redact_command, redact_history, redact_value
+from mitsu.tools.custom_mcp import validate_custom_tool_definitions
 from mitsu.tui.dialogs import ConfigurationDialog, ProviderDialog, SearchEngineDialog
 
 
@@ -60,11 +71,19 @@ MODE_COLORS = {
 }
 
 LEVEL_NAMES = {
-    1: "Opsec Kiddy",
-    2: "Curious mode",
-    3: "Chill",
-    4: "LulzSec Intern",
-    5: "Mista Robot",
+    1: "Passive",
+    2: "Light",
+    3: "Standard",
+    4: "Thorough",
+    5: "Intensive",
+}
+
+LEVEL_DESCRIPTIONS = {
+    1: "Public OSINT, DNS, metadata, and saved Intel. No direct probes to the target.",
+    2: "Check reachability and the 100 most common TCP ports at a low rate; collect minimal service details. No exploit checks or credential guessing.",
+    3: "Enumerate the top 1,000 TCP ports and service versions; follow exposed services, test supplied credentials once where relevant, and use low-impact validation.",
+    4: "Scan all TCP ports and the 100 most common UDP ports; deepen service and web enumeration, then validate well-supported findings at a moderate rate.",
+    5: "Scan all TCP ports and up to 1,000 UDP ports when relevant; run thorough service-specific and authenticated checks, then validate evidence-backed lab exploits. Continue to local privilege checks after authorized access.",
 }
 
 
@@ -80,13 +99,12 @@ class PromptTextArea(TextArea):
         ("/connect", "configure a provider", False),
         ("/config", "configure one or more web search engines", False),
         ("/new", "start a fresh session", False),
-        ("/target", "set or manage authorized scope", True),
         ("/mode", "switch Recon, Guided, or AutoPwn", True),
         ("/permissions", "review or clear saved approvals", True),
         ("/search", "find text in this conversation", True),
         ("/delete-session", "delete this session", False),
         ("/report", "write an assessment from session intel", False),
-        ("/mcp", "configure MCP servers", False),
+        ("/mcp", "configure the MCP server and its tools", False),
         ("/clear", "clear this conversation", False),
         ("/exit", "return to the command center", False),
         ("/help", "show command help", False),
@@ -444,13 +462,40 @@ class MCPConfigDialog(ModalScreen[bool]):
         try:
             self.value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            self.value = {"servers": []}
+            self.value = {
+                "servers": [],
+                "custom_tools": [],
+                "armory": {"enabled": True, "tools": {tool.id: True for tool in TOOLS}},
+            }
+        if isinstance(self.value, dict):
+            self.value.setdefault("custom_tools", [])
+            self.value.setdefault("armory", {"enabled": True, "tools": {tool.id: True for tool in TOOLS}})
+            armory = self.value.get("armory")
+            if isinstance(armory, dict):
+                selection = armory.get("tools", ["*"])
+                if isinstance(selection, list) and all(isinstance(item, str) for item in selection):
+                    identifiers = set(selection)
+                    if "*" in identifiers:
+                        selected_ids = {tool.id for tool in TOOLS}
+                    else:
+                        selected_ids = identifiers & set(TOOL_BY_ID)
+                        for category_id in identifiers:
+                            selected_ids.update(
+                                tool.id for tool in TOOLS_BY_CATEGORY.get(category_id, ())
+                            )
+                    armory["tools"] = {
+                        tool.id: tool.id in selected_ids for tool in TOOLS
+                    }
 
     def compose(self) -> ComposeResult:
         with Vertical(id="mcp-dialog"):
-            yield Static("MCP SERVER CONFIGURATION", id="mcp-dialog-title", markup=False)
+            yield Static("MITSU MCP SERVER CONFIGURATION", id="mcp-dialog-title", markup=False)
             yield Static(
-                "Servers connect when a session starts. Use a command with args/env or a Streamable HTTP URL.",
+                "Installed Armory tools become named MCP tools and follow session approvals. "
+                'Each selected installed tool is registered separately with its own description and input schema. '
+                'The "armory.tools" object maps each catalog tool ID to true or false. '
+                'Add ordinary CLI programs with documentation and named inputs under "custom_tools"; '
+                'add native stdio or HTTP MCP servers under "servers".',
                 id="mcp-dialog-detail",
                 markup=False,
             )
@@ -471,7 +516,8 @@ class MCPConfigDialog(ModalScreen[bool]):
             return
         if not self._valid_config(value):
             self.query_one("#mcp-dialog-detail", Static).update(
-                'Use an object with a "servers" list. Each server needs a name and either a command or an http(s) URL.'
+                'Check the JSON: native entries go in "servers"; wrapped CLI entries go in "custom_tools" '
+                'with a unique id, executable, description, and valid documented parameters.'
             )
             return
         try:
@@ -491,6 +537,21 @@ class MCPConfigDialog(ModalScreen[bool]):
     def _valid_config(value: object) -> bool:
         if not isinstance(value, dict) or not isinstance(value.get("servers"), list):
             return False
+        if not validate_custom_tool_definitions(value.get("custom_tools", [])):
+            return False
+        armory = value.get("armory")
+        if armory is not None:
+            if not isinstance(armory, dict) or not isinstance(armory.get("enabled", True), bool):
+                return False
+            tool_ids = armory.get("tools", ["*"])
+            known_ids = {"*", *TOOL_BY_ID, *CATEGORY_BY_ID}
+            if isinstance(tool_ids, dict):
+                if any(item not in TOOL_BY_ID or not isinstance(enabled, bool) for item, enabled in tool_ids.items()):
+                    return False
+            elif not isinstance(tool_ids, list) or any(not isinstance(item, str) for item in tool_ids):
+                return False
+            elif any(item not in known_ids for item in tool_ids):
+                return False
         for server in value["servers"]:
             if not isinstance(server, dict) or not isinstance(server.get("name"), str) or not server["name"].strip():
                 return False
@@ -549,6 +610,159 @@ class AskUserDialog(ModalScreen[str]):
         self.dismiss("[The operator skipped this question.]")
 
 
+class OperatorDialog(ModalScreen[str | None]):
+    BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
+
+    def __init__(
+        self,
+        question: str,
+        options: list[str],
+        mode: str = "single",
+        allow_other: bool = False,
+    ) -> None:
+        super().__init__()
+        self.question = question
+        self.options = options[:12]
+        self.mode = mode
+        self.allow_other = allow_other
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="operator-dialog"):
+            yield Static("MITSU ASKS", id="operator-dialog-title", markup=False)
+            yield Static(self.question, id="operator-dialog-question", markup=False)
+            if self.mode == "multiple" and self.options:
+                yield SelectionList(
+                    *((option, index) for index, option in enumerate(self.options)),
+                    id="operator-dialog-options",
+                )
+            elif self.options:
+                yield OptionList(*self.options, id="operator-dialog-options", markup=False)
+            if self.mode == "text" or self.allow_other:
+                yield Input(placeholder="Type another answer…", id="operator-dialog-input")
+            with Horizontal(id="operator-dialog-actions"):
+                yield Button("Next", id="operator-dialog-next", compact=True)
+                yield Button("Cancel", id="operator-dialog-cancel", compact=True)
+            hint = (
+                "↑ / ↓ move    Space select    Tab to Next    Enter continue    Esc cancel"
+                if self.mode == "multiple"
+                else "↑ / ↓ choose    Enter continue    Esc cancel"
+            )
+            yield Static(hint, id="operator-dialog-hint", markup=False)
+
+    def on_mount(self) -> None:
+        if self.mode == "text":
+            self.query_one("#operator-dialog-input", Input).focus()
+        elif self.options:
+            self.query_one("#operator-dialog-options").focus()
+        else:
+            self.query_one("#operator-dialog-input", Input).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if self.mode != "multiple" and event.option_list.id == "operator-dialog-options":
+            self._submit()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "operator-dialog-next":
+            self._submit()
+        elif event.button.id == "operator-dialog-cancel":
+            self.dismiss(None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "operator-dialog-input":
+            self._submit()
+
+    def on_key(self, event) -> None:
+        if self.mode == "multiple" and event.key == "enter":
+            event.stop()
+            self._submit()
+
+    def _submit(self) -> None:
+        typed = ""
+        if self.mode == "text" or self.allow_other:
+            typed = self.query_one("#operator-dialog-input", Input).value.strip()
+        if self.mode == "multiple":
+            selected = self.query_one("#operator-dialog-options", SelectionList).selected
+            choices = [self.options[index] for index in selected if isinstance(index, int) and 0 <= index < len(self.options)]
+        elif self.options:
+            options = self.query_one("#operator-dialog-options", OptionList)
+            highlighted = options.highlighted
+            choices = [self.options[highlighted]] if highlighted is not None and 0 <= highlighted < len(self.options) else []
+        else:
+            choices = []
+        self.dismiss(json.dumps({"selected": choices, "text": typed}, ensure_ascii=False))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class SudoPasswordDialog(ModalScreen[str | None]):
+    BINDINGS = [Binding("escape", "cancel", "Cancel command", priority=True)]
+
+    def __init__(self, command: str) -> None:
+        super().__init__()
+        self.command = command
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="sudo-password-dialog"):
+            yield Static("SUDO PASSWORD", id="sudo-password-title", markup=False)
+            yield Static(
+                f"Heya, I need your sudo password to run this command with elevated privileges:\n{self.command}\n\nThe full shell command will run as root. Your password is used once and never saved.",
+                id="sudo-password-message",
+                markup=False,
+            )
+            yield Input(placeholder="Enter sudo password", password=True, id="sudo-password-input")
+            with Horizontal(id="sudo-password-actions"):
+                yield Button("Run command", id="sudo-password-submit", compact=True)
+                yield Button("Cancel", id="sudo-password-cancel", compact=True)
+            yield Static("Enter run    Esc cancel", id="sudo-password-hint", markup=False)
+
+    def on_mount(self) -> None:
+        self.query_one("#sudo-password-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "sudo-password-input" and event.value:
+            self.dismiss(event.value)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "sudo-password-submit":
+            password = self.query_one("#sudo-password-input", Input).value
+            self.dismiss(password or None)
+        elif event.button.id == "sudo-password-cancel":
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class ToolResultCard(Static):
+    BINDINGS = [Binding("enter", "toggle", "Expand output"), Binding("space", "toggle", "Expand output")]
+    can_focus = True
+
+    def __init__(self, output: str, failed: bool = False) -> None:
+        self.output = output
+        status = re.search(r"(?:exit_code=|exited with status )(-?\d+)", output)
+        self.failed = failed or bool(status and int(status.group(1)) != 0) or "timed out" in output.casefold()
+        self.expanded = False
+        super().__init__(self._summary(), classes="tool-result-message", markup=False)
+
+    def _summary(self) -> str:
+        status = "FAILED" if self.failed else "SUCCESS"
+        code = re.search(r"(?:exit_code=|exited with status )(-?\d+)", self.output)
+        if code:
+            status += f" · exit {code.group(1)}"
+        return f"{status} · click or press Enter to expand output"
+
+    def action_toggle(self) -> None:
+        self.expanded = not self.expanded
+        if self.expanded:
+            self.update(self.output + "\n\n(click or press Enter to collapse)")
+        else:
+            self.update(self._summary())
+
+    def on_click(self, event: Click) -> None:
+        self.action_toggle()
+
+
 class ConversationSearchDialog(ModalScreen[str | None]):
     BINDINGS = [Binding("escape", "cancel", "Close search", priority=True)]
 
@@ -589,20 +803,38 @@ class ToolApprovalDialog(ModalScreen[str]):
             title = "RECON · ACTION REVIEW" if self.mode == "Recon" else "GUIDED · ACTION APPROVAL"
             yield Static(title, id="tool-approval-title", markup=False)
             is_shell = self.tool_name.endswith("__bash")
-            action_title = (
-                "Would you like to run this command?"
-                if is_shell
-                else f"Mitsu wants to call {self.tool_name}:"
+            armory_id = (
+                self.tool_name.removeprefix("mitsu__armory_").replace("_", "-")
+                if self.tool_name.startswith("mitsu__armory_")
+                else ""
             )
+            armory_tool = TOOL_BY_ID.get(armory_id)
+            if is_shell:
+                action_title = "Would you like to run this command?"
+            elif armory_tool:
+                action_title = f"Would you like to run {armory_tool.name}?"
+            else:
+                action_title = f"Mitsu wants to call {self.tool_name}:"
             yield Static(action_title, id="tool-approval-name", markup=False)
             if is_shell:
-                command = str(self.arguments.get("command", ""))
-                purpose = str(self.arguments.get("purpose", "")).strip()
+                command = redact_command(str(self.arguments.get("command", "")))
+                purpose = redact_command(str(self.arguments.get("purpose", "")).strip())
                 detail = "Environment: local\n\n$ " + command
                 if purpose:
                     detail += "\n\nReason: " + purpose
+            elif armory_tool:
+                argument_name = f"{armory_tool.id.replace('-', '_')}_argv"
+                detail = f"{argument_name}:\n" + json.dumps(
+                    redact_value(self.arguments.get(argument_name, [])),
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                )
+                purpose = redact_command(str(self.arguments.get("purpose", "")).strip())
+                if purpose:
+                    detail += "\n\nPurpose: " + purpose
             else:
-                detail = json.dumps(self.arguments, ensure_ascii=False, indent=2, default=str)
+                detail = json.dumps(redact_value(self.arguments), ensure_ascii=False, indent=2, default=str)
             yield Static(detail[:4000], id="tool-approval-detail", markup=False)
             options = [
                 "Yes · run once",
@@ -614,7 +846,7 @@ class ToolApprovalDialog(ModalScreen[str]):
 
     def _always_label(self) -> str:
         if self.tool_name.endswith("__bash"):
-            command = str(self.arguments.get("command", "")).strip()
+            command = redact_command(str(self.arguments.get("command", "")).strip())
             prefix = command[:64]
             return f"Yes · always allow commands starting with: {prefix or '(empty command)'}"
         return f"Yes · always allow this tool: {self.tool_name}"
