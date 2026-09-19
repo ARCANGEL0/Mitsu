@@ -770,7 +770,13 @@ class AgentToolHost:
         output = "\n".join(pieces) or "(tool completed with no output)"
         if len(output) > MAX_TOOL_RESULT:
             output = output[:MAX_TOOL_RESULT] + "\n… result truncated"
-        return output, bool(result.is_error), not read_only
+        failed_status = re.search(r"(?:exit_code=|exited with status )(-?\d+)", output)
+        failed = bool(result.is_error) or bool(failed_status and int(failed_status.group(1)) != 0)
+        failed = failed or any(
+            marker in output.casefold()
+            for marker in ("timed out after", "installation failed", "could not start")
+        )
+        return output, failed, not read_only
 
     async def close(self) -> None:
         if self._connected:
@@ -780,15 +786,44 @@ class AgentToolHost:
     async def _run_bash(self, command: str, purpose: str) -> str:
         if not command.strip():
             raise ToolHostError("Command cannot be empty.")
+        needs_sudo = os.name == "posix" and os.geteuid() != 0 and bool(
+            re.search(r"(?<![A-Za-z0-9_])sudo(?![A-Za-z0-9_])", command)
+        )
+        password: str | None = None
+        if needs_sudo:
+            sudo_path = shutil.which("sudo")
+            if sudo_path is None:
+                raise ToolHostError("This command uses sudo, but sudo is not installed on this host.")
+            if self.sudo_password is None:
+                raise ToolHostError("This command needs sudo, but Mitsu has no password dialog available.")
+            password = await self.sudo_password(command)
+            if password is None:
+                return f"exit_code=130\npurpose={purpose or '(not specified)'}\nThe operator cancelled the sudo prompt; the command was not run."
+            executable = sudo_path
+            arguments = ["-S", "-p", "", "--", "/bin/bash", "-o", "pipefail", "-c", command]
+            command_stdin = asyncio.subprocess.PIPE
+        else:
+            executable = "/bin/bash"
+            arguments = ["-o", "pipefail", "-c", command]
+            command_stdin = asyncio.subprocess.DEVNULL
         process = await asyncio.create_subprocess_exec(
-            "/bin/bash",
-            "-c",
-            command,
+            executable,
+            *arguments,
             cwd=self.workspace,
+            stdin=command_stdin,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             start_new_session=True,
         )
+        if password is not None and process.stdin is not None:
+            try:
+                process.stdin.write(password.encode("utf-8") + b"\n")
+                await process.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                process.stdin.close()
+                password = None
         output_task = asyncio.create_task(self._read_command_output(process.stdout))
         try:
             await asyncio.wait_for(process.wait(), timeout=60)
