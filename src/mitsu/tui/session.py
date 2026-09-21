@@ -1396,15 +1396,15 @@ class SessionScreen(Screen):
 
     def _show_level_panel(self) -> None:
         choices = (
-            ("1 · Opsec Kiddy — passive OSINT, tiny footprint", "level:1"),
-            ("2 · Curious mode — follow a few low-impact clues", "level:2"),
-            ("3 · Chill — balanced checks, focused validation", "level:3"),
-            ("4 · LulzSec Intern — broader enumeration, more hypotheses", "level:4"),
-            ("5 · Mista Robot — thorough in-scope investigation", "level:5"),
+            (f"1 · {LEVEL_NAMES[1]} — {LEVEL_DESCRIPTIONS[1]}", "level:1"),
+            (f"2 · {LEVEL_NAMES[2]} — {LEVEL_DESCRIPTIONS[2]}", "level:2"),
+            (f"3 · {LEVEL_NAMES[3]} — {LEVEL_DESCRIPTIONS[3]}", "level:3"),
+            (f"4 · {LEVEL_NAMES[4]} — {LEVEL_DESCRIPTIONS[4]}", "level:4"),
+            (f"5 · {LEVEL_NAMES[5]} — {LEVEL_DESCRIPTIONS[5]}", "level:5"),
         )
         self._show_command_panel(
-            "Change aggressiveness level for workflow",
-            "Pick how broadly Mitsu investigates. The current mode still controls tool approvals.",
+            "Investigation intensity",
+            "Choose the breadth and depth of checks. Recon, Guided, or AutoPwn still controls which actions can run.",
             list(choices),
         )
         options = self.query_one("#command-panel-options", OptionList)
@@ -1618,7 +1618,7 @@ class SessionScreen(Screen):
                 self.agent_history[:] = self.agent_history[:max(0, history_count)]
             else:
                 self.agent_history = self._history_for_new_protocol()
-            self.session["agent_history"] = self.agent_history
+            self.session["agent_history"] = redact_history(copy.deepcopy(self.agent_history))
             for newer in points[index:]:
                 if isinstance(newer, dict):
                     newer["conversation_available"] = False
@@ -1644,11 +1644,7 @@ class SessionScreen(Screen):
         for entry in messages:
             if not isinstance(entry, dict):
                 continue
-            widget = Static(
-                self._message_renderable(str(entry.get("text", ""))),
-                classes=self._message_class(str(entry.get("role", "assistant"))),
-                markup=False,
-            )
+            widget = self._message_widget(entry)
             self._message_widgets.append(widget)
             await conversation.mount(widget)
         conversation.scroll_end(animate=False)
@@ -1722,7 +1718,7 @@ class SessionScreen(Screen):
         self._start_thinking(prompt, system_prompt)
 
         def save_history() -> None:
-            self.session["agent_history"] = self.agent_history
+            self.session["agent_history"] = redact_history(copy.deepcopy(self.agent_history))
             self.sessions.save_session(self.session)
 
         def restore_history(note: str) -> None:
