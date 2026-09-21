@@ -225,7 +225,7 @@ class SessionTopBar(Static):
         self,
         provider: dict,
         mode: str,
-        target_count: int,
+        asset_count: int,
         finding_count: int,
         ip_count: int,
         theme_id: str,
@@ -233,16 +233,16 @@ class SessionTopBar(Static):
     ) -> None:
         self.provider = provider
         self.mode = mode
-        self.target_count = target_count
+        self.asset_count = asset_count
         self.finding_count = finding_count
         self.ip_count = ip_count
         self.theme_id = theme_id
         self.accent = THEMES.get(theme_id, THEMES["ember"])["accent"]
         super().__init__(self._content(), markup=False, **kwargs)
 
-    def set_context(self, mode: str, target_count: int, finding_count: int, ip_count: int) -> None:
+    def set_context(self, mode: str, asset_count: int, finding_count: int, ip_count: int) -> None:
         self.mode = mode
-        self.target_count = target_count
+        self.asset_count = asset_count
         self.finding_count = finding_count
         self.ip_count = ip_count
         self.update(self._content())
@@ -269,7 +269,7 @@ class SessionTopBar(Static):
             style=f"bold {mode_colors['foreground']} on {mode_colors['background']}",
         )
         line.append(
-            f"   {self.target_count} targets · {self.finding_count} findings · {self.ip_count} IPs",
+            f"   {self.asset_count} assets · {self.finding_count} findings · {self.ip_count} IPs",
             style=palette["code"]["string"],
         )
         return line
@@ -908,8 +908,26 @@ class SessionScreen(Screen):
         self.mode = {"Investigate": "Recon", "Autopwn": "AutoPwn", "auto-pwn": "AutoPwn"}.get(mode, mode)
         if self.mode not in {"Recon", "Guided", "AutoPwn"}:
             self.mode = "Recon"
-        self.targets = session.get("targets", [])
-        self.active_target = session.get("active_target")
+        self.intel, intel_migrated = ensure_intel(session)
+        self.assets = self.intel["assets"]
+        self.targets = [
+            str(item.get("value", ""))
+            for item in self.assets
+            if isinstance(item, dict) and item.get("scope") == "in_scope" and item.get("value")
+        ]
+        primary_asset = next(
+            (
+                item for item in self.assets
+                if isinstance(item, dict) and item.get("primary") and item.get("scope") == "in_scope"
+            ),
+            None,
+        )
+        saved_active_target = str(session.get("active_target", "") or "")
+        self.active_target = (
+            saved_active_target if saved_active_target in self.targets
+            else str(primary_asset.get("value")) if primary_asset
+            else (self.targets[0] if self.targets else None)
+        )
         saved_prefixes = session.get("trusted_command_prefixes", [])
         self.trusted_command_prefixes = [
             str(value)
@@ -922,17 +940,25 @@ class SessionScreen(Screen):
             for value in (saved_tools if isinstance(saved_tools, list) else [])
             if isinstance(value, str) and value
         ]
-        self.findings = self._stored_list("findings")
-        stored_exploits = self._stored_list("exploits")
+        self.findings = [self._finding_summary(item) for item in self.intel["findings"]]
         self.exploits = [
-            item for item in stored_exploits
-            if not self._is_unverified_exploit_reference(item)
+            self._exploit_summary(item)
+            for item in self.intel["exploits"]
+            if isinstance(item, dict)
+            and not self._is_unverified_exploit_reference(self._exploit_summary(item))
         ]
-        if len(self.exploits) != len(stored_exploits):
+        if self.exploits != self._stored_list("exploits"):
             self.session["exploits"] = self.exploits
             self.sessions.save_session(self.session)
-        self.ips = self._stored_list("ips")
+        self.ips = list(dict.fromkeys(
+            str(item.get("value", ""))
+            for item in self.assets
+            if isinstance(item, dict) and item.get("type") == "ip" and item.get("value")
+        ))
         self.harvested_data = self._stored_list("harvested_data")
+        self._sync_session_intel_state()
+        if intel_migrated:
+            self.sessions.save_session(self.session)
         self._companion_generation = 0
         self._last_activity = "Mitsu is Ready to Pwn!"
         self.level = int(session.get("level", 3)) if str(session.get("level", 3)).isdigit() else 3
@@ -954,12 +980,14 @@ class SessionScreen(Screen):
             self.agent_history = saved_agent_history
         else:
             self.agent_history = history_from_legacy(session.get("chat_history", []))
-        self.session["agent_history"] = self.agent_history
+        self.session["agent_history"] = redact_history(copy.deepcopy(self.agent_history))
         self._tool_host = AgentToolHost(
             Path.cwd(),
             self._ask_user,
             self._update_session_intel,
             search_settings=self.app.credentials.search_engines,
+            operator_dialog=self._operator_dialog,
+            sudo_password=self._request_sudo_password,
         )
         self._tool_connection_task: asyncio.Task | None = None
         self._tool_reconnect_task: asyncio.Task | None = None
@@ -986,7 +1014,7 @@ class SessionScreen(Screen):
         yield SessionTopBar(
             self.provider,
             self.mode,
-            len(self.targets),
+            len(self.assets),
             len(self.findings),
             len(self.ips),
             self.theme_id,
@@ -998,7 +1026,7 @@ class SessionScreen(Screen):
                 yield Static("Mitsu is Ready to Pwn!", id="companion-status", markup=False)
                 yield Static("Workspace", classes="session-label", markup=False)
                 yield Static(str(Path.cwd()), id="project-path", markup=False)
-                yield Static("Aggressive level:", classes="session-label", markup=False)
+                yield Static("Investigation intensity:", classes="session-label", markup=False)
                 yield Static("", id="aggressive-level", markup=False)
                 yield Static("Search", classes="session-label", id="search-label", markup=False)
                 yield Static("", id="search-status", markup=False)
@@ -1009,12 +1037,7 @@ class SessionScreen(Screen):
                 with VerticalScroll(id="conversation"):
                     if self.session.get("messages"):
                         for entry in self.session["messages"]:
-                            role = entry.get("role", "assistant")
-                            message_widget = Static(
-                                self._message_renderable(entry.get("text", "")),
-                                classes=self._message_class(role),
-                                markup=False,
-                            )
+                            message_widget = self._message_widget(entry)
                             self._message_widgets.append(message_widget)
                             yield message_widget
                     else:
@@ -1029,9 +1052,11 @@ class SessionScreen(Screen):
                 yield Static("", id="intel-summary", markup=False)
                 yield Static("Last activity", classes="session-label", markup=False)
                 yield Static(self._last_activity, id="activity-summary", markup=False)
-                yield Static("Authorized scope", classes="session-label", markup=False)
+                yield Static("Target map", classes="session-label", markup=False)
                 yield Static("", id="target-summary", markup=False)
                 yield Static("", id="target-list", markup=False)
+                yield Static("Observations", classes="session-label", markup=False)
+                yield Static("", id="observations-summary", markup=False)
                 yield Static("Findings", classes="session-label", markup=False)
                 yield Static("", id="findings-summary", markup=False)
                 yield Static("Exploits", classes="session-label", markup=False)
@@ -1101,6 +1126,13 @@ class SessionScreen(Screen):
             ready.set()
             count = len(host.provider_tools(self.mode))
             status = f"Tools ready · {count} available"
+            if host.armory_enabled:
+                if host.armory_tool_count:
+                    status += f" · RedTeam Armory {host.armory_tool_count}"
+                else:
+                    status += " · RedTeam Armory has no selected installed tools"
+            if host.custom_tool_count:
+                status += f" · Custom CLI MCP {host.custom_tool_count}"
             if host.connection_messages:
                 status += f" · {len(host.connection_messages)} MCP connection issue(s)"
             self._set_activity(status)
