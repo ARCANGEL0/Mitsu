@@ -1807,8 +1807,6 @@ class SessionScreen(Screen):
                 elif event.kind == "tool_finished":
                     name = str(event.data.get("name", "tool"))
                     result = str(event.data.get("result", ""))
-                    if len(result) > 5000:
-                        result = result[:5000] + "\n… shown output truncated"
                     self._current_input_estimate = max(
                         1,
                         len(
@@ -1822,7 +1820,7 @@ class SessionScreen(Screen):
                     )
                     failed = bool(event.data.get("is_error"))
                     self._set_activity(f"{name} {'failed' if failed else 'finished'}.")
-                    await self._append_message(result, "tool-result")
+                    await self._append_message(result, "tool-result", tool_failed=failed)
                     if failed:
                         self._set_companion("error", "Tool failed", reset_after=1.5)
                     elif name.endswith(("record_exploit", "remove_exploit")):
@@ -2064,6 +2062,20 @@ class SessionScreen(Screen):
         answer = await self._await_modal(AskUserDialog(question, choices))
         return str(answer)
 
+    async def _operator_dialog(
+        self,
+        question: str,
+        options: list[str],
+        mode: str,
+        allow_other: bool,
+    ) -> str | None:
+        answer = await self._await_modal(OperatorDialog(question, options, mode, allow_other))
+        return str(answer) if answer is not None else None
+
+    async def _request_sudo_password(self, command: str) -> str | None:
+        answer = await self._await_modal(SudoPasswordDialog(redact_command(command)))
+        return str(answer) if answer is not None else None
+
     async def _approve_tool(self, name: str, arguments: dict) -> bool:
         if name.endswith("__bash"):
             command = str(arguments.get("command", "")).strip()
@@ -2104,6 +2116,95 @@ class SessionScreen(Screen):
         await self._append_message("Use /permissions to review saved approvals.", "system")
 
     async def _update_session_intel(self, action: str, values: dict) -> str:
+        if action == "get_map":
+            try:
+                return intel_page(
+                    self.intel,
+                    str(values.get("section", "summary")),
+                    values.get("offset", 0),
+                    values.get("limit", 12),
+                )
+            except (TypeError, ValueError) as error:
+                return f"Could not read session Intel: {error}"
+
+        if action == "upsert_asset":
+            try:
+                asset, created = upsert_asset(
+                    self.intel,
+                    asset_type=values.get("asset_type", ""),
+                    value=values.get("value", ""),
+                    source=values.get("source", ""),
+                    evidence=values.get("evidence", ""),
+                    parent=values.get("parent", ""),
+                    verification=values.get("verification"),
+                    scope=values.get("scope"),
+                    confidence=values.get("confidence", "medium"),
+                    attributes=values.get("attributes", {}),
+                    primary=values.get("primary", False),
+                )
+            except (TypeError, ValueError) as error:
+                return f"Asset was not saved: {error}"
+            if asset.get("primary"):
+                self.active_target = asset["value"]
+            elif self.active_target not in [
+                item.get("value") for item in self.intel["assets"]
+                if isinstance(item, dict) and item.get("scope") == "in_scope"
+            ]:
+                self.active_target = None
+            self._sync_session_intel_state()
+            self.intel["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            self.sessions.save_session(self.session)
+            self._update_context()
+            action_text = "Recorded" if created else "Updated"
+            self._set_activity(f"{action_text} {asset['type']} asset {asset['value']}.")
+            return f"{action_text} asset {asset['value']} ({asset['type']}, scope: {asset['scope']}, verification: {asset['verification']})."
+
+        if action == "upsert_finding":
+            try:
+                finding, created = upsert_finding(
+                    self.intel,
+                    title=values.get("title", ""),
+                    asset=values.get("asset", ""),
+                    severity=values.get("severity", "unknown"),
+                    status=values.get("status", "lead"),
+                    summary=values.get("summary", ""),
+                    source=values.get("source", ""),
+                    evidence=values.get("evidence", ""),
+                    recommendation=values.get("recommendation", ""),
+                    confidence=values.get("confidence", "medium"),
+                )
+            except (TypeError, ValueError) as error:
+                return f"Finding was not saved: {error}"
+            self._sync_session_intel_state()
+            self.intel["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            self.sessions.save_session(self.session)
+            self._update_context()
+            action_text = "Recorded" if created else "Updated"
+            self._set_activity(f"{action_text} {finding['status']} finding: {finding['title']}.")
+            return f"{action_text} finding {finding['title']} ({finding['severity']}, {finding['status']}) for {finding['asset'] or 'the session'}; evidence saved."
+
+        if action == "upsert_observation":
+            try:
+                observation, created = upsert_observation(
+                    self.intel,
+                    title=values.get("title", ""),
+                    asset=values.get("asset", ""),
+                    category=values.get("category", "other"),
+                    status=values.get("status", "unverified"),
+                    details=values.get("details", ""),
+                    source=values.get("source", ""),
+                    confidence=values.get("confidence", "medium"),
+                )
+            except (TypeError, ValueError) as error:
+                return f"Observation was not saved: {error}"
+            self._sync_session_intel_state()
+            self.intel["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            self.sessions.save_session(self.session)
+            self._update_context()
+            action_text = "Recorded" if created else "Updated"
+            self._set_activity(f"{action_text} observation: {observation['title']}.")
+            return f"{action_text} observation {observation['title']} for {observation['asset'] or 'the session'}; source and evidence saved."
+
         if action == "record_exploit":
             title = str(values.get("title", "")).strip()[:180]
             target = str(values.get("target", "")).strip()[:255]
@@ -2113,6 +2214,16 @@ class SessionScreen(Screen):
                 return "Exploit not recorded: title, target, and evidence are required."
             if status not in {"candidate", "confirmed"}:
                 return "Exploit not recorded: status must be candidate or confirmed."
+            try:
+                _exploit, _created = upsert_exploit(
+                    self.intel,
+                    title=title,
+                    asset=target,
+                    evidence=evidence,
+                    status=status,
+                )
+            except (TypeError, ValueError) as error:
+                return f"Exploit intel not recorded: {error}"
             line = f"[{status.upper()}] {title} · {target} — {evidence}"
             match_index = next(
                 (
@@ -2129,7 +2240,8 @@ class SessionScreen(Screen):
             else:
                 self.exploits[match_index] = line
                 outcome = "Updated"
-            self.session["exploits"] = self.exploits
+            self._sync_session_intel_state()
+            self.intel["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             self.sessions.save_session(self.session)
             self._update_context()
             self._set_activity(f"{outcome} {status} exploit intel for {target}.")
@@ -2153,7 +2265,16 @@ class SessionScreen(Screen):
             if match is None:
                 return f"No recorded exploit matched {title!r}; Intel was unchanged."
             self.exploits.remove(match)
-            self.session["exploits"] = self.exploits
+            self.intel["exploits"] = [
+                item for item in self.intel["exploits"]
+                if not (
+                    isinstance(item, dict)
+                    and title.casefold() in str(item.get("title", "")).casefold()
+                    and (not target or target.casefold() in str(item.get("asset", "")).casefold())
+                )
+            ]
+            self._sync_session_intel_state()
+            self.intel["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             self.sessions.save_session(self.session)
             self._update_context()
             self._set_activity(f"Removed exploit intel for {title}: {reason[:120]}")
