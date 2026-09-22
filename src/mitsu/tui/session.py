@@ -2300,8 +2300,8 @@ class SessionScreen(Screen):
     @staticmethod
     def _format_tool_call(name: str, arguments: object) -> str:
         if name.endswith("__bash") and isinstance(arguments, dict):
-            command = str(arguments.get("command", ""))
-            purpose = str(arguments.get("purpose", ""))
+            command = redact_command(str(arguments.get("command", "")))
+            purpose = redact_command(str(arguments.get("purpose", "")))
             return f"$ {command}" + (f"\n{purpose}" if purpose else "")
         if isinstance(arguments, dict):
             tool = name.rsplit("__", 1)[-1].replace("_", " ")
@@ -2314,7 +2314,7 @@ class SessionScreen(Screen):
             if tool == "system info":
                 return "Checking system information"
         try:
-            serialized = json.dumps(arguments, ensure_ascii=False, default=str)
+            serialized = json.dumps(redact_value(arguments), ensure_ascii=False, default=str)
         except (TypeError, ValueError):
             serialized = str(arguments)
         if len(serialized) > 1200:
@@ -2397,7 +2397,7 @@ class SessionScreen(Screen):
             self.session["chat_history"] = []
             self.session["rewind_points"] = []
             self.agent_history.clear()
-            self.session["agent_history"] = self.agent_history
+            self.session["agent_history"] = redact_history(copy.deepcopy(self.agent_history))
             self._message_widgets.clear()
             self.sessions.save_session(self.session)
             await self.query_one("#conversation", VerticalScroll).remove_children()
@@ -2410,7 +2410,7 @@ class SessionScreen(Screen):
             return
         if command == "/help":
             await self._append_message(
-                "Commands: /connect, /model, /config, /theme, /mcp, /new, /rename [name], /target [add|select|remove|clear|list], "
+                "Commands: /connect, /model, /config, /theme, /mcp, /new, /rename [name], "
                 "/level, /pet, /export, /rewind, /reasoning [on|off|low|medium|high], /verbose, /permissions [clear], /search <text>, /report, /map, "
                 "/vulnsearch <criteria>, /mode [recon|guided|autopwn], /delete-session, /clear, /menu. "
                 "Shift+Tab cycles modes. Ask naturally to inspect files, search the web, or run a shell command. "
@@ -2433,9 +2433,6 @@ class SessionScreen(Screen):
                 self._show_permissions_panel()
                 return
             await self._permissions_command(argument)
-            return
-        if command in {"/target", "/targets", "/scope"}:
-            await self._target_command(argument)
             return
         if command == "/level":
             await self._level_command(argument)
@@ -2501,77 +2498,6 @@ class SessionScreen(Screen):
             return
         await self.app.open_menu()
 
-    async def _target_command(self, argument: str) -> None:
-        action, _, value = argument.partition(" ")
-        action = action.lower()
-        value = value.strip()
-        if action not in {"add", "set", "select", "remove", "clear", "list"} and action:
-            value = argument.strip()
-            action = "set"
-        if action == "set":
-            if not self._valid_target(value):
-                await self._fail("Enter a hostname, IP, CIDR, or http(s) URL without spaces.", "Invalid target")
-                return
-            if value not in self.targets:
-                self.targets.append(value)
-            self.active_target = value
-            self._persist_scope()
-            self._set_activity(f"Main target set to {value}.")
-            await self._append_message(f"Main target set to {value}; it is now in this session’s authorized scope.", "success")
-            return
-        if action == "add":
-            if not self._valid_target(value):
-                await self._fail("Enter a hostname, IP, CIDR, or http(s) URL without spaces.", "Invalid target")
-                return
-            if value in self.targets:
-                await self._append_message(f"{value} is already in the authorized scope.")
-                return
-            self.targets.append(value)
-            self.active_target = value
-            self._persist_scope()
-            self._set_activity(f"Added {value} to scope.")
-            self._set_companion("success", "Scope updated", reset_after=1.8)
-            await self._append_message(f"Added {value} to this session’s authorized scope.", "success")
-            return
-        if action == "select":
-            if value not in self.targets:
-                await self._fail(f"Target is not in scope: {value or '(empty)'}", "Target not found")
-                return
-            self.active_target = value
-            self._persist_scope()
-            self._set_activity(f"Selected {value}.")
-            self._set_companion("success", "Target selected", reset_after=1.8)
-            await self._append_message(f"Selected {value} as the active target.", "success")
-            return
-        if action == "remove":
-            if value not in self.targets:
-                await self._fail(f"Target is not in scope: {value or '(empty)'}", "Target not found")
-                return
-            self.targets.remove(value)
-            if self.active_target == value:
-                self.active_target = self.targets[-1] if self.targets else None
-            self._persist_scope()
-            self._set_activity(f"Removed {value} from scope.")
-            self._set_companion("success", "Scope updated", reset_after=1.8)
-            await self._append_message(f"Removed {value} from this session’s authorized scope.", "success")
-            return
-        if action == "clear":
-            self.targets.clear()
-            self.active_target = None
-            self._persist_scope()
-            self._set_activity("Target scope cleared.")
-            self._set_companion("success", "Scope cleared", reset_after=1.8)
-            await self._append_message("Cleared the authorized target list.", "success")
-            return
-        if action in {"list", ""}:
-            lines = "\n".join(
-                f"{'›' if target == self.active_target else ' '} {target}"
-                for target in self.targets
-            ) or "No targets in scope."
-            await self._append_message(f"Authorized targets:\n{lines}")
-            return
-        await self._fail("Use /target <domain-or-IP>, add, select, remove, clear, or list.", "Invalid target command")
-
     async def _level_command(self, argument: str) -> None:
         if not argument:
             self._show_level_panel()
@@ -2591,7 +2517,7 @@ class SessionScreen(Screen):
         self.sessions.save_session(self.session)
         self._update_context()
         label = LEVEL_NAMES[level]
-        self._set_activity(f"Aggressive level set to {level}/5 · {label}.")
+        self._set_activity(f"Investigation intensity set to {level}/5 · {label}.")
 
     def _companion_dialog_closed(self, companion_id: str | None) -> None:
         if companion_id:
