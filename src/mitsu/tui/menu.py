@@ -1357,6 +1357,9 @@ class MainMenuScreen(Screen):
         model_search.disabled = False
         model_search.value = ""
         kind = ("sessions", "configuration", "update", "quit")[self.left_index]
+        self.query_one("#menu-footer", Static).update(
+            "↑ / ↓ move    Enter select / open    Del remove session    ← / Esc command center    Tab switch panel    Q quit"
+        )
         self.panel_kind = kind
         self.right_index = 0
         title = {

@@ -3339,6 +3339,7 @@ CURRENT MODE: {self.mode}
     def _remove_legacy_command_entries(self) -> None:
         """Remove old UI-command rows and their displayed results from saved chat."""
         command_names = {command.casefold() for command, _description, _takes_argument in PromptTextArea.COMMANDS}
+        command_names.update({"/target", "/targets", "/scope"})
         changed = False
 
         def clean(entries: object, content_key: str) -> list:
@@ -3387,6 +3388,8 @@ CURRENT MODE: {self.mode}
             command = content.split(maxsplit=1)[0] if content else ""
             return command.casefold() == "/level"
         return content.startswith((
+            "Investigation intensity set to ",
+            "Investigation intensity:",
             "Aggressive level set to ",
             "Aggressive level:",
             "Review depth is ",
@@ -3409,11 +3412,63 @@ CURRENT MODE: {self.mode}
         tagged = "[candidate]" in value or "[confirmed]" in value
         return "[edb-" in value and not tagged
 
-    def _persist_scope(self) -> None:
+    def _sync_session_intel_state(self) -> None:
+        self.assets = self.intel["assets"]
+        self.targets = list(dict.fromkeys(
+            str(item.get("value", ""))
+            for item in self.assets
+            if isinstance(item, dict) and item.get("scope") == "in_scope" and item.get("value")
+        ))
+        primary_asset = next(
+            (
+                item for item in self.assets
+                if isinstance(item, dict) and item.get("primary") and item.get("scope") == "in_scope"
+            ),
+            None,
+        )
+        if self.active_target not in self.targets:
+            self.active_target = str(primary_asset["value"]) if primary_asset else (self.targets[0] if self.targets else None)
+        self.findings = [self._finding_summary(item) for item in self.intel["findings"] if isinstance(item, dict)]
+        self.ips = list(dict.fromkeys(
+            str(item.get("value", ""))
+            for item in self.assets
+            if isinstance(item, dict) and item.get("type") == "ip" and item.get("value")
+        ))
+        self.session["intel"] = self.intel
         self.session["targets"] = self.targets
         self.session["active_target"] = self.active_target
-        self.sessions.save_session(self.session)
-        self._update_context()
+        self.session["findings"] = self.findings
+        self.session["ips"] = self.ips
+        self.session["exploits"] = self.exploits
+
+    @staticmethod
+    def _finding_summary(item: object) -> str:
+        if not isinstance(item, dict):
+            return str(item)
+        severity = str(item.get("severity", "unknown")).upper()
+        title = str(item.get("title", "Untitled finding"))
+        asset = str(item.get("asset", "")).strip()
+        status = str(item.get("status", "lead"))
+        summary = str(item.get("summary", "")).strip()
+        location = f" · {asset}" if asset else ""
+        detail = f": {summary}" if summary and summary.casefold() != title.casefold() else ""
+        return f"[{severity} · {status}] {title}{location}{detail}"
+
+    @staticmethod
+    def _exploit_summary(item: dict) -> str:
+        legacy_value = str(item.get("legacy_value", "")).strip()
+        if legacy_value:
+            return legacy_value
+        status = str(item.get("status", "candidate")).upper()
+        title = str(item.get("title", "Exploit reference"))
+        asset = str(item.get("asset", "")).strip()
+        evidence_items = item.get("evidence", [])
+        evidence = ""
+        if isinstance(evidence_items, list) and evidence_items and isinstance(evidence_items[-1], dict):
+            evidence = str(evidence_items[-1].get("details", ""))
+        suffix = f" · {asset}" if asset else ""
+        suffix += f" — {evidence}" if evidence else ""
+        return f"[{status}] {title}{suffix}"
 
     async def action_back_to_menu(self) -> None:
         if self._agent_task and not self._agent_task.done():
@@ -3431,6 +3486,13 @@ CURRENT MODE: {self.mode}
             "error": "error-message",
             "system": "system-message",
         }.get(role, "assistant-message")
+
+    def _message_widget(self, entry: dict[str, Any]) -> Static:
+        role = str(entry.get("role", "assistant"))
+        text = str(entry.get("text", ""))
+        if role == "tool-result":
+            return ToolResultCard(text, bool(entry.get("tool_failed")))
+        return Static(self._message_renderable(text), classes=self._message_class(role), markup=False)
 
     def _message_renderable(self, message: str) -> Text | Group:
         code_blocks = list(re.finditer(r"```([^\n`]*)\n?(.*?)```", message, re.DOTALL))
@@ -3462,29 +3524,3 @@ CURRENT MODE: {self.mode}
         if trailing:
             renderables.append(Text(trailing))
         return Group(*renderables)
-
-    @staticmethod
-    def _valid_target(target: str) -> bool:
-        if not target or any(character.isspace() for character in target):
-            return False
-        if "://" in target:
-            try:
-                parsed = urlsplit(target)
-                return (
-                    parsed.scheme in {"http", "https"}
-                    and parsed.hostname is not None
-                    and parsed.username is None
-                    and parsed.password is None
-                    and (parsed.port is None or 1 <= parsed.port <= 65535)
-                )
-            except ValueError:
-                return False
-        try:
-            ipaddress.ip_network(target, strict=False)
-            return True
-        except ValueError:
-            labels = target.rstrip(".").split(".")
-            return bool(labels) and all(
-                re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
-                for label in labels
-            )

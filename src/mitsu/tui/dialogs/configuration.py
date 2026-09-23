@@ -11,7 +11,7 @@ from textual.widgets import OptionList, Static
 _SETTINGS = (
     ("Provider and model", "provider", "Choose the active model provider and update its connection."),
     ("Search providers", "search", "Configure, validate, enable, or pause web search engines."),
-    ("MCP servers", "mcp", "Review the MCP servers Mitsu can connect to during a session."),
+    ("MCP servers", "mcp", "Configure custom servers and installed RedTeam Armory tools."),
     ("Permissions and approvals", "planned", "Planned: approval defaults, saved command approvals, and MCP tool approvals."),
     ("Tool access", "planned", "Planned: choose which shell, file, search, and MCP tools are available."),
     ("Authorized scope", "planned", "Planned: scope reminders, target allowlists, and out-of-scope safeguards."),
