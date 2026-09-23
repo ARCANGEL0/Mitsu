@@ -5,6 +5,7 @@ import copy
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -1191,6 +1192,10 @@ class SessionScreen(Screen):
         prompt = event.prompt.strip()
         if not prompt:
             return
+        if prompt.startswith("/") and not self._dispatching_prompt:
+            await self._dispatch_prompt(prompt)
+            self.call_after_refresh(self._focus_prompt)
+            return
         if self._agent_running or self._command_running or self._dispatching_prompt or self._queued_prompts:
             self._queued_prompts.append(prompt)
             self._update_queue_status()
@@ -1208,22 +1213,24 @@ class SessionScreen(Screen):
             if prompt.startswith("/"):
                 # Slash commands are TUI actions; only ordinary prompts enter the agent loop.
                 command = prompt.partition(" ")[0].casefold()
-                self._command_running = True
+                previous_command_running = self._command_running
+                previous_active_command = self._active_command
+                self._command_running = previous_command_running or not self._agent_running
                 self._active_command = command
                 try:
                     await self._handle_command(prompt)
                     if (
                         self.app.screen is self
                         and not self._command_panel_active
-                        and command not in {"/search", "/clear", "/level", "/export", "/rewind"}
+                        and command not in {"/search", "/clear", "/level", "/mode", "/export", "/rewind"}
                     ):
                         self._show_command_panel(
                             f"/{command.removeprefix('/')}",
                             self._last_activity,
                         )
                 finally:
-                    self._command_running = False
-                    self._active_command = None
+                    self._command_running = previous_command_running
+                    self._active_command = previous_active_command
             else:
                 await self._append_message(f"›  {prompt}", "user", context_text=prompt)
                 self._agent_running = True
@@ -1245,8 +1252,9 @@ class SessionScreen(Screen):
         palette = THEMES.get(self.theme_id, THEMES["ember"])
         accent = palette["accent"]
         renderable = Text()
-        renderable.append(f"↳ In queue · {len(self._queued_prompts)}", style=f"bold {accent}")
-        renderable.append(" · Esc interrupts + sends next now", style=palette["ui"]["muted"])
+        count = len(self._queued_prompts)
+        renderable.append(f"⏳  NEXT UP · {count} prompt" + ("s" if count != 1 else ""), style=f"bold {accent}")
+        renderable.append("  ·  Esc stops this turn and sends the next", style=palette["ui"]["muted"])
         preview_limit = max(8, min(72, self.size.width - 16))
         visible_prompts = self._queued_prompts[:2]
         for index, prompt in enumerate(visible_prompts, 1):
@@ -1270,6 +1278,7 @@ class SessionScreen(Screen):
         self._command_panel_active = True
         self._command_panel_stage = None
         panel = self.query_one("#command-panel", Vertical)
+        panel.remove_class("level-panel")
         panel.display = True
         self.query_one("#command-panel-title", Static).update(title.upper())
         self.query_one("#command-panel-content", Static).update(content)
@@ -1302,7 +1311,9 @@ class SessionScreen(Screen):
         self._pending_export_path = None
         self._pending_rewind_checkpoint = None
         self._command_panel_actions.clear()
-        self.query_one("#command-panel", Vertical).display = False
+        panel = self.query_one("#command-panel", Vertical)
+        panel.display = False
+        panel.remove_class("level-panel")
         panel_input = self.query_one("#command-panel-input", Input)
         panel_input.value = ""
         panel_input.display = False
@@ -1359,6 +1370,10 @@ class SessionScreen(Screen):
             self._show_command_panel("Rewinding", "Restoring the selected conversation and workspace point…", [])
             self.run_worker(self._apply_rewind(action), name="apply-rewind")
 
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        if event.option_list.id == "command-panel-options" and self._command_panel_stage == "level":
+            self._update_level_description(event.option_index + 1)
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "command-panel-input" or self._command_panel_stage != "export-path":
             return
@@ -1396,19 +1411,34 @@ class SessionScreen(Screen):
 
     def _show_level_panel(self) -> None:
         choices = (
-            (f"1 · {LEVEL_NAMES[1]} — {LEVEL_DESCRIPTIONS[1]}", "level:1"),
-            (f"2 · {LEVEL_NAMES[2]} — {LEVEL_DESCRIPTIONS[2]}", "level:2"),
-            (f"3 · {LEVEL_NAMES[3]} — {LEVEL_DESCRIPTIONS[3]}", "level:3"),
-            (f"4 · {LEVEL_NAMES[4]} — {LEVEL_DESCRIPTIONS[4]}", "level:4"),
-            (f"5 · {LEVEL_NAMES[5]} — {LEVEL_DESCRIPTIONS[5]}", "level:5"),
+            (f"1 · {LEVEL_NAMES[1]}", "level:1"),
+            (f"2 · {LEVEL_NAMES[2]}", "level:2"),
+            (f"3 · {LEVEL_NAMES[3]}", "level:3"),
+            (f"4 · {LEVEL_NAMES[4]}", "level:4"),
+            (f"5 · {LEVEL_NAMES[5]}", "level:5"),
         )
         self._show_command_panel(
             "Investigation intensity",
-            "Choose the breadth and depth of checks. Recon, Guided, or AutoPwn still controls which actions can run.",
+            "Move through the profiles to preview details. Mode controls tool approvals.",
             list(choices),
         )
+        panel = self.query_one("#command-panel", Vertical)
+        panel.add_class("level-panel")
+        self._command_panel_stage = "level"
         options = self.query_one("#command-panel-options", OptionList)
         options.highlighted = self.level - 1
+        hint = "↑ / ↓ preview    Enter select    Shift+Tab change mode    Esc close"
+        self.query_one("#command-panel-hint", Static).update(hint)
+        self.query_one("#shortcut-hint", Static).update(hint)
+        self._update_level_description(self.level)
+
+    def _update_level_description(self, level: int) -> None:
+        if level not in LEVEL_DESCRIPTIONS:
+            return
+        self.query_one("#command-panel-content", Static).update(
+            f"{level} · {LEVEL_NAMES[level]} — {LEVEL_DESCRIPTIONS[level]}\n"
+            "Approval behavior is set separately by Recon, Guided, or AutoPwn mode."
+        )
 
     def _session_export_text(self) -> str:
         title = str(self.session.get("title", "Mitsu session")).strip() or "Mitsu session"
