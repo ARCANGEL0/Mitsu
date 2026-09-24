@@ -2548,6 +2548,7 @@ class SessionScreen(Screen):
         self._update_context()
         label = LEVEL_NAMES[level]
         self._set_activity(f"Investigation intensity set to {level}/5 · {label}.")
+        self._notify_companion(f"Level {level}/5 · {label} ✦")
 
     def _companion_dialog_closed(self, companion_id: str | None) -> None:
         if companion_id:
