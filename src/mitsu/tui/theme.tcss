@@ -799,8 +799,20 @@ OptionList:focus > .option-list--option-highlighted {
     height: auto;
     max-height: 12;
     padding: 0 1;
-    border-left: tall $primary;
+    border-left: solid $primary;
     background: $surface;
+}
+
+#command-panel.level-panel {
+    max-height: 18;
+}
+
+#command-panel.level-panel #command-panel-scroll {
+    max-height: 5;
+}
+
+#command-panel.level-panel #command-panel-options {
+    max-height: 7;
 }
 
 #command-panel-title {
@@ -837,6 +849,14 @@ OptionList:focus > .option-list--option-highlighted {
 #command-panel-options > .option-list--option-highlighted,
 #command-panel-options:focus > .option-list--option-highlighted {
     color: $primary;
+    background: transparent;
+    text-style: bold;
+}
+
+#command-panel.level-panel #command-panel-options > .option-list--option-highlighted,
+#command-panel.level-panel #command-panel-options:focus > .option-list--option-highlighted {
+    color: $background;
+    background: $primary;
     text-style: bold;
 }
 
