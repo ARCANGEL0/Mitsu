@@ -2295,3 +2295,176 @@ OptionList:focus > .option-list--option-highlighted {
 .theme-blue OptionList:focus > .option-list--option-highlighted {
     color: $primary;
 }
+
+/* Chat activity cards use complete panels instead of indented marker rails. */
+.tool-message {
+    width: 100%;
+    height: auto;
+    margin: 1 0 0 0;
+    padding: 0 1;
+    border: round $secondary;
+    background: $panel;
+    color: $foreground;
+}
+
+.tool-result-message {
+    width: 100%;
+    height: auto;
+    margin: 0 0 1 0;
+    padding: 0 1;
+    border: round $secondary;
+    background: $surface;
+    color: $text-muted;
+}
+
+.tool-result-message:hover,
+.tool-result-message:focus {
+    border: round $primary;
+}
+
+#thinking-status,
+#queue-status {
+    width: 100%;
+    height: auto;
+    margin: 0 1;
+    padding: 0 1;
+    border: round $secondary;
+    background: $panel;
+}
+
+#thinking-status {
+    max-height: 3;
+    color: $foreground;
+}
+
+.theme-moss #thinking-status,
+.theme-lilac #thinking-status,
+.theme-ocean #thinking-status,
+.theme-rose #thinking-status,
+.theme-gold #thinking-status,
+.theme-blue #thinking-status {
+    border: round $secondary;
+    background: $panel;
+    color: $foreground;
+}
+
+#queue-status {
+    max-height: 4;
+    color: $text-muted;
+}
+
+#companion-status.is-notice {
+    color: $primary;
+}
+
+SudoPasswordDialog {
+    align: center bottom;
+    background: #000000 26%;
+}
+
+#sudo-password-dialog {
+    width: 70;
+    max-width: 90%;
+    height: auto;
+    max-height: 16;
+    margin-bottom: 3;
+    padding: 0 2;
+    border: round $primary;
+    background: $surface;
+}
+
+#sudo-password-title {
+    height: 1;
+    margin-bottom: 0;
+    color: $primary;
+    text-style: bold;
+    text-align: center;
+}
+
+#sudo-password-message,
+#sudo-password-command,
+#sudo-password-note {
+    width: 100%;
+    height: auto;
+    margin: 0;
+}
+
+#sudo-password-message {
+    color: $foreground;
+}
+
+#sudo-password-command {
+    max-height: 2;
+    margin-top: 0;
+    padding: 0 1;
+    background: $panel;
+    color: $primary;
+}
+
+#sudo-password-note {
+    height: 1;
+    margin-top: 0;
+    color: $text-muted;
+}
+
+#sudo-password-input {
+    height: 3;
+    margin: 0;
+    border: round $secondary;
+    background: $panel;
+    color: $foreground;
+}
+
+#sudo-password-input:focus {
+    border: round $primary;
+}
+
+#sudo-password-actions {
+    height: 3;
+    margin-top: 0;
+    align-horizontal: right;
+}
+
+#sudo-password-hint {
+    height: 1;
+    margin-top: 0;
+    color: $text-muted;
+    text-align: center;
+}
+
+#slash-suggestions {
+    width: 100%;
+    height: auto;
+    max-height: 9;
+    margin: 0;
+    padding: 0 1;
+    border: round $secondary;
+    background: $surface;
+}
+
+.theme-moss #slash-suggestions,
+.theme-lilac #slash-suggestions,
+.theme-ocean #slash-suggestions,
+.theme-rose #slash-suggestions,
+.theme-gold #slash-suggestions,
+.theme-blue #slash-suggestions {
+    border: round $secondary;
+    background: $surface;
+}
+
+#rename-dialog {
+    width: 62;
+    max-width: 88%;
+    height: auto;
+    max-height: 12;
+    padding: 1 2;
+}
+
+#rename-dialog-detail {
+    height: 1;
+    min-height: 1;
+}
+
+#rename-dialog-input {
+    margin-top: 1;
+}

@@ -23,7 +23,7 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.events import Click
+from textual.events import Click, ScreenResume, ScreenSuspend
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Input, OptionList, SelectionList, Static, TextArea
@@ -746,17 +746,27 @@ class ToolResultCard(Static):
         self.expanded = False
         super().__init__(self._summary(), classes="tool-result-message", markup=False)
 
-    def _summary(self) -> str:
+    def _summary(self) -> Text:
+        good = "#79d89a"
+        bad = "#f07882"
+        muted = "#aaa6a0"
         status = "FAILED" if self.failed else "SUCCESS"
+        color = bad if self.failed else good
         code = re.search(r"(?:exit_code=|exited with status )(-?\d+)", self.output)
         if code:
             status += f" · exit {code.group(1)}"
-        return f"{status} · click or press Enter to expand output"
+        renderable = Text()
+        renderable.append("● ", style=f"bold {color}")
+        renderable.append(status, style=f"bold {color}")
+        renderable.append("   ·   press Enter to inspect output", style=muted)
+        return renderable
 
     def action_toggle(self) -> None:
         self.expanded = not self.expanded
         if self.expanded:
-            self.update(self.output + "\n\n(click or press Enter to collapse)")
+            detail = Text(self.output)
+            hint = Text("\n\n↥  Enter to collapse", style="#8f9999")
+            self.update(Group(self._summary(), Text(""), detail, hint))
         else:
             self.update(self._summary())
 
@@ -961,6 +971,8 @@ class SessionScreen(Screen):
         if intel_migrated:
             self.sessions.save_session(self.session)
         self._companion_generation = 0
+        self._companion_notice_generation = 0
+        self._companion_status = "Mitsu is Ready to Pwn!"
         self._last_activity = "Mitsu is Ready to Pwn!"
         self.level = int(session.get("level", 3)) if str(session.get("level", 3)).isdigit() else 3
         self.level = min(5, max(1, self.level))
@@ -1774,6 +1786,8 @@ class SessionScreen(Screen):
                 self.mode,
                 self._approve_tool,
                 save_history,
+                get_mode=lambda: self.mode,
+                get_system_prompt=self._system_prompt,
             ):
                 if event.kind == "assistant_turn":
                     text = str(event.data.get("text", "")).strip()
@@ -1831,12 +1845,18 @@ class SessionScreen(Screen):
                 elif event.kind == "tool_started":
                     name = str(event.data.get("name", "tool"))
                     arguments = event.data.get("arguments", {})
+                    self._set_thinking_task(tool_name=name, arguments=arguments)
                     self._set_activity(f"Running {name}…")
                     self._set_companion("running", "Running a tool")
                     await self._append_message(self._format_tool_call(name, arguments), "tool")
                 elif event.kind == "tool_finished":
                     name = str(event.data.get("name", "tool"))
                     result = str(event.data.get("result", ""))
+                    failed = bool(event.data.get("is_error"))
+                    for message_widget in reversed(self._message_widgets):
+                        if isinstance(message_widget, ToolCallCard) and message_widget.running:
+                            message_widget.finish("failed" if failed else "finished")
+                            break
                     self._current_input_estimate = max(
                         1,
                         len(
@@ -1848,7 +1868,6 @@ class SessionScreen(Screen):
                         )
                         // 4,
                     )
-                    failed = bool(event.data.get("is_error"))
                     self._set_activity(f"{name} {'failed' if failed else 'finished'}.")
                     await self._append_message(result, "tool-result", tool_failed=failed)
                     if failed:
@@ -2332,7 +2351,20 @@ class SessionScreen(Screen):
         if name.endswith("__bash") and isinstance(arguments, dict):
             command = redact_command(str(arguments.get("command", "")))
             purpose = redact_command(str(arguments.get("purpose", "")))
-            return f"$ {command}" + (f"\n{purpose}" if purpose else "")
+            return "Shell command\n$ " + command + (f"\n↳ {purpose}" if purpose else "")
+        if name.startswith("mitsu__armory_") and isinstance(arguments, dict):
+            tool_id = name.removeprefix("mitsu__armory_").replace("_", "-")
+            tool = TOOL_BY_ID.get(tool_id)
+            if tool is not None:
+                argv_key = f"{tool_id.replace('-', '_')}_argv"
+                argv = arguments.get(argv_key, [])
+                if not isinstance(argv, list):
+                    argv = []
+                executable = tool.executables[0] if tool.executables else tool.id
+                command = redact_command(shlex.join([executable, *(str(value) for value in argv)]))
+                purpose = redact_command(str(arguments.get("purpose", ""))).strip()
+                detail = f"{tool.name}\n$ {command}"
+                return detail + (f"\n↳ {purpose}" if purpose else "")
         if isinstance(arguments, dict):
             tool = name.rsplit("__", 1)[-1].replace("_", " ")
             if tool == "read file":
@@ -2349,7 +2381,8 @@ class SessionScreen(Screen):
             serialized = str(arguments)
         if len(serialized) > 1200:
             serialized = serialized[:1200] + "…"
-        return f"↳ {name} {serialized}"
+        display_name = name.rsplit("__", 1)[-1].replace("_", " ").strip().title()
+        return f"MCP · {display_name}\n{serialized}"
 
     async def _handle_command(self, prompt: str) -> None:
         command, _, argument = prompt.partition(" ")
@@ -3202,7 +3235,9 @@ CURRENT MODE: {self.mode}
             self._show_command_panel(title, message)
             return
         conversation = self.query_one("#conversation", VerticalScroll)
-        if role == "tool-result":
+        if role == "tool":
+            message_widget = ToolCallCard(message, running=True, theme_id=self.theme_id)
+        elif role == "tool-result":
             message_widget = ToolResultCard(message, tool_failed)
         else:
             message_widget = Static(
@@ -3521,6 +3556,8 @@ CURRENT MODE: {self.mode}
     def _message_widget(self, entry: dict[str, Any]) -> Static:
         role = str(entry.get("role", "assistant"))
         text = str(entry.get("text", ""))
+        if role == "tool":
+            return ToolCallCard(text, running=False, theme_id=self.theme_id)
         if role == "tool-result":
             return ToolResultCard(text, bool(entry.get("tool_failed")))
         return Static(self._message_renderable(text), classes=self._message_class(role), markup=False)
