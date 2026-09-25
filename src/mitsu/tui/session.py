@@ -1015,6 +1015,14 @@ class SessionScreen(Screen):
         self._thinking_timer = None
         self._thinking_started: float | None = None
         self._thinking_frame = 0
+        self._thinking_phrases = (
+            "Mitsu is connecting the dots…",
+            "Sorting the clues into a plan…",
+            "One sec—Mitsu’s thinking this through!",
+        )
+        self._thinking_phrase_index = 0
+        self._thinking_phrase_changed_at = 0.0
+        self._thinking_task_key = "analysis"
         self._stream_characters = 0
         self._current_request_characters = 0
         self._current_input_estimate: int | None = None
@@ -1985,6 +1993,9 @@ class SessionScreen(Screen):
     def _start_thinking(self, prompt: str = "", system_prompt: str = "") -> None:
         self._thinking_started = time.monotonic()
         self._thinking_frame = 0
+        self._thinking_task_key = ""
+        self._set_thinking_task(prompt=prompt)
+        self._thinking_phrase_changed_at = self._thinking_started
         self._stream_characters = 0
         self._current_request_characters = 0
         self._stream_characters_at_usage = 0
@@ -2009,17 +2020,14 @@ class SessionScreen(Screen):
         self._thinking_started = None
         if self.is_mounted:
             self.query_one("#thinking-status", Static).display = False
+            for message_widget in self._message_widgets:
+                if isinstance(message_widget, ToolCallCard) and message_widget.running:
+                    message_widget.finish("stopped")
 
     def _animate_thinking(self) -> None:
         if not self.is_mounted or not self._agent_running or self._thinking_started is None:
             return
-        frames = ("✧", "✦", "✧", "♡")
-        phrases = (
-            "hunting for clues",
-            "checking the tool results",
-            "connecting the dots",
-            "tidying up the findings",
-        )
+        now = time.monotonic()
         elapsed = max(0, int(time.monotonic() - self._thinking_started))
         minutes, seconds = divmod(elapsed, 60)
         elapsed_text = f"{minutes}:{seconds:02d}" if minutes else f"{seconds}s"
@@ -2044,23 +2052,132 @@ class SessionScreen(Screen):
                 input_label = str(input_tokens) if input_tokens is not None else "—"
                 output_label = str(output_tokens) if output_tokens is not None else "—"
                 count = f"  ·  in {input_label} · out {output_label} tok"
+        if now - self._thinking_phrase_changed_at >= 30:
+            self._thinking_phrase_index = (self._thinking_phrase_index + 1) % len(self._thinking_phrases)
+            self._thinking_phrase_changed_at = now
         frame = self._thinking_frame
         self._thinking_frame += 1
         accent = THEMES.get(self.theme_id, THEMES["ember"])["accent"]
         renderable = Text()
-        renderable.append(
-            f"{frames[frame % len(frames)]}  Mitsu’s {phrases[(frame // 4) % len(phrases)]}…",
-            style=f"bold {accent}",
-        )
+        icon = ("✧", "✦", "♡", "✦")[(frame // 2) % 4]
+        phrase = self._thinking_phrases[self._thinking_phrase_index]
+        shimmer_at = (frame // 2) % max(len(phrase), 1)
+        renderable.append(f"{icon}  ", style=f"bold {accent}")
+        for index, character in enumerate(phrase):
+            style = f"bold {accent}"
+            if abs(index - shimmer_at) <= 1:
+                style = "bold #ffffff"
+            renderable.append(character, style=style)
         renderable.append(
             f"  {elapsed_text}{count}",
             style=THEMES.get(self.theme_id, THEMES["ember"])["ui"]["muted"],
         )
         self.query_one("#thinking-status", Static).update(renderable)
 
+    def _set_thinking_task(
+        self,
+        *,
+        prompt: str = "",
+        tool_name: str = "",
+        arguments: object = None,
+    ) -> None:
+        identity = f"{tool_name} {prompt}".casefold()
+        if isinstance(arguments, dict):
+            identity += " " + " ".join(str(value) for value in arguments.values()).casefold()
+
+        if any(
+            token in identity
+            for token in ("web_search", "web search", "search the web", "search online", "google", "search query")
+        ):
+            key = "web"
+            phrases = (
+                "Mitsu is navigating the web rn!",
+                "Googling for more intel!",
+                "Following public breadcrumbs…",
+                "Mitsu found a clue—checking the source!",
+            )
+        elif any(token in identity for token in ("assistant_response", "writing response")):
+            key = "response"
+            phrases = (
+                "Mitsu is turning the clues into a clear answer!",
+                "Tying the Intel together with a cute little bow…",
+                "Writing up the next useful step!",
+            )
+        elif any(token in identity for token in ("install", "sudo", "package manager")):
+            key = "install"
+            phrases = (
+                "Mitsu is getting one more helper ready!",
+                "Setting up the tool kit… almost there!",
+                "Making sure the new tool is ready to roll!",
+            )
+        elif any(token in identity for token in ("exploit", "metasploit", "rce", "payload")):
+            key = "validation"
+            phrases = (
+                "Mitsu is checking whether this lead is exploitable…",
+                "Looking for a safe proof of impact!",
+                "Testing a plausible path inside the scope!",
+            )
+        elif any(token in identity for token in ("ffuf", "gobuster", "feroxbuster", "nikto", "nuclei", "wpscan", "sqlmap", "httpx")):
+            key = "web-assessment"
+            phrases = (
+                "Mitsu is checking the web surface!",
+                "Following links and looking for weak spots…",
+                "Mitsu is testing the web clues one by one!",
+                "Peeking around the app—carefully, promise!",
+            )
+        elif any(token in identity for token in ("nmap", "masscan", "naabu", "rustscan", "port scan", "network scan")):
+            key = "network"
+            phrases = (
+                "Mitsu is mapping the target’s open doors!",
+                "Checking which services are waving back…",
+                "Counting ports and collecting banners!",
+                "Mitsu is sizing up the network surface!",
+            )
+        elif any(token in identity for token in ("armory_", "mitsu__bash", "shell command", "command")):
+            key = "tool"
+            phrases = (
+                "Mitsu is putting a tool to work!",
+                "Let’s see what this command turns up!",
+                "Mitsu is collecting one more clue…",
+                "A tiny bit of terminal magic, coming up!",
+            )
+        elif any(token in identity for token in ("intel", "upsert_asset", "finding", "observation")):
+            key = "intel"
+            phrases = (
+                "Pinning fresh clues to the session map!",
+                "Mitsu is connecting the Intel dots!",
+                "Keeping the target map tidy…",
+                "A new breadcrumb goes in the notebook!",
+            )
+        elif any(token in identity for token in ("read_file", "list_files", "file", "directory")):
+            key = "files"
+            phrases = (
+                "Mitsu is digging through the files!",
+                "Reading the interesting bits…",
+                "Checking what’s hiding in this folder!",
+                "Mitsu found a page worth a closer look!",
+            )
+        else:
+            key = "analysis"
+            phrases = (
+                "Mitsu is connecting the dots…",
+                "Sorting the clues into a plan…",
+                "One sec—Mitsu’s thinking this through!",
+                "Mitsu is picking the next best move!",
+            )
+
+        if key == self._thinking_task_key and self._thinking_phrases == phrases:
+            return
+        self._thinking_task_key = key
+        self._thinking_phrases = phrases
+        self._thinking_phrase_index = 0
+        self._thinking_phrase_changed_at = time.monotonic()
+
     async def _show_stream_delta(self, text: str) -> None:
         if not text:
             return
+        if self._stream_preview is None:
+            self._set_thinking_task(tool_name="assistant_response")
         self._stream_text += text
         self._stream_characters += len(text)
         self._current_request_characters += len(text)
