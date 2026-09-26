@@ -1000,7 +1000,7 @@ ConversationSearchDialog,
 DeleteSessionDialog,
 SessionThemeDialog {
     align: center middle;
-    background: #000000 68%;
+    background: #000000 48%;
 }
 
 ToolApprovalDialog {
@@ -1834,11 +1834,11 @@ OptionList:focus > .option-list--option-highlighted {
 }
 
 #session-theme-dialog {
-    width: 76;
-    max-width: 90%;
+    width: 66;
+    max-width: 88%;
     height: auto;
-    max-height: 80%;
-    padding: 1 2;
+    max-height: 70%;
+    padding: 1 1;
     border: round $primary;
 }
 
@@ -1891,21 +1891,22 @@ OptionList:focus > .option-list--option-highlighted {
 
 #session-theme-layout {
     width: 100%;
-    height: auto;
+    height: 8;
 }
 
 #session-theme-list {
-    width: 34;
-    max-height: 12;
+    width: 29;
+    max-height: 8;
 }
 
 #session-theme-preview {
     width: 1fr;
-    min-width: 30;
-    height: 8;
-    padding: 0 2;
-    border-left: solid $secondary;
-    content-align: left middle;
+    min-width: 24;
+    height: 6;
+    padding: 0 1;
+    border: round $secondary;
+    background: $panel;
+    content-align: center middle;
 }
 
 #session-theme-help {

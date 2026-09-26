@@ -281,13 +281,13 @@ class SessionRenameDialog(ModalScreen[str | None]):
 
     def __init__(self, title: str) -> None:
         super().__init__()
-        self.current_title = title
+        self.current_title = "" if title.strip().casefold() == "new session" else title
 
     def compose(self) -> ComposeResult:
         with Vertical(id="rename-dialog"):
             yield Static("RENAME SESSION", id="rename-dialog-title", markup=False)
             yield Static("Enter a name and press Enter to save.", id="rename-dialog-detail", markup=False)
-            yield Input(value=self.current_title, id="rename-dialog-input")
+            yield Input(value=self.current_title, placeholder="", id="rename-dialog-input")
 
     def on_mount(self) -> None:
         field = self.query_one("#rename-dialog-input", Input)
@@ -364,7 +364,7 @@ class SessionThemeDialog(ModalScreen[str | None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="session-theme-dialog"):
             yield Static("PICK YOUR COLORS", id="session-theme-title", markup=False)
-            yield Static("Choose a palette for the whole TUI and its code blocks.", id="session-theme-copy", markup=False)
+            yield Static("Browse a local preview; Enter applies the palette across Mitsu.", id="session-theme-copy", markup=False)
             with Horizontal(id="session-theme-layout"):
                 yield OptionList(*(theme["name"] for theme in THEMES.values()), id="session-theme-list", compact=True)
                 yield Static("", id="session-theme-preview", markup=False)
@@ -707,15 +707,17 @@ class SudoPasswordDialog(ModalScreen[str | None]):
         with Vertical(id="sudo-password-dialog"):
             yield Static("SUDO PASSWORD", id="sudo-password-title", markup=False)
             yield Static(
-                f"Heya, I need your sudo password to run this command with elevated privileges:\n{self.command}\n\nThe full shell command will run as root. Your password is used once and never saved.",
+                "Heya, I need your sudo password to run this command:",
                 id="sudo-password-message",
                 markup=False,
             )
+            yield Static(f"$ {self.command}", id="sudo-password-command", markup=False)
+            yield Static("Password is used once and never saved.", id="sudo-password-note", markup=False)
             yield Input(placeholder="Enter sudo password", password=True, id="sudo-password-input")
             with Horizontal(id="sudo-password-actions"):
-                yield Button("Run command", id="sudo-password-submit", compact=True)
-                yield Button("Cancel", id="sudo-password-cancel", compact=True)
-            yield Static("Enter run    Esc cancel", id="sudo-password-hint", markup=False)
+                yield Button("Run", id="sudo-password-submit", compact=True)
+                yield Button("Back", id="sudo-password-cancel", compact=True)
+            yield Static("Enter run    Esc back", id="sudo-password-hint", markup=False)
 
     def on_mount(self) -> None:
         self.query_one("#sudo-password-input", Input).focus()
@@ -733,6 +735,69 @@ class SudoPasswordDialog(ModalScreen[str | None]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+
+class ToolCallCard(Static):
+    PULSE = ("◌", "◔", "◑", "◕")
+
+    def __init__(self, detail: str, running: bool = False, theme_id: str = "ember") -> None:
+        self.detail = detail
+        self.title, _, self.command = detail.partition("\n")
+        self.running = running
+        self.final_state = "finished"
+        self.theme_id = theme_id
+        self.started_at = time.monotonic()
+        self._pulse_index = 0
+        self._pulse_timer = None
+        super().__init__(self._render_card(), classes="tool-message", markup=False)
+
+    def on_mount(self) -> None:
+        if self.running:
+            self._pulse_timer = self.set_interval(0.35, self._animate)
+
+    def _render_card(self) -> Text:
+        palette = THEMES.get(self.theme_id, THEMES["ember"])
+        accent = palette.get("accent", "#55e5e8")
+        muted = palette.get("ui", {}).get("muted", "#aaa6a0")
+        renderable = Text()
+        if self.running:
+            elapsed = max(0, int(time.monotonic() - self.started_at))
+            minutes, seconds = divmod(elapsed, 60)
+            elapsed_text = f"{minutes}:{seconds:02d}" if minutes else f"{seconds}s"
+            renderable.append(f"{self.PULSE[self._pulse_index]}  ", style=f"bold {accent}")
+            renderable.append(self.title or "Tool", style=f"bold {accent}")
+            renderable.append(f"   RUNNING · {elapsed_text}\n", style=f"bold {accent}")
+        else:
+            state_style = {
+                "failed": "bold #f07882",
+                "stopped": "bold #e9c46a",
+                "finished": "bold #79d89a",
+            }.get(self.final_state, f"bold {accent}")
+            state_label = {
+                "failed": "FAILED",
+                "stopped": "STOPPED",
+                "finished": "DONE",
+            }.get(self.final_state, "DONE")
+            renderable.append("✧  ", style=state_style)
+            renderable.append(self.title or "Tool", style=f"bold {accent}")
+            renderable.append(f"   {state_label}\n", style=state_style)
+        if self.command:
+            renderable.append(self.command, style=muted)
+        return renderable
+
+    def _animate(self) -> None:
+        if not self.running or not self.is_mounted:
+            return
+        self._pulse_index = (self._pulse_index + 1) % len(self.PULSE)
+        self.update(self._render_card())
+
+    def finish(self, state: str = "finished") -> None:
+        self.running = False
+        self.final_state = state
+        if self._pulse_timer is not None:
+            self._pulse_timer.stop()
+            self._pulse_timer = None
+        self.update(self._render_card())
 
 
 class ToolResultCard(Static):
