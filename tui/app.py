@@ -6,7 +6,7 @@ from textual.app import App, ComposeResult
 from textual.theme import Theme
 from textual.widgets import Static
 
-from mitsu.companions import companion_by_id
+from mitsu.pets import companion_by_id
 from mitsu.config import CredentialStore, PreferencesStore, SessionStore, THEMES
 from mitsu.services.searxng import stop_local_searxng
 from mitsu.tui.menu import MainMenuScreen

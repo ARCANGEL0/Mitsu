@@ -12,7 +12,7 @@ from textual.events import ScreenResume, ScreenSuspend
 from textual.screen import Screen
 from textual.widgets import Input, OptionList, Static
 
-from mitsu.companions import COMPANIONS, companion_by_id
+from mitsu.pets import COMPANIONS, companion_by_id
 from mitsu.config import PROVIDERS, PROVIDER_BY_ID, THEMES, CredentialStore, PreferencesStore
 from mitsu.providers import ProviderRequestError, list_models
 from mitsu.tui.branding import MOON_YELLOW

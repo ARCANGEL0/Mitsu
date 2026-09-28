@@ -22,7 +22,7 @@ from textual.widgets import Input, Static, TextArea
 from mitsu import __version__
 from mitsu.armory import CATEGORIES as ARMORY_CATEGORIES
 from mitsu.armory import TOOLS, TOOLS_BY_CATEGORY, TOOL_BY_ID
-from mitsu.companions import COMPANIONS, companion_by_id
+from mitsu.pets import COMPANIONS, companion_by_id
 from mitsu.config import CredentialStore, PreferencesStore, PROVIDERS, PROVIDER_BY_ID, SessionStore, THEMES
 from mitsu.providers import ProviderRequestError, list_models
 from mitsu.services.host_environment import HostEnvironment, load_host_environment

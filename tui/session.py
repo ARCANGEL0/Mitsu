@@ -31,9 +31,9 @@ from textual.widgets import Button, Input, OptionList, SelectionList, Static, Te
 from mitsu import __version__
 from mitsu.armory import CATEGORY_BY_ID, TOOLS, TOOLS_BY_CATEGORY, TOOL_BY_ID
 from mitsu.agents import history_from_legacy, run_agent_turn
-from mitsu.companions import COMPANIONS, companion_by_id
+from mitsu.pets import COMPANIONS, companion_by_id
 from mitsu.config import PROVIDER_BY_ID, THEMES, CredentialStore, SessionStore
-from mitsu.intel import (
+from mitsu.workspace.intel import (
     ensure_intel,
     intel_page,
     upsert_asset,
@@ -42,7 +42,7 @@ from mitsu.intel import (
     upsert_observation,
 )
 from mitsu.providers import ProviderRequestError, check_reasoning_support
-from mitsu.history import apply_undo_changes, capture_workspace, diff_workspace
+from mitsu.workspace import apply_undo_changes, capture_workspace, diff_workspace
 from mitsu.tui.widgets import MitsuCompanion
 from mitsu.tools import AgentToolHost
 from mitsu.tools.redaction import redact_command, redact_history, redact_value

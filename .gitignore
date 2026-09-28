@@ -33,3 +33,6 @@ ENV/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Keep dependency lockfiles out of this repository.
+uv.lock

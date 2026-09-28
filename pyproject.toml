@@ -4,9 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mitsu"
-version = "0.1.0"
+version = "1.1.0"
 description = "A terminal-native coding and security companion"
-readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "ARCANGEL0" }]
@@ -21,11 +20,36 @@ dependencies = [
 mitsu = "mitsu.__main__:main"
 
 [tool.setuptools]
-package-dir = { "" = "src" }
-
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["mitsu*"]
+packages = [
+  "mitsu",
+  "mitsu.agents",
+  "mitsu.armory",
+  "mitsu.config",
+  "mitsu.pets",
+  "mitsu.providers",
+  "mitsu.search",
+  "mitsu.services",
+  "mitsu.tools",
+  "mitsu.tui",
+  "mitsu.tui.dialogs",
+  "mitsu.tui.widgets",
+  "mitsu.workspace",
+]
+package-dir = {
+  "mitsu" = ".",
+  "mitsu.agents" = "agents",
+  "mitsu.armory" = "armory",
+  "mitsu.config" = "config",
+  "mitsu.pets" = "pets",
+  "mitsu.providers" = "providers",
+  "mitsu.search" = "search",
+  "mitsu.services" = "services",
+  "mitsu.tools" = "tools",
+  "mitsu.tui" = "tui",
+  "mitsu.tui.dialogs" = "tui/dialogs",
+  "mitsu.tui.widgets" = "tui/widgets",
+  "mitsu.workspace" = "workspace",
+}
 
 [tool.setuptools.package-data]
-mitsu = ["assets/companions/*.webp"]
+mitsu = ["assets/pets/*.webp"]

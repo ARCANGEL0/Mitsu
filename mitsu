@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+if ! command -v uv >/dev/null 2>&1; then
+    printf "%s\n" "Mitsu needs uv to launch this checkout. Install uv, then run ./mitsu again." >&2
+    exit 1
+fi
+
+exec uv tool run --from "$repo_root" mitsu "$@"

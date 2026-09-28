@@ -122,7 +122,7 @@ class MitsuCompanion(Static):
 
     @staticmethod
     def _default_sprite_path() -> Path:
-        return Path(__file__).resolve().parents[2] / "assets" / "companions" / "mitsu.webp"
+        return Path(__file__).resolve().parents[2] / "assets" / "pets" / "mitsu.webp"
 
     def _load_frames(self, sheet_path: Path) -> dict[str, list[Image.Image]]:
         try:
