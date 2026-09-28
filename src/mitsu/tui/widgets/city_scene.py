@@ -98,7 +98,11 @@ class CityScene(Static):
             paint(x, 8, "·" if (x + road_shift) % 5 else "┈", "#45616a")
             paint(x, 9, "━" if (x + self.scroll) % 8 in {2, 3, 4, 5} else "─", "#56717a")
 
-        if self.companion is not None and not self.companion._kitty_graphics:
+        if (
+            self.companion is not None
+            and not self.companion._kitty_graphics
+            and not self.companion._modal_suspended
+        ):
             image = self.companion.display_image()
             offset_x, offset_y = self.companion_offset
             for y in range(0, image.height, 2):

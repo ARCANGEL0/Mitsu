@@ -75,6 +75,8 @@ class MitsuCompanion(Static):
         self._kitty_placement_id = secrets.randbits(31) or 1
         self._kitty_image_ids: dict[tuple[str, int], int] = {}
         self._kitty_active_key: tuple[str, int] | None = None
+        self._terminal_graphics_suspended = False
+        self._modal_suspended = False
         self._animation_timer = None
         self._frames = self._load_frames(self.sprite_path)
         super().__init__(self._render_frame(), markup=False, **kwargs)
@@ -153,6 +155,41 @@ class MitsuCompanion(Static):
         self.frame_index = 0
         self.update(self._render_frame(), layout=False)
         self._show_kitty_frame()
+
+    def set_terminal_graphics_visible(self, visible: bool) -> None:
+        """Temporarily replace the terminal overlay sprite with its inline frame."""
+        if not self._kitty_graphics or self._terminal_graphics_suspended == (not visible):
+            return
+        self._terminal_graphics_suspended = not visible
+        if not visible:
+            self._delete_active_kitty_placement()
+            self.styles.opacity = 1
+            self.update(self._render_frame(), layout=False)
+            return
+        self.update(self._render_frame(), layout=False)
+        if self.is_mounted and self.screen is self.app.screen:
+            self.styles.opacity = 0
+            self.call_after_refresh(lambda: self._show_kitty_frame(force=True))
+
+    def set_modal_suspended(self, suspended: bool) -> None:
+        """Hide the companion, including scene and terminal overlays, under modals."""
+        if self._modal_suspended == suspended:
+            return
+        self._modal_suspended = suspended
+        if suspended:
+            if self._animation_timer is not None:
+                self._animation_timer.pause()
+            self._delete_active_kitty_placement()
+            self.styles.display = "none"
+            return
+
+        self.styles.display = "block"
+        if self._animation_timer is not None:
+            self._animation_timer.resume()
+        if self._kitty_graphics and not self._terminal_graphics_suspended:
+            self.styles.opacity = 0
+            if self.is_mounted:
+                self.call_after_refresh(lambda: self._show_kitty_frame(force=True))
 
     def set_companion(
         self,
@@ -249,6 +286,8 @@ class MitsuCompanion(Static):
     def _show_kitty_frame(self, force: bool = False) -> None:
         if (
             not self._kitty_graphics
+            or self._terminal_graphics_suspended
+            or self._modal_suspended
             or not self.is_mounted
             or not self.visible
             or not self.display
@@ -329,7 +368,7 @@ class MitsuCompanion(Static):
         return image_id
 
     def _render_frame(self) -> Text:
-        if self._kitty_graphics or self.scene_overlay:
+        if (self._kitty_graphics and not self._terminal_graphics_suspended) or self.scene_overlay:
             return Text("", no_wrap=True)
         image = self.display_image()
         renderable = Text(no_wrap=True)
