@@ -72,19 +72,19 @@ MODE_COLORS = {
 }
 
 LEVEL_NAMES = {
-    1: "Passive",
-    2: "Light",
-    3: "Standard",
-    4: "Thorough",
-    5: "Intensive",
+    1: "Opsec Kiddy",
+    2: "Curious mode",
+    3: "Chill",
+    4: "LulzSec Intern",
+    5: "Mista Robot",
 }
 
 LEVEL_DESCRIPTIONS = {
-    1: "Public OSINT, DNS, metadata, and saved Intel. No direct probes to the target.",
-    2: "Check reachability and the 100 most common TCP ports at a low rate; collect minimal service details. No exploit checks or credential guessing.",
-    3: "Enumerate the top 1,000 TCP ports and service versions; follow exposed services, test supplied credentials once where relevant, and use low-impact validation.",
-    4: "Scan all TCP ports and the 100 most common UDP ports; deepen service and web enumeration, then validate well-supported findings at a moderate rate.",
-    5: "Scan all TCP ports and up to 1,000 UDP ports when relevant; run thorough service-specific and authenticated checks, then validate evidence-backed lab exploits. Continue to local privilege checks after authorized access.",
+    1: "Opsec Kiddy: keep it ghost-quiet. Connect the public clues and saved Intel; no direct probes.",
+    2: "Curious mode: a gentle knock on the door. Check reachability and common ports, slowly; no exploit checks or password guessing.",
+    3: "Chill: a solid recon-to-validation run. Map common services, follow the evidence, and carefully check supplied credentials where they fit.",
+    4: "LulzSec Intern: turn the lights up. Broaden service and web checks, then validate promising leads at a measured pace.",
+    5: "Mista Robot: hack the planet and make some noise—in this authorized scope. Sweep wide, chase credible paths to RCE, and keep working toward a pwned box until you stop her (｡•̀ᴗ-)✧",
 }
 
 
@@ -1184,6 +1184,14 @@ class SessionScreen(Screen):
         self.call_after_refresh(self._focus_prompt)
         self.query_one(MitsuCompanion).set_state("idle")
         self._tool_connection_task = asyncio.create_task(self._connect_tool_host())
+
+    def on_screen_suspend(self, _event: ScreenSuspend) -> None:
+        for mascot in self.query(MitsuCompanion):
+            mascot.set_modal_suspended(True)
+
+    def on_screen_resume(self, _event: ScreenResume) -> None:
+        for mascot in self.query(MitsuCompanion):
+            mascot.set_modal_suspended(False)
 
     async def on_unmount(self) -> None:
         if self._thinking_timer:
@@ -3287,11 +3295,10 @@ class SessionScreen(Screen):
         self.sessions.save_session(self.session)
         self._update_context()
         self._set_activity(f"Mode changed to {self.mode}.")
-        self._set_companion("idle", "Mitsu is Ready to Pwn!")
+        if not self._agent_running:
+            self._set_companion("idle", "Mitsu is Ready to Pwn!")
 
     async def action_cycle_mode(self) -> None:
-        if self._agent_running:
-            return
         modes = ("Recon", "Guided", "AutoPwn")
         current = modes.index(self.mode) if self.mode in modes else 0
         await self._set_mode(modes[(current + 1) % len(modes)])
@@ -3441,11 +3448,30 @@ CURRENT MODE: {self.mode}
 
     def _set_companion(self, state: str, status: str, reset_after: float | None = None) -> None:
         self._companion_generation += 1
+        self._companion_notice_generation += 1
         generation = self._companion_generation
+        self._companion_status = status
+        status_widget = self.query_one("#companion-status", Static)
+        status_widget.remove_class("is-notice")
+        status_widget.update(status)
         self.query_one(MitsuCompanion).set_state(state)
-        self.query_one("#companion-status", Static).update(status)
         if reset_after is not None:
             self.set_timer(reset_after, lambda: self._reset_companion(generation))
+
+    def _notify_companion(self, message: str, duration: float = 3.5) -> None:
+        self._companion_notice_generation += 1
+        generation = self._companion_notice_generation
+        status = self.query_one("#companion-status", Static)
+        status.add_class("is-notice")
+        status.update(message)
+
+        def restore() -> None:
+            if not self.is_mounted or generation != self._companion_notice_generation:
+                return
+            status.remove_class("is-notice")
+            status.update(self._companion_status)
+
+        self.set_timer(duration, restore)
 
     def _reset_companion(self, generation: int) -> None:
         if generation == self._companion_generation:

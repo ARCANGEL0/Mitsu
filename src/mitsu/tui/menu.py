@@ -15,7 +15,7 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.events import Key, Resize
+from textual.events import Key, Resize, ScreenResume, ScreenSuspend
 from textual.screen import Screen
 from textual.widgets import Input, Static, TextArea
 
@@ -194,6 +194,14 @@ class MainMenuScreen(Screen):
         self._render_left_list()
         self._show_left_selection()
         self.query_one("#menu-left-list", MenuList).focus()
+
+    def on_screen_suspend(self, _event: ScreenSuspend) -> None:
+        for mascot in self.query(MitsuCompanion):
+            mascot.set_modal_suspended(True)
+
+    def on_screen_resume(self, _event: ScreenResume) -> None:
+        for mascot in self.query(MitsuCompanion):
+            mascot.set_modal_suspended(False)
 
     def on_resize(self, _event: Resize) -> None:
         if self.is_mounted and self.right_items and self.panel_kind not in {"mcp_editor", "mcp_custom_tool_form"}:

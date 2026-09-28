@@ -8,6 +8,7 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.events import ScreenResume, ScreenSuspend
 from textual.screen import Screen
 from textual.widgets import Input, OptionList, Static
 
@@ -180,6 +181,14 @@ class OnboardingScreen(Screen):
         self._show_step()
         self._apply_theme()
         self.query_one(MitsuCompanion).set_state("running_right")
+
+    def on_screen_suspend(self, _event: ScreenSuspend) -> None:
+        for mascot in self.query(MitsuCompanion):
+            mascot.set_modal_suspended(True)
+
+    def on_screen_resume(self, _event: ScreenResume) -> None:
+        for mascot in self.query(MitsuCompanion):
+            mascot.set_modal_suspended(False)
 
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         if event.option_index is None:
