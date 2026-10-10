@@ -424,6 +424,60 @@ OptionList:focus > .option-list--option-highlighted {
     color: #aaa19a;
 }
 
+#menu-mcp-editor {
+    display: none;
+    width: 100%;
+    height: 1fr;
+    min-height: 8;
+    margin-top: 1;
+    border: round #315459;
+    background: #0b1114;
+    color: #d8f3f0;
+}
+
+#menu-mcp-editor:focus {
+    border: round #55e5e8;
+}
+
+#menu-custom-tool-form {
+    display: none;
+    width: 100%;
+    height: auto;
+    margin-top: 1;
+}
+
+#menu-custom-tool-form-title {
+    height: 1;
+    margin-bottom: 1;
+    color: #e58b6b;
+    text-style: bold;
+}
+
+#menu-custom-tool-step {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+    color: #aaa19a;
+}
+
+#menu-custom-tool-input {
+    width: 100%;
+    height: 3;
+    border: round #315459;
+    background: #0b1114;
+    color: #d8f3f0;
+}
+
+#menu-custom-tool-input:focus {
+    border: round #55e5e8;
+}
+
+#menu-custom-tool-nav-hint {
+    height: 1;
+    margin-top: 1;
+    color: #817a75;
+}
+
 #menu-secret-input,
 #menu-text-input {
     display: none;
@@ -601,6 +655,15 @@ OptionList:focus > .option-list--option-highlighted {
     padding-left: 1;
     border-left: solid #315459;
     color: #aaa6a0;
+}
+
+.tool-result-message:hover {
+    border-left: solid #55e5e8;
+    color: #d3cec7;
+}
+
+.tool-result-message:focus {
+    border-left: tall #55e5e8;
 }
 
 .success-message {
@@ -945,6 +1008,8 @@ DeleteSessionDialog {
 #rename-dialog,
 #mcp-dialog,
 #ask-user-dialog,
+#operator-dialog,
+#sudo-password-dialog,
 #tool-approval-dialog,
 #conversation-search-dialog,
 #delete-session-dialog,
@@ -1033,6 +1098,8 @@ DeleteSessionDialog {
 }
 
 #ask-user-title,
+#operator-dialog-title,
+#sudo-password-title,
 #tool-approval-title,
 #conversation-search-title,
 #delete-session-title {
@@ -1040,6 +1107,49 @@ DeleteSessionDialog {
     margin-bottom: 1;
     color: #55e5e8;
     text-style: bold;
+    text-align: center;
+}
+
+#operator-dialog,
+#sudo-password-dialog {
+    width: 76;
+    max-width: 90%;
+    height: auto;
+    max-height: 80%;
+    padding: 1 2;
+    border: round #55e5e8;
+    background: #111115;
+}
+
+#operator-dialog-question,
+#sudo-password-message {
+    height: auto;
+    margin: 1 0;
+    color: #b8b2ab;
+}
+
+#operator-dialog-options {
+    height: auto;
+    max-height: 14;
+    margin: 1 0;
+}
+
+#operator-dialog-input,
+#sudo-password-input {
+    margin: 1 0;
+}
+
+#operator-dialog-actions,
+#sudo-password-actions {
+    height: auto;
+    align-horizontal: right;
+}
+
+#operator-dialog-hint,
+#sudo-password-hint {
+    height: auto;
+    margin-top: 1;
+    color: #8f9999;
     text-align: center;
 }
 
@@ -2000,6 +2110,26 @@ OptionList:focus > .option-list--option-highlighted {
     border: round $primary;
 }
 
+#menu-mcp-editor {
+    border: round $secondary;
+    background: $surface;
+    color: $foreground;
+}
+
+#menu-mcp-editor:focus {
+    border: round $primary;
+}
+
+#menu-custom-tool-input {
+    border: round $secondary;
+    background: $surface;
+    color: $foreground;
+}
+
+#menu-custom-tool-input:focus {
+    border: round $primary;
+}
+
 #menu-secret-input,
 #menu-text-input,
 #custom-base-url,
@@ -2021,6 +2151,7 @@ OptionList:focus > .option-list--option-highlighted {
 #prompt-input,
 #provider-dialog-input,
 #rename-dialog-input,
+#menu-mcp-editor,
 #mcp-dialog-editor,
 #ask-user-input {
     border: round $secondary;
@@ -2043,6 +2174,8 @@ OptionList:focus > .option-list--option-highlighted {
 #menu-runtime-info,
 #menu-right-detail,
 #menu-footer,
+#menu-custom-tool-step,
+#menu-custom-tool-nav-hint,
 #shortcut-hint,
 #provider-dialog-hint,
 #ask-user-hint,
@@ -2055,6 +2188,7 @@ OptionList:focus > .option-list--option-highlighted {
 .session-section-title,
 #session-title,
 #menu-right-title,
+#menu-custom-tool-form-title,
 #provider-dialog-title,
 #general-config-title,
 #rename-dialog-title,
