@@ -302,6 +302,87 @@ class SessionRenameDialog(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class SessionExportDialog(ModalScreen[str | None]):
+    BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
+
+    def __init__(self, path: Path, error: str | None = None) -> None:
+        super().__init__()
+        self.path = path
+        self.error = error
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="export-dialog"):
+            yield Static("EXPORT SESSION", id="export-dialog-title", markup=False)
+            yield Static(
+                self.error or "Save the complete chat transcript, including tool calls and outputs.",
+                id="export-dialog-detail",
+                markup=False,
+            )
+            yield Input(value=str(self.path), placeholder="", id="export-dialog-input")
+            yield Static("Enter save    Esc cancel", id="export-dialog-hint", markup=False)
+
+    def on_mount(self) -> None:
+        field = self.query_one("#export-dialog-input", Input)
+        field.focus()
+        field.action_end()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "export-dialog-input":
+            return
+        path = event.value.strip()
+        if not path:
+            self.query_one("#export-dialog-detail", Static).update("Enter a filename or full path first.")
+            self.query_one("#export-dialog-input", Input).focus()
+            return
+        self.dismiss(path)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class SessionExportOverwriteDialog(ModalScreen[str | None]):
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", priority=True),
+        Binding("left", "focus_cancel", "Focus Cancel", priority=True),
+        Binding("right", "focus_overwrite", "Focus Overwrite", priority=True),
+    ]
+
+    def __init__(self, path: Path) -> None:
+        super().__init__()
+        self.path = path
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="export-dialog"):
+            yield Static("FILE ALREADY EXISTS", id="export-dialog-title", markup=False)
+            yield Static(f"Overwrite {self.path}?", id="export-dialog-detail", markup=False)
+            with Horizontal(id="export-overwrite-actions"):
+                yield Button("Overwrite", id="export-overwrite-confirm", compact=True)
+                yield Button("Choose another path", id="export-overwrite-choose", compact=True)
+                yield Button("Cancel", id="export-overwrite-cancel", compact=True)
+            yield Static("← / → choose    Enter select    Esc cancel", id="export-dialog-hint", markup=False)
+
+    def on_mount(self) -> None:
+        self.query_one("#export-overwrite-cancel", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        choices = {
+            "export-overwrite-confirm": "overwrite",
+            "export-overwrite-choose": "choose",
+            "export-overwrite-cancel": None,
+        }
+        if event.button.id in choices:
+            self.dismiss(choices[event.button.id])
+
+    def action_focus_cancel(self) -> None:
+        self.query_one("#export-overwrite-cancel", Button).focus()
+
+    def action_focus_overwrite(self) -> None:
+        self.query_one("#export-overwrite-confirm", Button).focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class DeleteSessionDialog(ModalScreen[bool]):
     BINDINGS = [
         Binding("escape", "cancel", "Cancel", priority=True),
@@ -1050,7 +1131,6 @@ class SessionScreen(Screen):
         self._command_panel_active = False
         self._command_panel_actions: list[str] = []
         self._command_panel_stage: str | None = None
-        self._pending_export_path: Path | None = None
         self._pending_rewind_checkpoint: int | None = None
         self._active_command: str | None = None
         saved_agent_history = session.get("agent_history")
@@ -1425,7 +1505,6 @@ class SessionScreen(Screen):
             return
         self._command_panel_active = False
         self._command_panel_stage = None
-        self._pending_export_path = None
         self._pending_rewind_checkpoint = None
         self._command_panel_actions.clear()
         panel = self.query_one("#command-panel", Vertical)
@@ -1473,14 +1552,6 @@ class SessionScreen(Screen):
         elif action.startswith("level:"):
             self._apply_level(int(action.partition(":")[2]))
             self._close_command_panel()
-        elif action == "export:copy":
-            self._copy_session_export()
-        elif action == "export:save":
-            self._begin_export_path()
-        elif action == "export:overwrite":
-            self._write_session_export(self._pending_export_path)
-        elif action == "export:choose-path":
-            self._begin_export_path()
         elif action.startswith("rewind-point:"):
             self._show_rewind_choices(int(action.partition(":")[2]))
         elif action in {"rewind:both", "rewind:conversation", "rewind:code"}:
@@ -1490,41 +1561,6 @@ class SessionScreen(Screen):
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         if event.option_list.id == "command-panel-options" and self._command_panel_stage == "level":
             self._update_level_description(event.option_index + 1)
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id != "command-panel-input" or self._command_panel_stage != "export-path":
-            return
-        path_text = event.value.strip()
-        if not path_text:
-            self._show_export_path_error("Enter a filename or full path first.")
-            return
-        path = Path(path_text).expanduser()
-        if not path.is_absolute():
-            path = Path.cwd() / path
-        active_session_path = self.sessions.path / f"{self.session.get('id', '')}.json"
-        try:
-            same_as_active_session = path.resolve(strict=False) == active_session_path.resolve(strict=False)
-        except (OSError, RuntimeError):
-            same_as_active_session = os.path.abspath(path) == os.path.abspath(active_session_path)
-        if same_as_active_session:
-            self._show_export_path_error("Choose a different path so the active session file stays intact.")
-            return
-        if path.exists() and path.is_dir():
-            self._show_export_path_error("That path is a directory. Choose a filename instead.")
-            return
-        if not path.parent.is_dir():
-            self._show_export_path_error(f"The destination folder does not exist: {path.parent}")
-            return
-        self._pending_export_path = path
-        if path.exists():
-            self._command_panel_stage = "export-overwrite"
-            self._show_command_panel(
-                "File already exists",
-                f"{path}\n\nOverwrite this file?",
-                [("Overwrite", "export:overwrite"), ("Choose another path", "export:choose-path"), ("Cancel", "close")],
-            )
-            return
-        self._write_session_export(path)
 
     def _show_level_panel(self) -> None:
         choices = (
@@ -1588,49 +1624,61 @@ class SessionScreen(Screen):
             lines.extend((f"## {labels.get(role, role.title())}", "", body, ""))
         return "\n".join(lines).rstrip() + "\n"
 
-    def _copy_session_export(self) -> None:
-        try:
-            self.app.copy_to_clipboard(self._session_export_text())
-        except (AttributeError, RuntimeError, OSError) as error:
-            self._show_command_panel(
-                "Clipboard unavailable",
-                f"Could not copy this session: {error}",
-                [("Close", "close")],
-            )
+    def _default_export_path(self) -> Path:
+        title = str(self.session.get("title", "session")).strip() or "session"
+        filename = re.sub(r"[^\w.-]+", "-", title, flags=re.UNICODE).strip(" .-_")[:80]
+        timestamp = datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
+        return Path.cwd() / f"{filename or 'session'}-{timestamp}.md"
+
+    def _begin_export_path(self, initial_path: Path | None = None, error: str | None = None) -> None:
+        self.app.push_screen(
+            SessionExportDialog(initial_path or self._default_export_path(), error),
+            self._export_path_dialog_closed,
+        )
+
+    def _export_path_dialog_closed(self, path_text: str | None) -> None:
+        if not path_text:
+            self.call_after_refresh(self._focus_prompt)
             return
-        self._show_command_panel(
-            "Session copied",
-            "The full visible session history is on your clipboard.",
-            [("Close", "close")],
-        )
-
-    def _begin_export_path(self) -> None:
-        self._command_panel_stage = "export-path"
-        self.query_one("#command-panel-title", Static).update("SAVE SESSION HISTORY")
-        self.query_one("#command-panel-content", Static).update(
-            "Type a filename or full path. Relative paths are saved from the current directory."
-        )
-        self.query_one("#command-panel-options", OptionList).display = False
-        panel_input = self.query_one("#command-panel-input", Input)
-        panel_input.value = ""
-        panel_input.placeholder = "history.md or /home/me/history.md"
-        panel_input.display = True
-        self.query_one("#command-panel-hint", Static).update("Enter save    Esc cancel")
-        self.call_after_refresh(panel_input.focus)
-
-    def _show_export_path_error(self, message: str) -> None:
-        self.query_one("#command-panel-content", Static).update(message)
-        self.call_after_refresh(self.query_one("#command-panel-input", Input).focus)
-
-    def _write_session_export(self, path: Path | None) -> None:
-        if path is None:
-            self._show_export_path_error("Choose a destination path first.")
+        path = Path(path_text).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        active_session_path = self.sessions.path / f"{self.session.get('id', '')}.json"
+        try:
+            same_as_active_session = path.resolve(strict=False) == active_session_path.resolve(strict=False)
+        except (OSError, RuntimeError):
+            same_as_active_session = os.path.abspath(path) == os.path.abspath(active_session_path)
+        if same_as_active_session:
+            self._begin_export_path(path, "Choose a different path so the active session file stays intact.")
             return
         if path.exists() and path.is_dir():
-            self._show_export_path_error("That path is a directory. Choose a filename instead.")
+            self._begin_export_path(path, "That path is a directory. Choose a filename instead.")
             return
         if not path.parent.is_dir():
-            self._show_export_path_error(f"The destination folder does not exist: {path.parent}")
+            self._begin_export_path(path, f"The destination folder does not exist: {path.parent}")
+            return
+        if path.exists():
+            self.app.push_screen(
+                SessionExportOverwriteDialog(path),
+                lambda choice: self._export_overwrite_dialog_closed(choice, path),
+            )
+            return
+        self._write_session_export(path)
+
+    def _export_overwrite_dialog_closed(self, choice: str | None, path: Path) -> None:
+        if choice == "overwrite":
+            self._write_session_export(path)
+        elif choice == "choose":
+            self._begin_export_path(path)
+        else:
+            self.call_after_refresh(self._focus_prompt)
+
+    def _write_session_export(self, path: Path) -> None:
+        if path.exists() and path.is_dir():
+            self._begin_export_path(path, "That path is a directory. Choose a filename instead.")
+            return
+        if not path.parent.is_dir():
+            self._begin_export_path(path, f"The destination folder does not exist: {path.parent}")
             return
         temporary: Path | None = None
         try:
@@ -1646,23 +1694,14 @@ class SessionScreen(Screen):
                     temporary.unlink(missing_ok=True)
                 except OSError:
                     pass
-            self._show_export_path_error(f"Could not save the history: {error}")
+            self._begin_export_path(path, f"Could not save the history: {error}")
             return
-        self._pending_export_path = None
-        self._show_command_panel(
-            "History saved",
-            f"Saved {len(self.session.get('messages', []))} transcript entries to:\n{path}",
-            [("Close", "close")],
+        self.app.notify(
+            f"Saved {len(self.session.get('messages', []))} transcript entries to {path}",
+            title="Session exported",
+            severity="information",
         )
-
-    def _show_export_panel(self) -> None:
-        self._pending_export_path = None
-        self._command_panel_stage = "export"
-        self._show_command_panel(
-            "Export session history",
-            "Copy the full transcript or save it to a file.",
-            [("Copy", "export:copy"), ("Save as file", "export:save"), ("Cancel", "close")],
-        )
+        self.call_after_refresh(self._focus_prompt)
 
     def _show_rewind_panel(self) -> None:
         points = self.session.get("rewind_points", [])
@@ -2746,7 +2785,7 @@ class SessionScreen(Screen):
             await self._level_command(argument)
             return
         if command == "/export":
-            self._show_export_panel()
+            self._begin_export_path()
             return
         if command == "/rewind":
             self._show_rewind_panel()

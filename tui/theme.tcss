@@ -2507,3 +2507,66 @@ SudoPasswordDialog {
 #rename-dialog-input {
     margin-top: 1;
 }
+
+SessionExportDialog,
+SessionExportOverwriteDialog {
+    align: center middle;
+    background: #000000 38%;
+}
+
+#export-dialog {
+    width: 88;
+    max-width: 92%;
+    height: auto;
+    max-height: 14;
+    padding: 1 2;
+    border: round $primary;
+    background: $surface;
+}
+
+#export-dialog-title {
+    height: 1;
+    margin-bottom: 1;
+    color: $primary;
+    text-style: bold;
+    text-align: center;
+}
+
+#export-dialog-detail {
+    width: 100%;
+    height: auto;
+    max-height: 3;
+    margin-bottom: 1;
+    color: $text-muted;
+    text-align: center;
+}
+
+#export-dialog-input {
+    width: 100%;
+    height: 3;
+    padding: 0 1;
+    border: round $secondary;
+    background: $panel;
+    color: $foreground;
+}
+
+#export-dialog-input:focus {
+    border: round $primary;
+}
+
+#export-overwrite-actions {
+    width: 100%;
+    height: 3;
+    margin: 1 0;
+    align: center middle;
+}
+
+#export-overwrite-actions Button {
+    margin: 0 1;
+}
+
+#export-dialog-hint {
+    height: 1;
+    color: $text-muted;
+    text-align: center;
+}
