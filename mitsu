@@ -8,4 +8,4 @@ if ! command -v uv >/dev/null 2>&1; then
     exit 1
 fi
 
-exec uv tool run --from "$repo_root" mitsu "$@"
+exec uv run --project "$repo_root" mitsu "$@"

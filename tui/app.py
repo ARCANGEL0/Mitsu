@@ -53,6 +53,7 @@ class MitsuApp(App):
         if theme_id not in THEMES:
             theme_id = "ember"
         self.theme = f"mitsu-{theme_id}"
+        self.console.show_cursor(False)
 
     def compose(self) -> ComposeResult:
         yield Static("Mitsu is waking up…", id="boot-screen")

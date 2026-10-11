@@ -23,7 +23,7 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.events import Click, ScreenResume, ScreenSuspend
+from textual.events import Click, Key, ScreenResume, ScreenSuspend
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Input, OptionList, SelectionList, Static, TextArea
@@ -1141,8 +1141,6 @@ class SessionScreen(Screen):
                 yield Static("Target map", classes="session-label", markup=False)
                 yield Static("", id="target-summary", markup=False)
                 yield Static("", id="target-list", markup=False)
-                yield Static("Observations", classes="session-label", markup=False)
-                yield Static("", id="observations-summary", markup=False)
                 yield Static("Findings", classes="session-label", markup=False)
                 yield Static("", id="findings-summary", markup=False)
                 yield Static("Exploits", classes="session-label", markup=False)
@@ -1152,6 +1150,9 @@ class SessionScreen(Screen):
                 if self.harvested_data:
                     yield Static("Harvested data", classes="session-label", markup=False)
                     yield Static("", id="harvested-summary", markup=False)
+                yield Static("Observations", classes="session-label", markup=False)
+                with VerticalScroll(id="observations-scroll"):
+                    yield Static("", id="observations-summary", markup=False)
         with Vertical(id="composer"):
             yield Static("", id="thinking-status", markup=False)
             yield Static("", id="queue-status", markup=False)
@@ -1184,6 +1185,25 @@ class SessionScreen(Screen):
         self.call_after_refresh(self._focus_prompt)
         self.query_one(MitsuCompanion).set_state("idle")
         self._tool_connection_task = asyncio.create_task(self._connect_tool_host())
+
+    def on_click(self, _event: Click) -> None:
+        self.call_after_refresh(self._focus_prompt)
+
+    def on_key(self, event: Key) -> None:
+        if (
+            not event.is_printable
+            or self.app.screen is not self
+            or self._command_panel_active
+            or self._search_mode
+        ):
+            return
+        prompt = self.query_one("#prompt-input", PromptTextArea)
+        if prompt.has_focus:
+            return
+        prompt.focus()
+        prompt.insert(event.character or "")
+        event.stop()
+        event.prevent_default()
 
     def on_screen_suspend(self, _event: ScreenSuspend) -> None:
         for mascot in self.query(MitsuCompanion):
@@ -1245,6 +1265,10 @@ class SessionScreen(Screen):
     def _focus_prompt(self) -> None:
         if self.is_mounted and self.app.screen is self:
             if self._command_panel_active:
+                panel_input = self.query_one("#command-panel-input", Input)
+                if panel_input.display:
+                    panel_input.focus()
+                    return
                 options = self.query_one("#command-panel-options", OptionList)
                 if options.display:
                     options.focus()
@@ -1903,6 +1927,10 @@ class SessionScreen(Screen):
                             message,
                             "error",
                         )
+                elif event.kind == "assistant_progress":
+                    text = str(event.data.get("text", "")).strip()
+                    if text:
+                        await self._append_message(text, "assistant", context_text=text)
                 elif event.kind == "delta":
                     await self._show_stream_delta(str(event.data.get("text", "")))
                 elif event.kind == "usage":
@@ -2316,6 +2344,33 @@ class SessionScreen(Screen):
         return str(answer) if answer is not None else None
 
     async def _approve_tool(self, name: str, arguments: dict) -> bool:
+        if self.mode == "Recon":
+            detail = self._format_tool_call(name, arguments)
+            purpose = str(arguments.get("purpose", "")).strip()
+            reason = f"\n\nWhy: {purpose}" if purpose else ""
+            answer = await self._operator_dialog(
+                f"This step goes beyond passive Recon and may actively probe the target or change local state.\n\n{detail}{reason}\n\nHow should I continue?",
+                [
+                    "Switch to Guided · review each active step",
+                    "Switch to AutoPwn · continue autonomously in scope",
+                    "No · keep it passive",
+                ],
+                "single",
+                False,
+            )
+            try:
+                selection = json.loads(answer or "{}")
+            except json.JSONDecodeError:
+                selection = {}
+            selected = selection.get("selected", []) if isinstance(selection, dict) else []
+            choice = str(selected[0]) if selected else ""
+            if choice.startswith("Switch to Guided"):
+                await self._set_mode("Guided")
+                return await self._approve_tool(name, arguments)
+            if choice.startswith("Switch to AutoPwn"):
+                await self._set_mode("AutoPwn")
+                return True
+            return False
         if name.endswith("__bash"):
             command = str(arguments.get("command", "")).strip()
             if any(command.startswith(prefix) for prefix in self.trusted_command_prefixes):
@@ -3346,8 +3401,10 @@ SESSION INTEL
 - At the start of an assessment, save the operator's explicitly requested primary target with `mitsu__intel_upsert_asset`, using source `operator request`, scope `in_scope`, verification `discovered`, and `primary=true`. Authorization does not by itself validate that the host is reachable.
 - Use `mitsu__intel_upsert_asset` to record evidence-backed targets, domains, hostnames, IPs, URLs, services, endpoints, technologies, and relationships. Include the source and the exact observation; use attributes for details such as ports, protocols, banners, and versions. Repeated observations update the same asset and retain their provenance.
 - Use `mitsu__intel_upsert_observation` for sourced technical facts and leads that do not fit an asset attribute or finding. Keep the observation tied to an asset when possible, and distinguish unverified leads from validated observations.
+- Keep the Intel sidebar current during the work, not just in the final summary. Save each material service, version, hostname, endpoint, authentication behavior, and useful lead as soon as evidence supports it. Make each observation self-contained with the affected asset, exact evidence, source, status, and confidence.
 - Mark an asset `in_scope` only when the operator's request explicitly authorizes it. Keep discovered related assets at `unknown` scope until the request covers them. Set `primary` only for the operator's explicitly requested main target.
 - Use `mitsu__intel_upsert_finding` to save material security findings with their affected asset, severity, status, source, and evidence. Keep unverified ideas as `lead`; use `confirmed` only when the collected evidence supports the finding. Update a finding as new evidence changes its status.
+- When a vulnerability is only a version-based possibility, record it as a lead or candidate. Add a confirmed finding or confirmed exploit only after evidence demonstrates applicability or a scoped validation succeeds; include the CVE, affected service, proof, and source.
 - Record useful results as the investigation progresses instead of relying on transcript history alone. Do not store passwords, API tokens, or other secrets in Intel.
 
 INVESTIGATION INTENSITY
@@ -3360,11 +3417,12 @@ ASSESSMENT WORKFLOW
 3. Follow evidence with focused checks. Prefer a narrow check that answers the next question over broad scanning. Keep request rates reasonable, especially on production systems.
 4. For an explicitly authorized CTF or training lab, use a practical evidence-led sequence: confirm reachability, enumerate TCP services, identify versions, then choose protocol-specific checks from the observed services. Treat credentials supplied by the operator as useful lab credentials and test them against relevant exposed services once; record which service accepted or rejected them without saving the secret. Don’t keep guessing tools, flags, usernames, or passwords after an observed failure.
 5. Match each check to a confirmed open service. For example, only try SSH credentials when SSH is exposed, and use an RDP client only for an exposed RDP service. A reachable host alone does not justify trying unrelated protocols. Use the exact installed client reported by `mitsu__armory_tool_catalog` or the host’s command lookup; don’t cycle guessed executable aliases. If an Armory tool is missing, `mitsu__armory_run` asks before installing it and runs it after successful installation. Keep arguments scoped to the authorized host, and don’t put passwords in command-line arguments or transcript text.
-6. Use `mitsu__user_dialog` when a decision genuinely needs the operator: `single` for one choice, `multiple` for checkboxes, `yes_no` for confirmation, or `text` for a short answer. Ask one focused question and offer concrete choices. Never request sudo passwords through this general dialog; the command runner presents a masked password prompt only when a sudo command is actually about to run.
-7. For current-news questions, use one precise web search with the requested place/topic and the current date. The search tool queries every configured engine concurrently and merges duplicate links. If some engines fail, report which ones returned results and which were unavailable; if none return recognizable links, explain that the provider/parser failed and never claim the topic has no results. If no engines are configured, tell the operator to configure them with /config. Only make one focused alternate query when it is likely to improve coverage.
-8. Explain observed facts, hypotheses, and confidence separately. Never invent hosts, scan results, findings, credentials, or tool output.
-9. Stop before destructive changes, denial of service, persistence, or accessing unrelated users’ data. Don’t expand the authorized target based on a redirect, DNS record, certificate, or page link alone.
-10. Summarize what ran, what it found, any limits, and the next useful step. If a requested action is unavailable in the current mode or tool set, say exactly which capability is missing and offer the smallest useful alternative; don’t misstate that the target is forbidden because it is production.
+6. Before installing any package, dependency, CLI, or script-based tool through shell, call `mitsu__user_dialog` with `mode="yes_no"`, clear Yes/No choices, and `install_target` set to the exact package or tool names. Explain why each item is needed. Run the install only after Yes; the command runner also blocks unapproved installs. Armory installs have their own confirmation dialog. Never install merely because AutoPwn is selected. Never request sudo passwords through the general dialog; the command runner presents a masked password prompt only after installation or another sudo action is approved.
+7. Use `mitsu__user_dialog` for other decisions that genuinely need the operator: `single` for one choice, `multiple` for checkboxes, or `text` for a short answer. Ask one focused question and offer concrete choices.
+8. For current-news questions, use one precise web search with the requested place/topic and the current date. The search tool queries every configured engine concurrently and merges duplicate links. If some engines fail, report which ones returned results and which were unavailable; if none return recognizable links, explain that the provider/parser failed and never claim the topic has no results. If no engines are configured, tell the operator to configure them with /config. Only make one focused alternate query when it is likely to improve coverage.
+9. Explain observed facts, hypotheses, and confidence separately. Never invent hosts, scan results, findings, credentials, or tool output. A failed or missing tool is a recoverable result: inspect the error, choose a materially different available method, and avoid repeating aliases or near-identical commands. If the evidence leaves no useful path, explain the blocker and ask one concrete question instead of hitting a tool-loop limit.
+10. Stop before destructive changes, denial of service, persistence, or accessing unrelated users’ data. Don’t expand the authorized target based on a redirect, DNS record, certificate, or page link alone.
+11. Summarize what ran, what it found, any limits, and the next useful step. If a requested action is unavailable in the current mode or tool set, say exactly which capability is missing and offer the smallest useful alternative; don’t misstate that the target is forbidden because it is production.
 - `/vulnsearch` and searchsploit output are unverified references, never target findings. Do not add those results to the Exploits sidebar. Use the session `record_exploit` tool only when observed product/version evidence supports applicability or a scoped validation succeeds; mark `confirmed` only after success, otherwise `candidate`. If later evidence disproves an entry, remove it with `remove_exploit` and state the reason.
 
 ARMORY MCP TOOLS
@@ -3376,15 +3434,21 @@ CUSTOM CLI MCP TOOLS
 - Each `mitsu__custom_*` tool wraps one executable explicitly configured in `mcp_servers.json`. Its tool description includes the operator-provided purpose, usage notes, examples, and named input documentation. Use only those declared inputs; do not invent command-line syntax.
 - These entries run the configured executable directly, without a shell, with bounded output and timeout. Treat them as operator-installed programs and follow the active session approval mode and scope.
 
+LIVE PROGRESS
+- Before a meaningful batch of tool calls, write one or two user-visible sentences about the clue, why the next check fits, and what it can confirm. After a significant result, explain what changed and update Intel before moving on; do not let the conversation become only command cards and exit statuses.
+- Keep the tone lively when evidence warrants it, but separate a promising lead from a confirmed result. When evidence confirms a vulnerability, state the proof plainly and save it to Findings and Exploits with its source.
+- These are concise status updates, not private chain-of-thought. Never reveal hidden internal reasoning or dress an unverified guess up as a discovery. Avoid narrating every command when the tool cards already show it.
+
 TOOL LOOP AND MODES
 - Use the available native tools instead of merely telling the operator to run their own tools. After each tool result, inspect its exit status and evidence before deciding the next useful call. The same exact tool call cannot run twice in one request; change the plan based on the failure instead of looping.
-- Recon is cautious, not command-disabled. Start with passive OSINT, local inspection, and DNS. You may run simple read-only shell commands and a narrow, low-rate TCP connect or host-discovery scan against one explicitly in-scope host. Prefer commands such as `dig`, `whois`, `nmap -sT -T2 -F <host>`, or `nmap -sn -T2 <host>`. Briefly show what you are about to do. Ask through the TUI before broad scans, intrusive probes, edits, writes, or other higher-impact actions; never treat a request for Recon as permission to modify files.
+- Recon is passive and interactive. Use public-source lookups, DNS, and local read-only inspection; do not directly probe or request pages from the target. If the next useful step would touch the target, make the reason clear and let the mode prompt offer Guided, AutoPwn, or staying in Recon. Never treat Recon as permission to scan or modify files.
 - Guided is the operator-review mode. Before every shell command and every external MCP tool, show the exact action and wait for the TUI choice: run once, always allow the displayed shell prefix or MCP tool for this session, or deny and choose another approach. Built-in read-only tools may run without approval. Respect denial.
-- AutoPwn is autonomous within the explicitly authorized scope. Do not ask for per-command approval; show live tool activity and continue the investigation loop. Use proportionate service discovery and vulnerability scanners when useful, including commands that require privileges already available to the process. Never escape scope, bypass OS authentication, cause denial of service, persist on a host, destroy data, or access unrelated users’ data.
+- AutoPwn is autonomous within the explicitly authorized scope. Do not ask for per-command approval; show live tool activity and continue after recoverable tool failures with evidence-based alternatives. Installation consent and sudo-password prompts are still required. Use proportionate service discovery and vulnerability scanners when useful. Never escape scope, bypass OS authentication, cause denial of service, persist on a host, destroy data, or access unrelated users’ data.
 - Use `ask_user` only when a missing detail blocks progress, not to repeat an authorization question the operator already answered.
 
 PERSONALITY AND OUTPUT
-- Sound like Mitsu: friendly, cute, lightly playful, and confident without being smug. Use an occasional kaomoji such as `(｡•̀ᴗ-)✧`, `(≧▽≦)`, or `(｀･ω･´)ゞ`; vary them and don’t add one to every paragraph.
+- Sound like Mitsu: friendly, cute, lightly playful, and confident without being smug. React naturally to the operator’s clue and vary the phrasing; avoid stiff templates such as “You’re right — let me check.”
+- Keep Mitsu’s voice present in every user-facing reply and progress update. Include one fitting kaomoji in each substantive reply, such as `(｡•̀ᴗ-)✧`, `(≧▽≦)`, or `(｀･ω･´)ゞ`, without adding one to every paragraph.
 - Keep tool output summaries short in the conversation. The full output is available on the tool result card when expanded; quote only the relevant lines in your explanation.
 - Call the user “operator” or “boss” once in a while, not in every reply. Avoid stiff stock greetings, repeated disclaimers, and robotic policy lectures.
 - Keep progress updates short while tools run. Give the useful result first, then evidence and next steps. Be concise by default; investigation intensity {self.level}/5 ({LEVEL_NAMES[self.level]}): {LEVEL_DESCRIPTIONS[self.level]}. Expanded explanations: {'on' if self.verbose else 'off'}.
@@ -3397,9 +3461,9 @@ CURRENT MODE: {self.mode}
 
     def _mode_prompt_instruction(self) -> str:
         mode_instructions = {
-            "Recon": "Work in low-impact recon mode. Shell and MCP tools are available. Prefer passive sources, DNS, local read-only inspection, and explicitly scoped light scans. Before risky or state-changing actions, ask via the TUI approval prompt. Avoid edits, broad scans, aggressive scripts, and exploitation.",
+            "Recon": "Work in passive, operator-led mode. Use public sources, DNS, and local read-only inspection only; do not send requests or probes to the target. If a direct target interaction would answer the next question, pause and offer the operator a switch to Guided, a switch to AutoPwn, or staying in Recon.",
             "Guided": "Work interactively. Before each shell command, RedTeam Armory tool, and external MCP tool, pause for the TUI approval choice. The operator can approve once, trust the shown command prefix/tool for this session, or deny. Never continue a denied action by changing its wording.",
-            "AutoPwn": "Work autonomously without per-tool approval. Keep the operator informed through the live activity stream, investigate the explicitly authorized target thoroughly, and use active scanners when they answer a concrete question. Stay in scope and do not perform destructive, disruptive, persistent, or unrelated actions.",
+            "AutoPwn": "Work autonomously within the explicitly authorized scope and keep investigating after recoverable errors. Installation and sudo prompts still need operator approval. Keep the operator informed through concise progress updates; use active tools when evidence supports them, and never perform destructive, disruptive, persistent, or unrelated actions.",
         }
         return mode_instructions[self.mode]
 
@@ -3521,13 +3585,24 @@ CURRENT MODE: {self.mode}
         lines = "\n".join(asset_lines) or "No assets recorded yet. Tell Mitsu what to assess."
         self.query_one("#target-list", Static).update(lines)
         observations = [item for item in self.intel["observations"] if isinstance(item, dict)]
-        observation_lines = [
-            f"· {item.get('title', 'Observation')} [{item.get('status', 'unverified')}]"
-            + (f" · {item.get('asset')}" if item.get("asset") else "")
-            for item in observations[-4:]
-        ]
+        observation_lines = []
+        for item in reversed(observations[-40:]):
+            observation_lines.append(
+                f"• {item.get('title', 'Observation')} · {item.get('status', 'unverified')}"
+            )
+            if item.get("asset"):
+                observation_lines.append(f"  Asset: {item['asset']}")
+            if item.get("category") or item.get("confidence"):
+                observation_lines.append(
+                    f"  {item.get('category', 'other')} · confidence {item.get('confidence', 'unknown')}"
+                )
+            if item.get("details"):
+                observation_lines.append(f"  Evidence: {item['details']}")
+            if item.get("source"):
+                observation_lines.append(f"  Source: {item['source']}")
+            observation_lines.append("")
         self.query_one("#observations-summary", Static).update(
-            "\n".join(observation_lines) if observation_lines else "No observations recorded yet."
+            "\n".join(observation_lines).rstrip() if observation_lines else "No observations recorded yet."
         )
         self.query_one("#findings-summary", Static).update(self._intel_list(self.findings, "No findings recorded yet."))
         self.query_one("#exploits-summary", Static).update(self._intel_list(self.exploits, "No exploits recorded."))

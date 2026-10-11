@@ -698,6 +698,7 @@ OptionList:focus > .option-list--option-highlighted {
 #intel-summary,
 #target-summary,
 #target-list,
+#observations-summary,
 #findings-summary,
 #exploits-summary,
 #ips-summary,
@@ -719,6 +720,25 @@ OptionList:focus > .option-list--option-highlighted {
 #activity-summary,
 #intel-summary {
     margin-bottom: 1;
+}
+
+#observations-scroll {
+    width: 100%;
+    height: 10;
+    max-height: 14;
+    margin-bottom: 1;
+    padding-left: 1;
+    border-left: solid #315459;
+    background: #0d1114;
+    scrollbar-size-vertical: 1;
+    scrollbar-color: #315459;
+    scrollbar-color-hover: #55e5e8;
+    scrollbar-color-active: #55e5e8;
+}
+
+#observations-summary {
+    height: auto;
+    color: #aaa6a0;
 }
 
 #composer {
@@ -2036,6 +2056,24 @@ OptionList:focus > .option-list--option-highlighted {
 #prompt-input:focus {
     border: solid $primary;
     background: $surface;
+}
+
+#prompt-input .text-area--cursor {
+    color: $text;
+    background: transparent;
+    text-style: none;
+}
+
+#observations-scroll {
+    border-left: solid $secondary;
+    background: $panel;
+    scrollbar-color: $secondary;
+    scrollbar-color-hover: $primary;
+    scrollbar-color-active: $primary;
+}
+
+#observations-summary {
+    color: $text-muted;
 }
 
 #provider-dialog-input:focus,

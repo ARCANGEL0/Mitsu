@@ -33,7 +33,6 @@ async def run_agent_turn(
     mode: str,
     approve: ApprovalHandler,
     on_history: HistoryHandler,
-    max_tool_calls: int = 32,
     request_turn: RequestTurn | None = None,
     get_mode: Callable[[], str] | None = None,
     get_system_prompt: Callable[[], str] | None = None,
@@ -41,9 +40,8 @@ async def run_agent_turn(
     anthropic = profile.get("protocol") == "anthropic"
     history.append({"role": "user", "content": prompt})
     on_history()
-    tool_calls_run = 0
     seen_calls: set[str] = set()
-    for _ in range(20):
+    while True:
         active_mode = get_mode() if get_mode is not None else mode
         active_system_prompt = get_system_prompt() if get_system_prompt is not None else system_prompt
         request_messages = [{"role": "system", "content": active_system_prompt}, *history]
@@ -116,12 +114,21 @@ async def run_agent_turn(
                 "response_info": turn.response_info,
             },
         )
+        if turn.tool_calls and not turn.text.strip():
+            progress = await _tool_progress_update(
+                profile,
+                active_system_prompt,
+                history,
+                turn.tool_calls,
+                request_turn,
+            )
+            if progress:
+                yield AgentEvent("assistant_progress", {"text": progress})
         if not turn.tool_calls:
             yield AgentEvent("done", {})
             return
         anthropic_results: list[dict[str, Any]] = []
         for call_index, invocation in enumerate(turn.tool_calls):
-            tool_calls_run += 1
             yield AgentEvent(
                 "tool_started",
                 {"name": invocation.name, "arguments": invocation.arguments},
@@ -191,6 +198,12 @@ async def run_agent_turn(
                         )
                 on_history()
                 raise
+            if is_error:
+                result = (
+                    f"{result}\n\nThis call failed or was declined. Treat its output as evidence, "
+                    "change the approach instead of guessing aliases or repeating near-identical commands, "
+                    "and tell the operator if the failure blocks further progress."
+                )
             if anthropic:
                 anthropic_results.append(
                     {
@@ -214,31 +227,53 @@ async def run_agent_turn(
                 "tool_finished",
                 {"name": invocation.name, "result": result, "is_error": is_error},
             )
-            if tool_calls_run >= max_tool_calls:
-                for remaining in turn.tool_calls[call_index + 1 :]:
-                    notice = f"Tool loop stopped after {max_tool_calls} calls to keep the session responsive."
-                    if anthropic:
-                        anthropic_results.append(
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": remaining.id,
-                                "content": notice,
-                                "is_error": True,
-                            }
-                        )
-                    else:
-                        history.append(
-                            {"role": "tool", "tool_call_id": remaining.id, "content": notice}
-                        )
-                if anthropic_results:
-                    history.append({"role": "user", "content": anthropic_results})
-                on_history()
-                yield AgentEvent("limit", {"message": f"Tool loop stopped after {max_tool_calls} calls."})
-                return
         if anthropic_results:
             history.append({"role": "user", "content": anthropic_results})
             on_history()
-    yield AgentEvent("limit", {"message": "Tool loop stopped after 20 model turns."})
+
+
+async def _tool_progress_update(
+    profile: dict[str, Any],
+    system_prompt: str,
+    history: list[dict[str, Any]],
+    tool_calls: list[Any],
+    request_turn: RequestTurn | None,
+) -> str:
+    plans: list[str] = []
+    for invocation in tool_calls[:4]:
+        arguments = invocation.arguments if isinstance(invocation.arguments, dict) else {}
+        purpose = str(arguments.get("purpose", "")).strip()
+        name = invocation.name.rsplit("__", 1)[-1].replace("_", " ")
+        plans.append(f"{name}: {purpose}" if purpose else name)
+    if len(tool_calls) > 4:
+        plans.append(f"and {len(tool_calls) - 4} more checks")
+    checks = "; ".join(plans)
+    prompt = (
+        "Write a short operator-facing progress update in Mitsu's warm, playful voice before these tool calls. "
+        "Include one fitting kaomoji. Use one or two sentences, "
+        "under 55 words. Refer only to evidence already present in the conversation; if there is no result "
+        "yet, explain what the planned check can establish. Keep hypotheses clearly uncertain. Do not reveal "
+        "private chain-of-thought, claim a result in advance, mention credentials, or call tools.\n\n"
+        f"Planned checks: {checks}"
+    )
+    messages = [
+        {"role": "system", "content": system_prompt},
+        *history[:-1],
+        {"role": "user", "content": prompt},
+    ]
+    try:
+        if request_turn is not None:
+            turn = await request_turn(profile, messages, [])
+        else:
+            turn = await asyncio.to_thread(request_agent_turn, profile, messages, [])
+        text = turn.text.strip()
+        if text:
+            return text[:1200]
+    except Exception:
+        pass
+    if not plans:
+        return "I’m reviewing the latest results and picking the next useful check (｡•̀ᴗ-)✧"
+    return f"I’m checking {checks}, then I’ll follow the evidence to the next step (｡•̀ᴗ-)✧"
 
 
 def history_from_legacy(entries: list[Any]) -> list[dict[str, Any]]:

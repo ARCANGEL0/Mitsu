@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import AsyncExitStack
-import ipaddress
 import json
 import os
 from pathlib import Path
@@ -62,6 +61,8 @@ def _is_low_impact_recon_command(command: str) -> bool:
 
     executable = Path(parts[0]).name.casefold()
     arguments = parts[1:]
+    if executable in {"curl", "nmap"}:
+        return False
     if executable in {"pwd", "ls", "stat", "file"}:
         return True
     if executable == "find":
@@ -97,76 +98,6 @@ def _is_low_impact_recon_command(command: str) -> bool:
                 return False
             query_names.append(argument)
         return len(query_names) == 1
-    if executable == "curl":
-        allowed_flags = {"-s", "-S", "-sS", "-I", "--head", "-L", "--location"}
-        urls = []
-        index = 0
-        while index < len(arguments):
-            argument = arguments[index]
-            if argument in allowed_flags:
-                index += 1
-                continue
-            if argument in {"--max-time", "--connect-timeout"}:
-                index += 1
-                if index >= len(arguments) or not arguments[index].isdigit():
-                    return False
-                index += 1
-                continue
-            if argument.startswith(("http://", "https://")):
-                urls.append(argument)
-                index += 1
-                continue
-            return False
-        return len(urls) == 1
-    if executable == "nmap":
-        timing: set[str] = set()
-        scan_types: set[str] = set()
-        fast_scan = False
-        ports: str | None = None
-        targets: list[str] = []
-        index = 0
-        while index < len(arguments):
-            argument = arguments[index]
-            if argument in {"-T1", "-T2"}:
-                timing.add(argument)
-            elif argument in {"-sT", "-sn"}:
-                scan_types.add(argument)
-            elif argument == "-F":
-                fast_scan = True
-            elif argument == "-p":
-                index += 1
-                if index >= len(arguments):
-                    return False
-                ports = arguments[index]
-                if not re.fullmatch(r"\d{1,5}(?:-\d{1,5})?(?:,\d{1,5}(?:-\d{1,5})?){0,19}", ports):
-                    return False
-                ranges = [item.split("-", 1) for item in ports.split(",")]
-                if any(int(part) > 65535 for item in ranges for part in item):
-                    return False
-                if any(len(item) == 2 and int(item[0]) > int(item[1]) for item in ranges):
-                    return False
-                port_count = sum(
-                    (int(item[1]) - int(item[0]) + 1) if len(item) == 2 else 1
-                    for item in ranges
-                )
-                if port_count > 20:
-                    return False
-            elif argument.startswith("-"):
-                return False
-            else:
-                targets.append(argument)
-            index += 1
-        target = targets[0] if len(targets) == 1 else ""
-        if not target or "/" in target or "," in target:
-            return False
-        try:
-            ipaddress.ip_address(target)
-        except ValueError:
-            if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", target):
-                return False
-        if "-sn" in scan_types:
-            return bool(timing)
-        return "-sT" in scan_types and bool(timing) and (fast_scan or ports is not None)
     return False
 
 
