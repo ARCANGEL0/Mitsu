@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 import json
+import re
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 from mitsu.tools import AgentToolHost
@@ -124,6 +125,20 @@ async def run_agent_turn(
             if progress:
                 yield AgentEvent("assistant_progress", {"text": progress})
         if not turn.tool_calls:
+            if _promises_followup_action(turn.text):
+                history.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your previous reply promised another action but returned no tool call. "
+                            "Perform that check now with the appropriate available tool. If you cannot "
+                            "or should not, explain the actual blocker or ask me for the missing input. "
+                            "Do not end on an unfulfilled promise."
+                        ),
+                    }
+                )
+                on_history()
+                continue
             yield AgentEvent("done", {})
             return
         anthropic_results: list[dict[str, Any]] = []
@@ -253,6 +268,24 @@ async def _tool_progress_update(
     if not plans:
         return "I’m reviewing the latest results and picking the next useful check (｡•̀ᴗ-)✧"
     return f"I’m checking {checks}, then I’ll follow the evidence to the next step (｡•̀ᴗ-)✧"
+
+
+def _promises_followup_action(text: str) -> bool:
+    if not text.strip():
+        return False
+    ending = text.strip()[-500:].casefold()
+    if ending.endswith("?") or re.search(
+        r"\b(?:need your permission|need your approval|waiting for you|please provide|can you|could you|do you want me to)\b",
+        ending[-220:],
+    ):
+        return False
+    return bool(
+        re.search(
+            r"\b(?:let me|i(?:['’]ll| will| can)|next,?\s+i(?:['’]ll| will| can)|i(?:['’]m| am) going to)\s+"
+            r"(?:now\s+)?(?:try|check|test|run|inspect|read|probe|verify|search|look|enumerate|scan|get|fetch|download|retrieve|grab|pull|use|apply|execute|exploit|launch|connect|open|write|send|install|build|prepare|continue|start)\b",
+            ending,
+        )
+    )
 
 
 def history_from_legacy(entries: list[Any]) -> list[dict[str, Any]]:
