@@ -15,6 +15,7 @@ import shlex
 import signal
 import socket
 import sys
+import time
 from typing import Any, Awaitable, Callable, Literal
 
 from mcp import Client, StdioServerParameters
@@ -169,6 +170,70 @@ def _is_low_impact_recon_command(command: str) -> bool:
     return False
 
 
+def _installation_request(command: str) -> tuple[str, str] | None:
+    rules = (
+        ("pacman", r"\b(?:pacman|yay|paru)\s+-S(?:yyu|yu|y|u)?\s+(?P<packages>[^;&|<>\n]+)"),
+        ("system package manager", r"\b(?:apt-get|apt|dnf|yum|zypper|apk|brew|snap|flatpak|conda|mamba)\s+(?:-[\w-]+\s+)*(?:install|add|upgrade|dist-upgrade)\s*(?P<packages>[^;&|<>\n]*)"),
+        ("Python package manager", r"\b(?:pipx|pip(?:\d+(?:\.\d+)*)?|uv\s+pip|python[\w.]*\s+-m\s+pip)\s+(?:install|inject)\s+(?P<packages>[^;&|<>\n]+)"),
+        ("uv", r"\buv\s+(?:tool\s+install|add)\s+(?P<packages>[^;&|<>\n]+)"),
+        ("Node package manager", r"\b(?:npm|pnpm|yarn|bun)\s+(?:install|add|i|update)(?:\s+(?P<packages>[^;&|<>\n]+))?"),
+        ("language package manager", r"\b(?:gem|cargo|go|dotnet\s+tool)\s+(?:install|update)\s+(?P<packages>[^;&|<>\n]+)"),
+        ("project installer", r"\b(?:uv\s+sync|poetry\s+install|bundle\s+install|composer\s+install|cargo\s+add|make\s+install|cmake\s+--install|python[\w.]*\s+setup\.py\s+install)\b(?P<packages>[^;&|<>\n]*)"),
+        ("system binary installer", r"\b(?:cp|install|mv|ln\s+-s)\b[^;&|<>]*\s+/usr/(?:local/)?bin/(?P<packages>[A-Za-z0-9_.+-]+)"),
+        ("remote install script", r"\b(?:curl|wget)\b[^|;\n]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh)\b"),
+        ("shell installer", r"\b(?:bash|sh|zsh)\s+(?:\./)?[^\s;&|<>]*(?:install|setup|bootstrap)[^\s;&|<>]*"),
+    )
+    managers = []
+    packages = []
+    manager_names = {
+        "apt", "apt-get", "pacman", "yay", "paru", "dnf", "yum", "zypper", "apk",
+        "brew", "snap", "flatpak", "conda", "mamba", "pip", "pipx", "npm", "pnpm",
+        "yarn", "bun", "gem", "cargo", "go", "dotnet", "uv",
+    }
+    options_with_values = {
+        "-r", "--requirement", "-c", "--constraint", "--index-url", "--extra-index-url",
+        "--trusted-host", "--config-settings", "--python", "--python-version", "--prefix",
+        "--root", "--target", "--cache-dir", "--from", "--source",
+    }
+    for manager, pattern in rules:
+        for match in re.finditer(pattern, command, re.IGNORECASE):
+            try:
+                command_tokens = shlex.split(match.group(0), posix=True)
+            except ValueError:
+                command_tokens = []
+            actual_manager = next(
+                (Path(token).name.casefold() for token in command_tokens if Path(token).name.casefold() in manager_names),
+                manager,
+            )
+            managers.append(actual_manager)
+            package_text = match.groupdict().get("packages", "")
+            try:
+                tokens = shlex.split(package_text, posix=True) if package_text else []
+            except ValueError:
+                tokens = []
+            skip_next = False
+            for token in tokens:
+                if skip_next:
+                    skip_next = False
+                    continue
+                if token in options_with_values:
+                    skip_next = True
+                    continue
+                if token.startswith("-"):
+                    continue
+                if any(token.startswith(f"{option}=") for option in options_with_values):
+                    continue
+                if re.fullmatch(r"[A-Za-z0-9_.@:+/-]{1,120}", token) and token not in packages:
+                    packages.append(token)
+                if len(packages) == 12:
+                    break
+    if not managers:
+        return None
+    manager_summary = ", ".join(dict.fromkeys(managers))
+    package_summary = ", ".join(packages) if packages else "requested dependencies or tool"
+    return manager_summary, package_summary
+
+
 class ToolHostError(Exception):
     pass
 
@@ -189,6 +254,7 @@ class AgentToolHost:
         self.search_settings = search_settings or (lambda: {})
         self.operator_dialog = operator_dialog or self._default_operator_dialog
         self.sudo_password = sudo_password
+        self.install_approvals: dict[str, float] = {}
         self.server = MCPServer("Mitsu built-in tools")
         self._stack = AsyncExitStack()
         self._clients: dict[str, tuple[Client, str, bool]] = {}
@@ -269,8 +335,9 @@ class AgentToolHost:
             options: list[str] | None = None,
             mode: Literal["single", "multiple", "yes_no", "text"] = "single",
             allow_other: bool = False,
+            install_target: str = "",
         ) -> str:
-            """Ask the operator in an interactive dialog with single-choice, multi-select, yes/no, or text input."""
+            """Ask the operator in an interactive dialog. Set install_target to the exact package or tool name for one-time install consent."""
             choices = [str(option).strip()[:240] for option in (options or []) if str(option).strip()][:12]
             if mode == "yes_no" and not choices:
                 choices = ["Yes", "Yes, but…", "No"]
@@ -278,7 +345,21 @@ class AgentToolHost:
                 raise ToolHostError("Provide at least one option for this dialog.")
             if not question.strip():
                 raise ToolHostError("The dialog question cannot be empty.")
+            install_names = self._normalize_install_targets(install_target)
+            if install_names:
+                if mode != "yes_no" or not any(option.casefold().startswith("yes") for option in choices):
+                    raise ToolHostError("Install consent requires a yes/no dialog with an explicit Yes option.")
+                question = f"{question.strip()}\n\nInstall requested: {', '.join(install_names)}"
             answer = await self.operator_dialog(question.strip()[:1200], choices, mode, allow_other)
+            try:
+                response = json.loads(answer or "{}")
+            except json.JSONDecodeError:
+                response = {"selected": [answer]}
+            selected = response.get("selected", []) if isinstance(response, dict) else []
+            if install_names and selected and str(selected[0]).casefold().startswith("yes"):
+                self.install_approvals.update(
+                    {name: time.monotonic() + 120 for name in install_names}
+                )
             return answer or json.dumps({"selected": [], "text": "", "cancelled": True})
 
         @self.server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
@@ -617,6 +698,16 @@ class AgentToolHost:
         text = answer if mode == "text" or allow_other or not options else ""
         return json.dumps({"selected": selected, "text": text}, ensure_ascii=False)
 
+    @staticmethod
+    def _normalize_install_targets(value: str) -> set[str]:
+        if not isinstance(value, str):
+            return set()
+        return {
+            item.strip().casefold()
+            for item in value.split(",")
+            if item.strip()
+        }
+
     def _armory_tool_selected(self, tool_id: str) -> bool:
         tool = TOOL_BY_ID[tool_id]
         return self.armory_enabled and (
@@ -639,7 +730,7 @@ class AgentToolHost:
             raise ToolHostError(f"{tool.name} is not enabled in MCP configuration. Enable it under /config first.")
         install_detail = ""
         if resolve_executable(tool) is None:
-            installed, detail = await self._install_armory_tool(tool.id)
+            installed, detail = await self._install_armory_tool(tool.id, purpose)
             if not installed:
                 raise ToolHostError(detail)
             install_detail = detail
@@ -651,7 +742,7 @@ class AgentToolHost:
         )
         return f"{install_detail}\n\n{result}" if install_detail else result
 
-    async def _install_armory_tool(self, tool_id: str) -> tuple[bool, str]:
+    async def _install_armory_tool(self, tool_id: str, purpose: str) -> tuple[bool, str]:
         tool = TOOL_BY_ID[tool_id]
         environment = await asyncio.to_thread(load_host_environment)
         status = await asyncio.to_thread(inspect_tool, tool, environment)
@@ -659,9 +750,9 @@ class AgentToolHost:
             return True, f"{tool.name} is already installed."
 
         answer = await self.operator_dialog(
-            f"{tool.name} is not installed. Want me to install it, then run it?",
+            f"Hey operator, {tool.name} is missing. I need it to {purpose.strip() or 'continue the requested investigation'}. May I install it and then run it?",
             [f"Yes · install {tool.name}", "No · skip this tool"],
-            "single",
+            "yes_no",
             False,
         )
         if not answer:
@@ -673,7 +764,6 @@ class AgentToolHost:
         selected = selection.get("selected", []) if isinstance(selection, dict) else []
         if not selected or not str(selected[0]).startswith("Yes"):
             return False, f"{tool.name} was not installed; the operator declined."
-
         try:
             script, method_id, privileged_commands = await asyncio.to_thread(
                 build_install_script,
@@ -786,6 +876,36 @@ class AgentToolHost:
     async def _run_bash(self, command: str, purpose: str) -> str:
         if not command.strip():
             raise ToolHostError("Command cannot be empty.")
+        install_request = _installation_request(command)
+        if install_request is not None:
+            manager, packages = install_request
+            install_targets = self._normalize_install_targets(packages)
+            now = time.monotonic()
+            self.install_approvals = {
+                target: expires
+                for target, expires in self.install_approvals.items()
+                if expires > now
+            }
+            if install_targets.issubset(self.install_approvals):
+                for target in install_targets:
+                    self.install_approvals.pop(target, None)
+            else:
+                reason = purpose.strip() or "continue the requested investigation"
+                answer = await self.operator_dialog(
+                    f"Hey operator, I need to install {packages} using {manager} so I can {reason}. May I go ahead?",
+                    [f"Yes · install {packages}", "No · continue without installing"],
+                    "yes_no",
+                    False,
+                )
+                if not answer:
+                    return "exit_code=130\nThe operator cancelled the installation request; nothing was installed and the command was not run."
+                try:
+                    selection = json.loads(answer)
+                except json.JSONDecodeError:
+                    selection = {"selected": [answer]}
+                selected = selection.get("selected", []) if isinstance(selection, dict) else []
+                if not selected or not str(selected[0]).startswith("Yes"):
+                    return "exit_code=130\nThe operator declined the installation request; nothing was installed and the command was not run."
         needs_sudo = os.name == "posix" and os.geteuid() != 0 and bool(
             re.search(r"(?<![A-Za-z0-9_])sudo(?![A-Za-z0-9_])", command)
         )
