@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
 
 from textual.app import App, ComposeResult
 from textual.theme import Theme
@@ -21,6 +23,7 @@ class MitsuApp(App):
 
     def __init__(self) -> None:
         super().__init__()
+        self._ui_started = False
         self.credentials = CredentialStore()
         self.preferences = PreferencesStore()
         self.sessions = SessionStore()
@@ -59,6 +62,7 @@ class MitsuApp(App):
         yield Static("Mitsu is waking up…", id="boot-screen")
 
     def on_mount(self) -> None:
+        self._ui_started = True
         self.set_mitsu_theme(self._configured_theme_id)
         self.sessions.path.mkdir(parents=True, exist_ok=True, mode=0o700)
         if self.credentials.ready() and self.preferences.load().get("onboarding_complete"):
@@ -132,4 +136,9 @@ class MitsuApp(App):
 
 
 def main() -> None:
-    MitsuApp().run(mouse=True)
+    app = MitsuApp()
+    try:
+        app.run(mouse=True)
+    finally:
+        if app._ui_started and sys.stdout.isatty() and app.return_code in (None, 0):
+            subprocess.run(["reset"], check=False)

@@ -40,7 +40,6 @@ async def run_agent_turn(
     anthropic = profile.get("protocol") == "anthropic"
     history.append({"role": "user", "content": prompt})
     on_history()
-    seen_calls: set[str] = set()
     while True:
         active_mode = get_mode() if get_mode is not None else mode
         active_system_prompt = get_system_prompt() if get_system_prompt is not None else system_prompt
@@ -137,35 +136,21 @@ async def run_agent_turn(
             result = ""
             is_error = False
             try:
-                fingerprint = json.dumps(
-                    [invocation.name, invocation.arguments],
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    default=str,
+                active_mode = get_mode() if get_mode is not None else mode
+                needs_approval = (active_mode == "Guided" and tool_host.requires_guided_approval(invocation.name)) or (
+                    active_mode == "Recon"
+                    and not tool_host.recon_action_is_low_impact(
+                        invocation.name, invocation.arguments
+                    )
                 )
-                if fingerprint in seen_calls:
-                    result = (
-                        "This exact tool call already ran during the current request. "
-                        "Review its earlier result and choose a different command or next step."
-                    )
-                    is_error = True
-                else:
-                    seen_calls.add(fingerprint)
-                    active_mode = get_mode() if get_mode is not None else mode
-                    needs_approval = (active_mode == "Guided" and tool_host.requires_guided_approval(invocation.name)) or (
-                        active_mode == "Recon"
-                        and not tool_host.recon_action_is_low_impact(
-                            invocation.name, invocation.arguments
-                        )
-                    )
-                    if needs_approval:
-                        allowed = await approve(invocation.name, invocation.arguments if isinstance(invocation.arguments, dict) else {})
-                        if not allowed:
-                            result, is_error = "The operator declined this action. Choose a lower-impact step or ask what to do differently.", True
-                        else:
-                            result, is_error, _ = await tool_host.call(invocation.name, invocation.arguments)
+                if needs_approval:
+                    allowed = await approve(invocation.name, invocation.arguments if isinstance(invocation.arguments, dict) else {})
+                    if not allowed:
+                        result, is_error = "The operator declined this action. Choose a lower-impact step or ask what to do differently.", True
                     else:
                         result, is_error, _ = await tool_host.call(invocation.name, invocation.arguments)
+                else:
+                    result, is_error, _ = await tool_host.call(invocation.name, invocation.arguments)
             except asyncio.CancelledError:
                 result = "The operator interrupted this tool call. Do not retry it unless asked."
                 is_error = True
@@ -198,12 +183,6 @@ async def run_agent_turn(
                         )
                 on_history()
                 raise
-            if is_error:
-                result = (
-                    f"{result}\n\nThis call failed or was declined. Treat its output as evidence, "
-                    "change the approach instead of guessing aliases or repeating near-identical commands, "
-                    "and tell the operator if the failure blocks further progress."
-                )
             if anthropic:
                 anthropic_results.append(
                     {
