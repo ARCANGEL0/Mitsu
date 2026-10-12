@@ -2570,3 +2570,45 @@ SessionExportOverwriteDialog {
     color: $text-muted;
     text-align: center;
 }
+OperatorDialog {
+    align: center bottom;
+    background: #000000 18%;
+}
+
+#operator-dialog {
+    width: 70;
+    max-width: 90%;
+    height: auto;
+    max-height: 22;
+    margin-bottom: 3;
+    padding: 0 2;
+    border: round $primary;
+    background: $surface;
+}
+
+#operator-dialog-title {
+    margin-bottom: 0;
+}
+
+#operator-dialog-question {
+    margin: 0 0 1 0;
+}
+
+#operator-dialog-options {
+    max-height: 8;
+    margin: 0;
+}
+
+#operator-dialog-input {
+    margin: 0;
+}
+
+#operator-dialog-actions {
+    height: 3;
+    margin-top: 0;
+}
+
+#operator-dialog-hint {
+    height: 1;
+    margin-top: 0;
+}
