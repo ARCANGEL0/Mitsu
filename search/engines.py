@@ -11,7 +11,7 @@ import re
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote_plus, urlencode, urljoin, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 
 @dataclass(frozen=True)
@@ -73,6 +73,99 @@ _SERP_URLS = {
     "startpage": ("https://www.startpage.com/sp/search?query={query}",),
 }
 _USER_AGENT = "Mitsu/0.1 (terminal assistant; public search)"
+
+
+class _WebRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        if urlsplit(new_url).scheme not in {"http", "https"}:
+            raise ValueError("Web pages may only redirect to HTTP or HTTPS URLs.")
+        return super().redirect_request(request, file_pointer, code, message, headers, new_url)
+
+
+class _PageTextParser(HTMLParser):
+    _BLOCK_TAGS = {"article", "br", "div", "h1", "h2", "h3", "li", "p", "section"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.title_parts: list[str] = []
+        self.in_title = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "title":
+            self.in_title = True
+        if tag in self._BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "title":
+            self.in_title = False
+        if tag in self._BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self.in_title:
+            self.title_parts.append(data)
+        self.parts.append(data)
+
+
+def fetch_web_page(url: str, max_chars: int = 24_000) -> str:
+    parsed = urlsplit(url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("Enter a complete HTTP or HTTPS URL.")
+    if parsed.username or parsed.password:
+        raise ValueError("URLs containing embedded credentials cannot be opened.")
+
+    request = Request(
+        url.strip(),
+        headers={"User-Agent": _USER_AGENT, "Accept": "text/html,text/plain,application/json,application/xml,*/*;q=0.5"},
+    )
+    opener = build_opener(_WebRedirectHandler())
+    with opener.open(request, timeout=20) as response:
+        raw = response.read(1_000_001)
+        truncated = len(raw) > 1_000_000
+        raw = raw[:1_000_000]
+        content_type = response.headers.get_content_type()
+        charset = response.headers.get_content_charset() or "utf-8"
+        text = raw.decode(charset, errors="replace")
+        title = ""
+
+        if content_type == "text/html":
+            text = re.sub(
+                r"(?is)<(script|style|noscript|svg)\b[^>]*>.*?</\1\s*>",
+                " ",
+                text,
+            )
+            parser = _PageTextParser()
+            parser.feed(text)
+            title = re.sub(r"\s+", " ", " ".join(parser.title_parts)).strip()
+            text = "\n".join(
+                line
+                for line in (re.sub(r"\s+", " ", part).strip() for part in parser.parts)
+                if line
+            )
+        elif not (
+            content_type.startswith("text/")
+            or content_type in {"application/json", "application/xml"}
+            or content_type.endswith("+json")
+            or content_type.endswith("+xml")
+        ):
+            return (
+                f"Opened {response.geturl()} · HTTP {response.status} · {content_type}. "
+                "This content type is not readable as text."
+            )
+
+        header = [f"URL: {response.geturl()}", f"HTTP: {response.status} · {content_type}"]
+        if title:
+            header.append(f"Title: {title}")
+        body = text.strip() or "(No readable text on this page.)"
+        if truncated:
+            body += "\n… page content truncated after 1 MB"
+        if len(body) > max_chars:
+            body = body[:max_chars] + "\n… extracted text truncated"
+        return "\n".join(header) + "\n\n" + body
+
+
 class _SerpParser(HTMLParser):
     _VOID_TAGS = {
         "area", "base", "br", "col", "embed", "hr", "img", "input", "link",

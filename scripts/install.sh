@@ -10,6 +10,28 @@ fi
 
 uv tool install --force "$repo_root"
 
+if ! command -v vulnx >/dev/null 2>&1; then
+    if command -v go >/dev/null 2>&1 && [ -r /dev/tty ]; then
+        printf '%s' "Vulnx adds another CVE search to Mitsu. Install it now? [y/N] "
+        answer=
+        IFS= read -r answer < /dev/tty || true
+        case "$answer" in
+            y|Y|yes|YES|Yes)
+                if go install github.com/projectdiscovery/vulnx/v2/cmd/vulnx@latest; then
+                    printf '%s\n' "Vulnx installed. Make sure Go's bin directory is on PATH."
+                else
+                    printf '%s\n' "Vulnx install failed. Mitsu can ask again the first time you run /vulnsearch."
+                fi
+                ;;
+            *)
+                printf '%s\n' "Skipped Vulnx. Mitsu can ask again the first time you run /vulnsearch."
+                ;;
+        esac
+    else
+        printf '%s\n' "Vulnx isn't installed. Mitsu can ask before adding it when you run /vulnsearch."
+    fi
+fi
+
 # Save a small host snapshot for Mitsu's package-management screens. The app
 # refreshes this metadata if the OS or package manager changes later.
 config_root=${XDG_CONFIG_HOME:-"$HOME/.config"}/mitsu

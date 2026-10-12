@@ -248,6 +248,7 @@ TOOLS = (
     _tool("sslscan", "sslscan", "vulnerability", "Inspect TLS protocol and cipher support on an approved endpoint.", "sslscan", ("sslscan",)),
     _tool("sslyze", "SSLyze", "vulnerability", "Audit TLS configuration for approved services.", "sslyze", ("sslyze",), install_methods=(_method("pipx", "sslyze", "sslyze"),)),
     _tool("trivy", "Trivy", "vulnerability", "Scan local images, repositories, and dependencies for known exposures.", "trivy", ("trivy",), install_methods=(_method("official-script", "trivy", "trivy", "https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh"),)),
+    _tool("vulnx", "Vulnx", "vulnerability", "Search vulnerability records by product, version, vendor, and CVE.", "vulnx", ("vulnx",), install_methods=(_method("go", "github.com/projectdiscovery/vulnx/v2/cmd/vulnx", "vulnx"),)),
     _tool("checkov", "Checkov", "vulnerability", "Review infrastructure-as-code and cloud configuration for risky settings.", "checkov", ("checkov",), install_methods=(_method("pipx", "checkov", "checkov"),)),
     _tool("grype", "Grype", "vulnerability", "Identify known vulnerabilities in local container images and filesystems.", "grype", ("grype",), install_methods=(_method("official-script", "grype", "grype", "https://raw.githubusercontent.com/anchore/grype/main/install.sh"),)),
 

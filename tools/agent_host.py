@@ -21,7 +21,13 @@ from mcp import Client, StdioServerParameters
 from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
 
-from mitsu.search import search_web as perform_web_search
+from mitsu.search import fetch_web_page, search_web as perform_web_search
+from mitsu.search.vulnerabilities import (
+    search_exploitdb,
+    search_vulnx,
+    search_vulnerabilities,
+    vulnerability_queries,
+)
 from mitsu.armory import CATEGORY_BY_ID, TOOLS, TOOL_BY_ID
 from mitsu.services.host_environment import load_host_environment
 from mitsu.services.redteam_armory import (
@@ -247,11 +253,32 @@ class AgentToolHost:
 
         @self.server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
         async def web_search(query: str, max_results: int = 5) -> str:
-            "Search all configured web engines concurrently. Return merged titles, URLs, snippets, and which engines found each link. If none are configured, tell the operator to use /config."
+            "Search configured web engines, or open a supplied HTTP or HTTPS URL and return readable page text. Prefer this tool over shell curl or wget for ordinary web research and operator-provided links."
             if not query.strip():
                 raise ToolHostError("Enter a search query.")
+            query = query.strip()
+            if query.casefold().startswith(("http://", "https://")):
+                return await asyncio.to_thread(fetch_web_page, query)
             return await asyncio.to_thread(
-                perform_web_search, query.strip(), max_results, self.search_settings()
+                perform_web_search, query, max_results, self.search_settings()
+            )
+
+        @self.server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
+        async def vulnsearch(criteria: str = "") -> str:
+            "Search session Intel, configured web engines, local Exploit-DB, and Vulnx for vulnerability leads. Ask before installing either local search tool if it is missing. Leave criteria empty to search saved product and version clues. Results are references, not proof; no exploit is run."
+            intel = await self._vulnerability_intel()
+            local_searcher, local_status, vulnx_searcher, vulnx_status = (
+                await self._prepare_vulnsearch_backends(criteria, intel)
+            )
+            return await asyncio.to_thread(
+                search_vulnerabilities,
+                criteria,
+                intel,
+                self.search_settings(),
+                local_searcher=local_searcher,
+                vulnx_searcher=vulnx_searcher,
+                local_status=local_status,
+                vulnx_status=vulnx_status,
             )
 
         @self.server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
@@ -616,6 +643,89 @@ class AgentToolHost:
         if self.update_intel is None:
             return "Session Intel updates are unavailable."
         return await self.update_intel(action, values)
+
+    async def _vulnerability_intel(self) -> dict[str, list[dict[str, Any]]]:
+        try:
+            summary = json.loads(
+                await self._update_session_intel("get_map", {"section": "summary"})
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        if not isinstance(summary, dict):
+            return {}
+
+        totals = {
+            "assets": summary.get("asset_count", 0),
+            "observations": summary.get("observation_count", 0),
+            "findings": summary.get("finding_count", 0),
+            "exploits": summary.get("exploit_count", 0),
+        }
+        intel: dict[str, list[dict[str, Any]]] = {section: [] for section in totals}
+        for section, raw_total in totals.items():
+            try:
+                total = max(0, int(raw_total))
+            except (TypeError, ValueError):
+                continue
+            start = max(0, total - 16)
+            for offset in range(start, total, 8):
+                try:
+                    page = json.loads(
+                        await self._update_session_intel(
+                            "get_map", {"section": section, "offset": offset, "limit": 8}
+                        )
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                records = page.get("records", []) if isinstance(page, dict) else []
+                intel[section].extend(
+                    record for record in records if isinstance(record, dict)
+                )
+        return intel
+
+    async def _prepare_vulnsearch_backends(
+        self, criteria: str, intel: dict[str, Any]
+    ) -> tuple[
+        Callable[[str], tuple[list[dict[str, str]], str | None]] | None,
+        str,
+        Callable[[str], tuple[str, str | None]] | None,
+        str,
+    ]:
+        if not vulnerability_queries(criteria, intel):
+            return None, "", None, ""
+
+        local_searcher, local_status = await self._prepare_vulnsearch_backend(
+            "exploitdb",
+            "search the local Exploit-DB snapshot for matching references",
+        )
+        vulnx_searcher, vulnx_status = await self._prepare_vulnsearch_backend(
+            "vulnx",
+            "search vulnerability records for the product/version clues in session Intel",
+        )
+        return local_searcher, local_status, vulnx_searcher, vulnx_status
+
+    async def _prepare_vulnsearch_backend(
+        self, tool_id: str, purpose: str
+    ) -> tuple[Callable[..., Any] | None, str]:
+        tool = TOOL_BY_ID[tool_id]
+        is_vulnx = tool_id == "vulnx"
+        if not self._armory_tool_selected(tool_id):
+            status = f"{tool.name} is disabled in Armory settings."
+            return (lambda query: ("", None) if is_vulnx else ([], None)), status
+
+        executable = resolve_executable(tool)
+        if executable is None:
+            installed, detail = await self._install_armory_tool(tool_id, purpose)
+            if not installed:
+                return (lambda query: ("", None) if is_vulnx else ([], None)), detail
+            executable = resolve_executable(tool)
+        if executable is None:
+            status = f"{tool.name} could not be found after installation."
+            return (lambda query: ("", None) if is_vulnx else ([], None)), status
+
+        binary, prefix = executable
+        if is_vulnx:
+            return lambda query: search_vulnx(query, binary, prefix), ""
+        return lambda query: search_exploitdb(query, binary, prefix), ""
 
     async def _default_operator_dialog(
         self,
