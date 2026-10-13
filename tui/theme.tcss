@@ -813,6 +813,18 @@ OptionList:focus > .option-list--option-highlighted {
     background: #101d20;
 }
 
+#file-suggestions {
+    display: none;
+    width: 100%;
+    height: auto;
+    max-height: 8;
+    margin: 0 0 0 2;
+    padding: 0 1;
+    border-left: tall $primary;
+    background: $surface;
+    color: $text-muted;
+}
+
 #command-panel {
     display: none;
     width: 100%;

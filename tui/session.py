@@ -23,7 +23,7 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.events import Click, Key, ScreenResume, ScreenSuspend
+from textual.events import Click, Key, Paste, ScreenResume, ScreenSuspend
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Input, OptionList, SelectionList, Static, TextArea
@@ -48,6 +48,13 @@ from mitsu.tools import AgentToolHost
 from mitsu.tools.redaction import redact_command, redact_history, redact_value
 from mitsu.tools.custom_mcp import validate_custom_tool_definitions
 from mitsu.tui.dialogs import ConfigurationDialog, ProviderDialog, SearchEngineDialog
+from mitsu.tui.file_references import (
+    file_reference_at_cursor,
+    normalize_file_paste,
+    quote_path,
+    workspace_file_index,
+    workspace_files,
+)
 
 
 OPENING_GREETINGS = (
@@ -131,10 +138,17 @@ class PromptTextArea(TextArea):
     class SlashSuggestionsChanged(Message):
         pass
 
+    class FileSuggestionsChanged(Message):
+        pass
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.slash_suggestions: list[tuple[str, str, bool]] = []
         self.slash_suggestion_index = 0
+        self.file_suggestions: list[Path] = []
+        self.file_suggestion_index = 0
+        self.file_token_range: tuple[int, int] | None = None
+        self._workspace_files: list[Path] | None = None
 
     class Submitted(Message):
         def __init__(self, prompt: str) -> None:
@@ -142,6 +156,9 @@ class PromptTextArea(TextArea):
             super().__init__()
 
     def action_submit_prompt(self) -> None:
+        if self.file_suggestions:
+            self.action_complete_file_reference()
+            return
         if self.slash_suggestions:
             command = self.text.strip().lower()
             if command not in {entry[0] for entry in self.COMMANDS}:
@@ -155,6 +172,9 @@ class PromptTextArea(TextArea):
         self.insert("\n")
 
     def action_complete_slash_command(self) -> None:
+        if self.file_suggestions:
+            self.action_complete_file_reference()
+            return
         if not self.slash_suggestions:
             self.insert("    ")
             return
@@ -164,7 +184,26 @@ class PromptTextArea(TextArea):
         self.cursor_location = (0, len(completed))
         self.focus()
 
+    def action_complete_file_reference(self) -> None:
+        if not self.file_suggestions or self.file_token_range is None:
+            self.insert("    ")
+            return
+        start, end = self.file_token_range
+        value = self.text
+        before, after = value[:start], value[end:]
+        replacement = quote_path(self.file_suggestions[self.file_suggestion_index])
+        separator = "" if after[:1].isspace() else " "
+        self.text = before + replacement + separator + after
+        offset = len(before) + len(replacement) + len(separator)
+        preceding = self.text[:offset].split("\n")
+        self.cursor_location = (len(preceding) - 1, len(preceding[-1]))
+        self.focus()
+
     def action_cursor_up(self, select: bool = False) -> None:
+        if self.file_suggestions and not select:
+            self.file_suggestion_index = (self.file_suggestion_index - 1) % len(self.file_suggestions)
+            self.post_message(self.FileSuggestionsChanged())
+            return
         if self.slash_suggestions and not select:
             self.slash_suggestion_index = (self.slash_suggestion_index - 1) % len(self.slash_suggestions)
             self.post_message(self.SlashSuggestionsChanged())
@@ -172,6 +211,10 @@ class PromptTextArea(TextArea):
         super().action_cursor_up(select)
 
     def action_cursor_down(self, select: bool = False) -> None:
+        if self.file_suggestions and not select:
+            self.file_suggestion_index = (self.file_suggestion_index + 1) % len(self.file_suggestions)
+            self.post_message(self.FileSuggestionsChanged())
+            return
         if self.slash_suggestions and not select:
             self.slash_suggestion_index = (self.slash_suggestion_index + 1) % len(self.slash_suggestions)
             self.post_message(self.SlashSuggestionsChanged())
@@ -189,6 +232,42 @@ class PromptTextArea(TextArea):
         self.slash_suggestions = suggestions
         self.slash_suggestion_index = 0
         self.post_message(self.SlashSuggestionsChanged())
+        reference = file_reference_at_cursor(self.text, self.cursor_location)
+        if reference is None:
+            self.file_suggestions = []
+            self.file_token_range = None
+        else:
+            start, end, query = reference
+            if self._workspace_files is None:
+                self._workspace_files = workspace_file_index()
+            self.file_token_range = (start, end)
+            self.file_suggestions = workspace_files(self._workspace_files, query)
+            self.file_suggestion_index = 0
+        self.post_message(self.FileSuggestionsChanged())
+
+    async def _on_paste(self, event: Paste) -> None:
+        if self.read_only:
+            return
+        pasted = normalize_file_paste(event.text)
+        if pasted != event.text:
+            event.stop()
+            if result := self._replace_via_keyboard(pasted, *self.selection):
+                self.move_cursor(result.end_location)
+                self.focus()
+            return
+        await super()._on_paste(event)
+
+    def action_paste(self) -> None:
+        if self.read_only:
+            return
+        clipboard = self.app.clipboard
+        pasted = normalize_file_paste(clipboard)
+        if pasted != clipboard:
+            if result := self._replace_via_keyboard(pasted, *self.selection):
+                self.move_cursor(result.end_location)
+                self.focus()
+            return
+        super().action_paste()
 
 
 class MitsuSyntaxTheme(SyntaxTheme):
