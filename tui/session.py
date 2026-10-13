@@ -24,6 +24,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Click, Key, Paste, ScreenResume, ScreenSuspend
+from textual import on
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Input, OptionList, SelectionList, Static, TextArea
@@ -41,7 +42,14 @@ from mitsu.workspace.intel import (
     upsert_finding,
     upsert_observation,
 )
-from mitsu.providers import ProviderRequestError, check_reasoning_support
+from mitsu.providers import ProviderRequestError, check_image_input_support, check_reasoning_support
+from mitsu.tui.images import (
+    IMAGE_TOKEN,
+    prepare_image_prompt,
+    read_clipboard_image,
+    normalize_image_path,
+    save_clipboard_image,
+)
 from mitsu.workspace import apply_undo_changes, capture_workspace, diff_workspace
 from mitsu.tui.widgets import MitsuCompanion
 from mitsu.tools import AgentToolHost
@@ -93,6 +101,13 @@ LEVEL_DESCRIPTIONS = {
     4: "LulzSec Intern: turn the lights up. Broaden service and web checks, then validate promising leads at a measured pace.",
     5: "Mista Robot: hack the planet and make some noise—in this authorized scope. Sweep wide, chase credible paths to RCE, and keep working toward a pwned box until you stop her (｡•̀ᴗ-)✧",
 }
+
+class ImagePaste(Message):
+    def __init__(self, data: bytes, media_type: str) -> None:
+        self.data = data
+        self.media_type = media_type
+        super().__init__()
+
 
 
 class PromptTextArea(TextArea):
@@ -148,6 +163,7 @@ class PromptTextArea(TextArea):
         self.file_suggestions: list[Path] = []
         self.file_suggestion_index = 0
         self.file_token_range: tuple[int, int] | None = None
+        self.image_attachments: dict[str, Path] = {}
         self._workspace_files: list[Path] | None = None
 
     class Submitted(Message):
@@ -246,8 +262,14 @@ class PromptTextArea(TextArea):
         self.post_message(self.FileSuggestionsChanged())
 
     async def _on_paste(self, event: Paste) -> None:
-        if self.read_only:
             return
+        if self.read_only:
+        if not event.text:
+            clipboard_image = read_clipboard_image()
+            if clipboard_image:
+                event.stop()
+                self.screen.post_message(ImagePaste(*clipboard_image))
+                return
         pasted = normalize_file_paste(event.text)
         if pasted != event.text:
             event.stop()
@@ -259,15 +281,94 @@ class PromptTextArea(TextArea):
 
     def action_paste(self) -> None:
         if self.read_only:
-            return
         clipboard = self.app.clipboard
+            return
+        if not clipboard:
+            clipboard_image = read_clipboard_image()
+            if clipboard_image:
+                self.screen.post_message(ImagePaste(*clipboard_image))
+                return
+            super().action_paste()
+            return
         pasted = normalize_file_paste(clipboard)
         if pasted != clipboard:
             if result := self._replace_via_keyboard(pasted, *self.selection):
                 self.move_cursor(result.end_location)
                 self.focus()
             return
+
         super().action_paste()
+
+    def get_line(self, line_index: int) -> Text:
+        line = super().get_line(line_index)
+        palette = THEMES.get(getattr(self.screen, "theme_id", "ember"), THEMES["ember"])
+        accent = palette["accent"]
+        background = palette["ui"]["user"]
+        for match in IMAGE_TOKEN.finditer(line.plain):
+            line.stylize(f"bold {accent} on {background}", match.start(), match.end())
+        return line
+
+    def action_delete_left(self) -> None:
+        if self._delete_image_token(left=True):
+            return
+        super().action_delete_left()
+
+    def action_delete_right(self) -> None:
+        if self._delete_image_token(left=False):
+            return
+        super().action_delete_right()
+
+    def _delete_image_token(self, left: bool) -> bool:
+        start, end = sorted(self.selection)
+        if start == end:
+            cursor = self.document.get_index_from_location(self.cursor_location)
+            if left:
+                matches = [
+                    match
+                    for match in IMAGE_TOKEN.finditer(self.text)
+                    if match.start() < cursor <= match.end()
+                ]
+            else:
+                matches = [
+                    match
+                    for match in IMAGE_TOKEN.finditer(self.text)
+                    if match.start() <= cursor < match.end()
+                ]
+            if not matches:
+                return False
+            start = self.document.get_location_from_index(matches[0].start())
+            end = self.document.get_location_from_index(matches[0].end())
+        else:
+            start_index = self.document.get_index_from_location(start)
+            end_index = self.document.get_index_from_location(end)
+            matches = [
+                match
+                for match in IMAGE_TOKEN.finditer(self.text)
+                if match.start() < end_index and match.end() > start_index
+            ]
+            if not matches:
+                return False
+            start = self.document.get_location_from_index(
+                min(start_index, matches[0].start())
+            )
+            end = self.document.get_location_from_index(
+                max(end_index, matches[-1].end())
+            )
+        for match in matches:
+            self.image_attachments.pop(match.group(0), None)
+        self._delete_via_keyboard(start, end)
+        return True
+
+    def add_image_attachment(self, path: Path) -> str:
+        number = len(self.image_attachments) + 1
+        label = f"[Image: {number}]"
+        while label in self.image_attachments:
+            number += 1
+            label = f"[Image: {number}]"
+        self.image_attachments[label] = path
+        self.insert(label)
+        return label
+
 
 
 class MitsuSyntaxTheme(SyntaxTheme):
@@ -1235,6 +1336,7 @@ class SessionScreen(Screen):
         self._queued_prompts: list[str] = []
         self._queue_drain_scheduled = False
         self._command_running = False
+        self._image_support_cache: dict[str, bool] = {}
         self._dispatching_prompt = False
         self._thinking_timer = None
         self._thinking_started: float | None = None
@@ -1315,6 +1417,7 @@ class SessionScreen(Screen):
         with Vertical(id="composer"):
             yield Static("", id="thinking-status", markup=False)
             yield Static("", id="queue-status", markup=False)
+            yield Static("", id="file-suggestions", markup=False)
             yield Static("", id="slash-suggestions", markup=False)
             with Vertical(id="command-panel"):
                 yield Static("", id="command-panel-title", markup=False)
@@ -1442,6 +1545,62 @@ class SessionScreen(Screen):
         self, event: PromptTextArea.SlashSuggestionsChanged
     ) -> None:
         self._render_slash_suggestions(self.query_one("#prompt-input", PromptTextArea))
+    def on_prompt_text_area_file_suggestions_changed(
+        self, event: PromptTextArea.FileSuggestionsChanged
+    ) -> None:
+        prompt = self.query_one("#prompt-input", PromptTextArea)
+        panel = self.query_one("#file-suggestions", Static)
+        if not prompt.file_suggestions:
+            panel.display = False
+            return
+        palette = THEMES.get(self.theme_id, THEMES["ember"])
+        accent = palette["accent"]
+        renderable = Text()
+        for index, path in enumerate(prompt.file_suggestions):
+            relative = path.relative_to(Path.cwd()).as_posix()
+            selected = index == prompt.file_suggestion_index
+            style = f"bold {palette['ui']['background']} on {accent}" if selected else palette["ui"]["muted"]
+            marker = "› " if selected else "  "
+            name = path.name
+            detail = f"  {relative}" if relative != name else ""
+            renderable.append(marker + name + detail + "\n", style=style)
+        renderable.append("↑/↓ move   Tab or Enter insert path", style=palette["ui"]["muted"])
+        panel.update(renderable)
+        panel.display = True
+
+    @on(ImagePaste)
+    async def imagePaste(self, event: ImagePaste) -> None:
+        try:
+            path = await asyncio.to_thread(
+                save_clipboard_image,
+                event.data,
+                event.media_type,
+                self._image_directory(),
+            )
+        except (OSError, ValueError) as error:
+            self.app.notify(str(error), title="Image paste failed", severity="error")
+            return
+        self.query_one("#prompt-input", PromptTextArea).add_image_attachment(path)
+        self._set_activity("Image attached to your next message.")
+
+    def _image_directory(self) -> Path:
+        directory = self.sessions.path / f"{self.session['id']}.images"
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        directory.chmod(0o700)
+        return directory
+
+    async def _supports_image_input(self) -> bool | None:
+        cache_key = "|".join(
+            str(self.provider.get(key, ""))
+            for key in ("provider_id", "base_url", "model")
+        )
+        if cache_key in self._image_support_cache:
+            return self._image_support_cache[cache_key]
+        support = await asyncio.to_thread(check_image_input_support, self.provider)
+        if support is not None:
+            self._image_support_cache[cache_key] = support
+        return support
+
 
     def _render_slash_suggestions(self, prompt: PromptTextArea) -> None:
         panel = self.query_one("#slash-suggestions", Static)
@@ -1465,25 +1624,64 @@ class SessionScreen(Screen):
         panel.display = True
 
     async def on_prompt_text_area_submitted(self, event: PromptTextArea.Submitted) -> None:
-        prompt = event.prompt.strip()
+        prompt_input = self.query_one("#prompt-input", PromptTextArea)
+        original_prompt = event.prompt.strip()
+        prompt = original_prompt
         if not prompt:
             return
         if prompt.startswith("/") and not self._dispatching_prompt:
             await self._dispatch_prompt(prompt)
             self.call_after_refresh(self._focus_prompt)
+        prompt, image_paths = prepare_image_prompt(prompt, prompt_input.image_attachments)
+        if image_paths:
+            try:
+                support = await self._supports_image_input()
+            except ProviderRequestError as error:
+                self.app.notify(
+                    f"Mitsu couldn't check this model's image support: {error}",
+                    title="Image not sent",
+                    severity="error",
+                )
+                prompt_input.text = original_prompt
+                self.call_after_refresh(self._focus_prompt)
+                return
+            if support is not True:
+                reason = (
+                    "This model's metadata says it doesn't accept images. Choose a vision-capable model before sending."
+                    if support is False
+                    else "The provider doesn't list image support for this model, so Mitsu couldn't confirm it can read the image."
+                )
+                self.app.notify(reason, title="Image not sent", severity="error")
+                prompt_input.text = original_prompt
+                self.call_after_refresh(self._focus_prompt)
+                return
+            try:
+                directory = self._image_directory()
+                image_paths = await asyncio.gather(
+                    *(
+                        asyncio.to_thread(normalize_image_path, path, directory)
+                        for path in image_paths
+                    )
+                )
+            except (OSError, ValueError) as error:
+                self.app.notify(str(error), title="Image not sent", severity="error")
+                prompt_input.text = original_prompt
+                self.call_after_refresh(self._focus_prompt)
+                return
+            prompt_input.image_attachments.clear()
             return
         if self._agent_running or self._command_running or self._dispatching_prompt or self._queued_prompts:
-            self._queued_prompts.append(prompt)
+            self._queued_prompts.append((prompt, image_paths))
             self._update_queue_status()
             if not self._agent_running and not self._command_running:
                 self._schedule_next_queued_prompt()
             self.call_after_refresh(self._focus_prompt)
             return
-        await self._dispatch_prompt(prompt)
+        await self._dispatch_prompt(prompt, image_paths)
         if self.app.screen is self and not self._agent_running:
             self.call_after_refresh(self._focus_prompt)
 
-    async def _dispatch_prompt(self, prompt: str) -> None:
+    async def _dispatch_prompt(self, prompt: str, image_paths: list[Path] | None = None) -> None:
         self._dispatching_prompt = True
         try:
             if prompt.startswith("/"):
@@ -1510,7 +1708,7 @@ class SessionScreen(Screen):
             else:
                 await self._append_message(f"›  {prompt}", "user", context_text=prompt)
                 self._agent_running = True
-                self._agent_task = asyncio.create_task(self._ask_provider(prompt))
+                self._agent_task = asyncio.create_task(self._ask_provider(prompt, image_paths or []))
                 self._agent_task.add_done_callback(self._agent_task_finished)
         finally:
             self._dispatching_prompt = False
@@ -1533,7 +1731,7 @@ class SessionScreen(Screen):
         renderable.append("  ·  Esc stops this turn and sends the next", style=palette["ui"]["muted"])
         preview_limit = max(8, min(72, self.size.width - 16))
         visible_prompts = self._queued_prompts[:2]
-        for index, prompt in enumerate(visible_prompts, 1):
+        for index, (prompt, _image_paths) in enumerate(visible_prompts, 1):
             preview = " ".join(prompt.split())
             if len(preview) > preview_limit:
                 preview = preview[: preview_limit - 1].rstrip() + "…"
@@ -1941,13 +2139,14 @@ class SessionScreen(Screen):
             or not self._queued_prompts
         ):
             return
-        prompt = self._queued_prompts.pop(0)
+        prompt, image_paths = self._queued_prompts.pop(0)
         self._update_queue_status()
-        await self._dispatch_prompt(prompt)
+        await self._dispatch_prompt(prompt, image_paths)
         if self.app.screen is self and not self._agent_running:
             self.call_after_refresh(self._focus_prompt)
 
-    async def _ask_provider(self, prompt: str) -> None:
+    async def _ask_provider(self, prompt: str, image_paths: list[Path] | None = None) -> None:
+        image_paths = image_paths or []
         self._agent_running = True
         self._agent_task = asyncio.current_task()
         history_checkpoint = copy.deepcopy(self.agent_history)
@@ -1973,6 +2172,12 @@ class SessionScreen(Screen):
                 chat_history_before -= 1
         agent_history_before = len(history_checkpoint)
         workspace_root = Path.cwd().resolve()
+        user_content: str | list[dict[str, Any]] = prompt
+        if image_paths:
+            user_content = [
+                {"type": "text", "text": prompt},
+                *({"type": "mitsu_image", "path": str(path)} for path in image_paths),
+            ]
         workspace_before: dict[str, bytes] | None = None
         prompt_input = self.query_one("#prompt-input", PromptTextArea)
         provider_spec = PROVIDER_BY_ID.get(str(self.provider.get("provider_id", "")))
@@ -1988,7 +2193,7 @@ class SessionScreen(Screen):
 
         def restore_history(note: str) -> None:
             self.agent_history[:] = history_checkpoint
-            self.agent_history.append({"role": "user", "content": prompt})
+            self.agent_history.append({"role": "user", "content": user_content})
             self.agent_history.append({"role": "assistant", "content": note})
             save_history()
 
@@ -2010,6 +2215,7 @@ class SessionScreen(Screen):
                 self._approve_tool,
                 save_history,
                 get_mode=lambda: self.mode,
+                image_paths=[str(path) for path in image_paths],
                 get_system_prompt=self._system_prompt,
             ):
                 if event.kind == "assistant_turn":

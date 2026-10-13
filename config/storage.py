@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 import re
 import tempfile
@@ -192,6 +193,11 @@ class SessionStore:
             path.unlink()
         except FileNotFoundError:
             return False
+        attachments = self.path / f"{session_id}.images"
+        if attachments.is_symlink():
+            attachments.unlink(missing_ok=True)
+        elif attachments.is_dir():
+            shutil.rmtree(attachments, ignore_errors=True)
         return True
 
     def create_session(self, provider: dict[str, Any]) -> dict[str, Any]:

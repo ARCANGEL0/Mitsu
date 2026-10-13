@@ -36,9 +36,16 @@ async def run_agent_turn(
     request_turn: RequestTurn | None = None,
     get_mode: Callable[[], str] | None = None,
     get_system_prompt: Callable[[], str] | None = None,
+    image_paths: list[str] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     anthropic = profile.get("protocol") == "anthropic"
-    history.append({"role": "user", "content": prompt})
+    content: str | list[dict[str, Any]] = prompt
+    if image_paths:
+        content = [
+            {"type": "text", "text": prompt},
+            *({"type": "mitsu_image", "path": path} for path in image_paths),
+        ]
+    history.append({"role": "user", "content": content})
     on_history()
     while True:
         active_mode = get_mode() if get_mode is not None else mode

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
 import threading
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
@@ -120,7 +123,7 @@ def _request_openai_turn(
         headers["Authorization"] = f"Bearer {api_key}"
     payload: dict[str, Any] = {
         "model": model,
-        "messages": messages,
+        "messages": _openai_messages(messages),
         "tools": [
             {
                 "type": "function",
@@ -454,7 +457,11 @@ def _request_anthropic_turn(
     if api_key:
         headers["x-api-key"] = api_key
     system_messages = [str(message["content"]) for message in messages if message.get("role") == "system"]
-    conversation = [message for message in messages if message.get("role") != "system"]
+    conversation = [
+        _anthropic_message(message)
+        for message in messages
+        if message.get("role") != "system"
+    ]
     payload: dict[str, Any] = {
         "model": model,
         "max_tokens": 8192,
@@ -895,6 +902,163 @@ def check_reasoning_support(profile: dict[str, Any]) -> str | None:
     if isinstance(parameters, list):
         return "unsupported"
     return None
+
+
+def check_image_input_support(profile: dict[str, Any]) -> bool | None:
+    protocol = str(profile.get("protocol", "openai"))
+    provider_id = str(profile.get("provider_id", ""))
+    base_url = str(profile.get("base_url", "")).rstrip("/")
+    model = str(profile.get("model", ""))
+    api_key = str(profile.get("api_key", ""))
+    if not base_url or not model:
+        return None
+    if provider_id == "cloudflare":
+        parsed = urlsplit(base_url)
+        endpoint = urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path.removesuffix("/ai/v1") + "/ai/models/search", "", "")
+        )
+        query = urlencode(
+            {"per_page": "100", "hide_experimental": "true", "format": "openrouter", "page": "1"}
+        )
+        endpoint = f"{endpoint}?{query}"
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+    elif protocol == "anthropic":
+        endpoint = f"{base_url}/models" if base_url.endswith("/v1") else f"{base_url}/v1/models"
+        headers = {"anthropic-version": "2023-06-01"}
+        if api_key:
+            headers["x-api-key"] = api_key
+    else:
+        endpoint = f"{base_url}/models"
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+    request = Request(endpoint, headers=headers, method="GET")
+    try:
+        with urlopen(request, timeout=15) as response:
+            decoded = json.loads(response.read(2_000_000).decode("utf-8"))
+    except HTTPError as error:
+        detail = error.read(1024).decode("utf-8", errors="replace")
+        message = f"Provider returned HTTP {error.code}."
+        try:
+            body = json.loads(detail)
+            message = _response_error_detail(body) or message
+        except json.JSONDecodeError:
+            pass
+        raise ProviderRequestError(_hide_secret(message, api_key)) from error
+    except (URLError, TimeoutError, OSError) as error:
+        raise ProviderRequestError(_hide_secret(f"Could not reach the provider: {error}", api_key)) from error
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise ProviderRequestError("The provider returned invalid model metadata.") from error
+    if not isinstance(decoded, dict):
+        return None
+    cloudflare_items = None
+    if provider_id == "cloudflare":
+        result = decoded.get("result")
+        if isinstance(result, dict):
+            decoded = result
+        elif isinstance(result, list):
+            cloudflare_items = result
+    items = cloudflare_items or decoded.get("data", decoded.get("models", []))
+    if not isinstance(items, list):
+        return None
+    metadata = next(
+        (
+            item for item in items
+            if isinstance(item, dict)
+            and str(item.get("id") or item.get("name") or item.get("model") or "").casefold()
+            == model.casefold()
+        ),
+        None,
+    )
+    return _image_capability(metadata) if metadata is not None else None
+
+
+def _image_capability(metadata: dict[str, Any]) -> bool | None:
+    for key in ("supports_vision", "supports_images", "supports_image_input", "vision"):
+        value = metadata.get(key)
+        if isinstance(value, bool):
+            return value
+    capability = metadata.get("capabilities")
+    if isinstance(capability, dict):
+        for key in ("vision", "image", "images", "image_input"):
+            value = capability.get(key)
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, dict):
+                for nested_key in ("input", "enabled", "supported"):
+                    nested = value.get(nested_key)
+                    if isinstance(nested, bool):
+                        return nested
+        for key in ("input_modalities", "modalities", "input"):
+            modalities = capability.get(key)
+            if isinstance(modalities, list):
+                return any(
+                    "image" in str(item).casefold() or "vision" in str(item).casefold()
+                    for item in modalities
+                )
+    elif isinstance(capability, list):
+        return any("image" in str(item).casefold() or "vision" in str(item).casefold() for item in capability)
+    for source in (metadata, metadata.get("architecture", {})):
+        if not isinstance(source, dict):
+            continue
+        for key in ("input_modalities", "modalities"):
+            modalities = source.get(key)
+            if isinstance(modalities, list):
+                return any(
+                    "image" in str(item).casefold() or "vision" in str(item).casefold()
+                    for item in modalities
+                )
+    return None
+
+
+def _image_data(path: str) -> tuple[str, str]:
+    image_path = Path(path)
+    media_type = mimetypes.guess_type(image_path.name)[0]
+    if media_type not in {"image/png", "image/jpeg", "image/webp", "image/gif"}:
+        raise ProviderRequestError(f"Mitsu cannot send this image format to the provider: {image_path.name}")
+    try:
+        encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    except OSError as error:
+        raise ProviderRequestError(f"The attached image is no longer available: {image_path.name}") from error
+    return media_type, encoded
+
+
+def _openai_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            normalized.append(message)
+            continue
+        blocks = []
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "mitsu_image":
+                blocks.append(block)
+                continue
+            media_type, data = _image_data(str(block.get("path", "")))
+            blocks.append(
+                {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{data}"}}
+            )
+        normalized.append({**message, "content": blocks})
+    return normalized
+
+
+def _anthropic_message(message: dict[str, Any]) -> dict[str, Any]:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return message
+    blocks = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "mitsu_image":
+            blocks.append(block)
+            continue
+        media_type, data = _image_data(str(block.get("path", "")))
+        blocks.append(
+            {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}}
+        )
+    return {**message, "content": blocks}
 
 
 def apply_reasoning_default(profile: dict[str, Any]) -> bool:
