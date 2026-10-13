@@ -114,6 +114,7 @@ class PromptTextArea(TextArea):
     BINDINGS = [
         Binding("enter", "submit_prompt", "Send", priority=True),
         Binding("shift+enter", "insert_newline", "New line", priority=True),
+        Binding("ctrl+c", "clear_input", "Clear input", show=False, priority=True),
         Binding("tab", "complete_slash_command", "Complete command", show=False, priority=True),
     ]
 
@@ -165,6 +166,7 @@ class PromptTextArea(TextArea):
         self.file_token_range: tuple[int, int] | None = None
         self.image_attachments: dict[str, Path] = {}
         self._workspace_files: list[Path] | None = None
+        self._last_paste: tuple[str | bytes, str, float] | None = None
 
     class Submitted(Message):
         def __init__(self, prompt: str) -> None:
@@ -186,6 +188,11 @@ class PromptTextArea(TextArea):
 
     def action_insert_newline(self) -> None:
         self.insert("\n")
+
+    def action_clear_input(self) -> None:
+        self.clear()
+        self.image_attachments.clear()
+        self.focus()
 
     def action_complete_slash_command(self) -> None:
         if self.file_suggestions:
@@ -262,42 +269,54 @@ class PromptTextArea(TextArea):
         self.post_message(self.FileSuggestionsChanged())
 
     async def _on_paste(self, event: Paste) -> None:
-            return
         if self.read_only:
+            return
+        event.stop()
         if not event.text:
             clipboard_image = read_clipboard_image()
             if clipboard_image:
-                event.stop()
-                self.screen.post_message(ImagePaste(*clipboard_image))
-                return
-        pasted = normalize_file_paste(event.text)
-        if pasted != event.text:
-            event.stop()
-            if result := self._replace_via_keyboard(pasted, *self.selection):
-                self.move_cursor(result.end_location)
-                self.focus()
+                data, media_type = clipboard_image
+                self._paste_image(data, media_type, "event")
             return
-        await super()._on_paste(event)
+        self._paste_text(event.text, "event")
 
     def action_paste(self) -> None:
         if self.read_only:
-        clipboard = self.app.clipboard
             return
+        clipboard = self.app.clipboard
         if not clipboard:
             clipboard_image = read_clipboard_image()
             if clipboard_image:
-                self.screen.post_message(ImagePaste(*clipboard_image))
-                return
-            super().action_paste()
+                data, media_type = clipboard_image
+                self._paste_image(data, media_type, "action")
             return
-        pasted = normalize_file_paste(clipboard)
-        if pasted != clipboard:
-            if result := self._replace_via_keyboard(pasted, *self.selection):
-                self.move_cursor(result.end_location)
-                self.focus()
-            return
+        self._paste_text(clipboard, "action")
 
-        super().action_paste()
+    def _paste_text(self, text: str, source: str) -> None:
+        pasted = normalize_file_paste(text)
+        if not pasted or self._paste_was_repeated(pasted, source):
+            return
+        if result := self._replace_via_keyboard(pasted, *self.selection):
+            self.move_cursor(result.end_location)
+            self.focus()
+
+    def _paste_image(self, data: bytes, media_type: str, source: str) -> None:
+        if self._paste_was_repeated(data, source):
+            return
+        self.screen.post_message(ImagePaste(data, media_type))
+
+    def _paste_was_repeated(self, value: str | bytes, source: str) -> bool:
+        now = time.monotonic()
+        previous = self._last_paste
+        if (
+            previous is not None
+            and previous[0] == value
+            and previous[1] != source
+            and now - previous[2] < 0.3
+        ):
+            return True
+        self._last_paste = (value, source, now)
+        return False
 
     def get_line(self, line_index: int) -> Text:
         line = super().get_line(line_index)
@@ -1067,10 +1086,20 @@ class ToolResultCard(Static):
 
     def __init__(self, output: str, failed: bool = False) -> None:
         self.output = output
-        status = re.search(r"(?:exit_code=|exited with status )(-?\d+)", output)
-        self.failed = failed or bool(status and int(status.group(1)) != 0) or "timed out" in output.casefold()
+        self.failed = self.is_failure(output, failed)
         self.expanded = False
         super().__init__(self._summary(), classes="tool-result-message", markup=False)
+
+    @staticmethod
+    def is_failure(output: str, failed: bool = False) -> bool:
+        status = re.search(r"(?:exit_code=|exited with status )(-?\d+)", output)
+        error = re.search(r"(?im)^\s*(?:error|failed|failure)\b", output)
+        return (
+            failed
+            or bool(status and int(status.group(1)) != 0)
+            or "timed out" in output.casefold()
+            or error is not None
+        )
 
     def _summary(self) -> Text:
         good = "#79d89a"
@@ -1696,7 +1725,15 @@ class SessionScreen(Screen):
                     if (
                         self.app.screen is self
                         and not self._command_panel_active
-                        and command not in {"/search", "/clear", "/level", "/mode", "/export", "/rewind"}
+                        and command not in {
+                            "/search",
+                            "/clear",
+                            "/level",
+                            "/mode",
+                            "/export",
+                            "/rewind",
+                            "/new",
+                        }
                     ):
                         self._show_command_panel(
                             f"/{command.removeprefix('/')}",
@@ -1706,7 +1743,7 @@ class SessionScreen(Screen):
                     self._command_running = previous_command_running
                     self._active_command = previous_active_command
             else:
-                await self._append_message(f"›  {prompt}", "user", context_text=prompt)
+                await self._append_message(prompt, "user", context_text=prompt)
                 self._agent_running = True
                 self._agent_task = asyncio.create_task(self._ask_provider(prompt, image_paths or []))
                 self._agent_task.add_done_callback(self._agent_task_finished)
@@ -2285,7 +2322,7 @@ class SessionScreen(Screen):
                 elif event.kind == "tool_finished":
                     name = str(event.data.get("name", "tool"))
                     result = str(event.data.get("result", ""))
-                    failed = bool(event.data.get("is_error"))
+                    failed = ToolResultCard.is_failure(result, bool(event.data.get("is_error")))
                     for message_widget in reversed(self._message_widgets):
                         if isinstance(message_widget, ToolCallCard) and message_widget.running:
                             message_widget.finish("failed" if failed else "finished")
@@ -2304,7 +2341,7 @@ class SessionScreen(Screen):
                     self._set_activity(f"{name} {'failed' if failed else 'finished'}.")
                     await self._append_message(result, "tool-result", tool_failed=failed)
                     if failed:
-                        self._set_companion("error", "Tool failed", reset_after=1.5)
+                        self._set_companion("failed", "Tool failed", reset_after=1.5)
                     elif name.endswith(("record_exploit", "remove_exploit")):
                         self._set_companion("success", "Intel updated!", reset_after=1.5)
                     else:
@@ -2609,13 +2646,13 @@ class SessionScreen(Screen):
         self._set_activity("Receiving Mitsu’s response…")
         if self._stream_preview is None:
             self._stream_preview = Static(
-                self._message_renderable(self._stream_text),
+                self._message_renderable(self._stream_text, "assistant"),
                 classes="assistant-message streaming-message",
                 markup=False,
             )
             await self.query_one("#conversation", VerticalScroll).mount(self._stream_preview)
         else:
-            self._stream_preview.update(self._message_renderable(self._stream_text))
+            self._stream_preview.update(self._message_renderable(self._stream_text, "assistant"))
         self.query_one("#conversation", VerticalScroll).scroll_end(animate=False)
         self._animate_thinking()
 
@@ -3013,7 +3050,13 @@ class SessionScreen(Screen):
             self.app.push_screen(CompanionDialog(self.companion_id), self._companion_dialog_closed)
             return
         if command == "/new":
-            await self.app.open_session()
+            self.app.call_after_refresh(
+                lambda: self.app.run_worker(
+                    self.app.open_session(),
+                    name="new-session",
+                    group="app",
+                )
+            )
             return
         if command == "/rename":
             if argument:
@@ -3593,9 +3636,13 @@ class SessionScreen(Screen):
                 widget.output = str(entry.get("text", ""))
                 widget.update(widget.output + "\n\n(click or press Enter to collapse)" if widget.expanded else widget._summary())
             else:
-                widget.update(self._message_renderable(str(entry.get("text", ""))))
+                widget.update(
+                    self._message_renderable(
+                        str(entry.get("text", "")), str(entry.get("role", "assistant"))
+                    )
+                )
         if self._stream_preview is not None:
-            self._stream_preview.update(self._message_renderable(self._stream_text))
+            self._stream_preview.update(self._message_renderable(self._stream_text, "assistant"))
         self._render_slash_suggestions(self.query_one("#prompt-input", PromptTextArea))
         if self._thinking_started is not None:
             self._animate_thinking()
@@ -3821,7 +3868,7 @@ CURRENT MODE: {self.mode}
             message_widget = ToolResultCard(message, tool_failed)
         else:
             message_widget = Static(
-                self._message_renderable(message), classes=self._message_class(role), markup=False
+                self._message_renderable(message, role), classes=self._message_class(role), markup=False
             )
         await conversation.mount(message_widget)
         conversation.scroll_end(animate=False)
@@ -4170,13 +4217,29 @@ CURRENT MODE: {self.mode}
             return ToolCallCard(text, running=False, theme_id=self.theme_id)
         if role == "tool-result":
             return ToolResultCard(text, bool(entry.get("tool_failed")))
-        return Static(self._message_renderable(text), classes=self._message_class(role), markup=False)
+        return Static(
+            self._message_renderable(text, role), classes=self._message_class(role), markup=False
+        )
 
-    def _message_renderable(self, message: str) -> Text | Group:
+    def _message_renderable(self, message: str, role: str = "assistant") -> Text | Group:
+        if role == "user":
+            message = message.removeprefix("›  ").removeprefix("› ")
+            label = "↗  You"
+            label_style = THEMES.get(self.theme_id, THEMES["ember"])["accent"]
+        elif role == "assistant":
+            label = "✦  Mitsu"
+            label_style = THEMES.get(self.theme_id, THEMES["ember"])["code"]["function"]
+        else:
+            label = ""
+            label_style = ""
         code_blocks = list(re.finditer(r"```([^\n`]*)\n?(.*?)```", message, re.DOTALL))
+        heading = Text(label + "\n", style=f"bold {label_style}") if label else None
         if not code_blocks:
-            return Text(message)
-        renderables = []
+            if heading is None:
+                return Text(message)
+            heading.append_text(Text(message))
+            return heading
+        renderables = [heading] if heading is not None else []
         previous_end = 0
         syntax_theme = MitsuSyntaxTheme(self.theme_id)
         for match in code_blocks:

@@ -38,6 +38,67 @@ class ProviderTurn:
 StreamCallback = Callable[[str, dict[str, Any]], None]
 
 
+class _ReplyFilter:
+    def __init__(self) -> None:
+        self.inside_think = False
+        self.pending = ""
+
+    def feed(self, text: str) -> str:
+        text = self.pending + text
+        self.pending = ""
+        visible: list[str] = []
+        while text:
+            closing = "</think>"
+            opening = "<think>"
+            lowered = text.lower()
+            if self.inside_think:
+                index = lowered.find(closing)
+                markers = (closing,)
+            else:
+                opening_index = lowered.find(opening)
+                closing_index = lowered.find(closing)
+                if opening_index < 0:
+                    index = closing_index
+                    markers = (closing, opening)
+                elif closing_index < 0 or opening_index < closing_index:
+                    index = opening_index
+                    markers = (opening, closing)
+                else:
+                    index = closing_index
+                    markers = (closing, opening)
+            if index >= 0:
+                if not self.inside_think:
+                    visible.append(text[:index])
+                marker = next(marker for marker in markers if lowered.startswith(marker, index))
+                if marker == opening:
+                    self.inside_think = True
+                text = text[index + len(marker):]
+                if marker == closing:
+                    self.inside_think = False
+                continue
+            marker = closing if self.inside_think else opening
+            keep = 0
+            for size in range(1, min(len(marker), len(text) + 1)):
+                if text.lower().endswith(marker[:size]):
+                    keep = size
+            split = len(text) - keep
+            if not self.inside_think:
+                visible.append(text[:split])
+            self.pending = text[split:]
+            break
+        return "".join(visible)
+
+    def finish(self) -> str:
+        pending = self.pending
+        self.pending = ""
+        return pending if not self.inside_think else ""
+
+
+def _visible_reply(text: str) -> str:
+    reply_filter = _ReplyFilter()
+    return reply_filter.feed(text) + reply_filter.finish()
+
+
 class RequestCancellation:
     """Close an in-flight streamed response when the operator interrupts it."""
 
@@ -189,18 +250,14 @@ def _openai_turn_from_response(response: dict[str, Any], on_event: StreamCallbac
             normalized_function["arguments"] = json.dumps(raw_arguments, ensure_ascii=False, default=str)
         normalized_call = {**raw, "id": call_id, "type": "function", "function": normalized_function}
         normalized_calls.append(normalized_call)
-    assistant_message = {
-        "role": "assistant",
-        "content": message.get("content"),
-    }
+    content, text = _clean_openai_content(message.get("content"))
+    assistant_message = {"role": "assistant", "content": content}
     if raw_calls:
         assistant_message["tool_calls"] = normalized_calls
-    content = message.get("content")
-    text = _openai_content_text(content)
     refusal = message.get("refusal")
     if not text and isinstance(refusal, str):
-        text = refusal
-        assistant_message["content"] = refusal
+        text = _visible_reply(refusal)
+        assistant_message["content"] = text
     if not raw_calls and not text:
         # Keep the conversation role sequence valid if a compatible server
         # sends a genuinely empty completion.
@@ -228,6 +285,35 @@ def _openai_content_text(content: Any) -> str:
             if isinstance(block, dict) and block.get("type") in {"text", "output_text", None}
         )
     return ""
+
+
+def _clean_openai_content(content: Any) -> tuple[Any, str]:
+    if isinstance(content, str):
+        visible = _visible_reply(content)
+        return visible, visible
+    if not isinstance(content, list):
+        return content, ""
+    reply_filter = _ReplyFilter()
+    cleaned = []
+    last_text: tuple[dict[str, Any], str] | None = None
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") not in {"text", "output_text", None}:
+            cleaned.append(block)
+            continue
+        field = "text" if isinstance(block.get("text"), str) else "content"
+        value = block.get(field)
+        if not isinstance(value, str):
+            cleaned.append(block)
+            continue
+        item = dict(block)
+        item[field] = reply_filter.feed(value)
+        cleaned.append(item)
+        last_text = item, field
+    tail = reply_filter.finish()
+    if tail and last_text is not None:
+        item, field = last_text
+        item[field] += tail
+    return cleaned, _openai_content_text(cleaned)
 
 
 def _openai_response_info(
@@ -300,6 +386,7 @@ def _request_openai_stream(
             raise ProviderRequestError("The provider returned an unexpected response.")
         return _openai_turn_from_response(decoded, on_event)
     text_parts: list[str] = []
+    reply_filter = _ReplyFilter()
     tool_calls: dict[int, dict[str, Any]] = {}
     legacy_function_call: dict[str, str] = {"name": "", "arguments": ""}
     usage: dict[str, Any] = {}
@@ -346,16 +433,20 @@ def _request_openai_stream(
             if not isinstance(delta, dict):
                 completion_text = choice.get("text")
                 if isinstance(completion_text, str) and completion_text:
-                    text_parts.append(completion_text)
-                    on_event("delta", {"text": completion_text})
+                    visible = reply_filter.feed(completion_text)
+                    if visible:
+                        text_parts.append(visible)
+                        on_event("delta", {"text": visible})
                 continue
             content = delta.get("content")
             content_text = _openai_content_text(content)
             if not content_text and isinstance(delta.get("refusal"), str):
                 content_text = delta["refusal"]
             if content_text:
-                text_parts.append(content_text)
-                on_event("delta", {"text": content_text})
+                visible = reply_filter.feed(content_text)
+                if visible:
+                    text_parts.append(visible)
+                    on_event("delta", {"text": visible})
             chunks = delta.get("tool_calls")
             if not isinstance(chunks, list):
                 chunks = []
@@ -434,6 +525,10 @@ def _request_openai_stream(
         raw["id"] = call_id
         normalized_calls.append(raw)
         invocations.append(ToolInvocation(call_id, name, arguments))
+    tail = reply_filter.finish()
+    if tail:
+        text_parts.append(tail)
+        on_event("delta", {"text": tail})
     content = "".join(text_parts)
     assistant_message: dict[str, Any] = {"role": "assistant", "content": content or ""}
     if normalized_calls:
@@ -505,6 +600,7 @@ def _anthropic_turn_from_response(
         call_id = str(block.get("id") or f"toolu_{uuid.uuid4().hex}")
         calls.append(ToolInvocation(call_id, name, block.get("input", {})))
         normalized_content.append({**block, "id": call_id})
+    normalized_content = _clean_anthropic_content(normalized_content)
     text = "\n".join(
         str(block.get("text", ""))
         for block in normalized_content
@@ -519,6 +615,24 @@ def _anthropic_turn_from_response(
         calls,
         usage if isinstance(usage, dict) else {},
     )
+
+
+def _clean_anthropic_content(content: list[Any]) -> list[Any]:
+    reply_filter = _ReplyFilter()
+    cleaned = []
+    last_text: dict[str, Any] | None = None
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "text":
+            cleaned.append(block)
+            continue
+        item = dict(block)
+        item["text"] = reply_filter.feed(str(item.get("text", "")))
+        cleaned.append(item)
+        last_text = item
+    tail = reply_filter.finish()
+    if tail and last_text is not None:
+        last_text["text"] += tail
+    return cleaned
 
 
 def _request_anthropic_stream(
@@ -566,6 +680,7 @@ def _request_anthropic_stream(
         return _anthropic_turn_from_response(decoded, on_event)
     blocks: dict[int, dict[str, Any]] = {}
     usage: dict[str, Any] = {}
+    reply_filter = _ReplyFilter()
     try:
         for raw_line in response:
             if cancellation is not None and cancellation.cancelled():
@@ -591,6 +706,9 @@ def _request_anthropic_stream(
                     blocks[index] = dict(block)
                     if block.get("type") == "text":
                         blocks[index]["text"] = str(block.get("text", ""))
+                        visible = reply_filter.feed(blocks[index]["text"])
+                        if visible:
+                            on_event("delta", {"text": visible})
                     elif block.get("type") == "tool_use":
                         blocks[index]["input_json"] = ""
             elif event_type == "content_block_delta":
@@ -602,7 +720,9 @@ def _request_anthropic_stream(
                 if delta.get("type") == "text_delta" and isinstance(delta.get("text"), str):
                     content = delta["text"]
                     block["text"] = str(block.get("text", "")) + content
-                    on_event("delta", {"text": content})
+                    visible = reply_filter.feed(content)
+                    if visible:
+                        on_event("delta", {"text": visible})
                 elif delta.get("type") == "input_json_delta" and isinstance(delta.get("partial_json"), str):
                     block["input_json"] = str(block.get("input_json", "")) + delta["partial_json"]
             elif event_type == "message_delta":
@@ -620,9 +740,12 @@ def _request_anthropic_stream(
             cancellation.detach(response)
         response.close()
 
+    tail = reply_filter.finish()
+    if tail:
+        on_event("delta", {"text": tail})
+
     normalized_content: list[dict[str, Any]] = []
     calls: list[ToolInvocation] = []
-    text_parts: list[str] = []
     for _index, block in sorted(blocks.items()):
         if block.get("type") == "tool_use":
             raw_json = str(block.pop("input_json", ""))
@@ -637,11 +760,15 @@ def _request_anthropic_stream(
             call_id = str(block.get("id") or f"toolu_{uuid.uuid4().hex}")
             block["id"] = call_id
             calls.append(ToolInvocation(call_id, str(block.get("name", "")), block["input"]))
-        elif block.get("type") == "text":
-            text_parts.append(str(block.get("text", "")))
         normalized_content.append(block)
+    normalized_content = _clean_anthropic_content(normalized_content)
+    text = "\n".join(
+        str(block.get("text", ""))
+        for block in normalized_content
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
     return ProviderTurn(
-        "\n".join(text_parts),
+        text,
         {"role": "assistant", "content": normalized_content},
         calls,
         usage,

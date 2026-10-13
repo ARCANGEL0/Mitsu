@@ -2373,6 +2373,37 @@ OptionList:focus > .option-list--option-highlighted {
     border: round $primary;
 }
 
+.system-message,
+.assistant-message {
+    width: 100%;
+    height: auto;
+    margin: 0 0 1 0;
+    padding: 0 1;
+    border: round $secondary;
+    background: $surface;
+    color: $foreground;
+}
+
+.streaming-message {
+    border: none;
+    background: $panel;
+}
+
+.user-message {
+    width: 100%;
+    height: auto;
+    margin: 0 0 1 0;
+    padding: 0 1;
+    border: round $accent;
+    background: $boost;
+    color: $foreground;
+}
+
+#file-suggestions {
+    margin-left: 0;
+    border: none;
+}
+
 #thinking-status,
 #queue-status {
     width: 100%;
