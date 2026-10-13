@@ -2926,7 +2926,10 @@ class SessionScreen(Screen):
             self.provider["reasoning_enabled"] = False
             detail = "The provider did not expose reasoning capability metadata for this model, so support is unknown and remains off."
         elif choice in {"", "status", "check"}:
-            detail = f"This model advertises {capability} support. Use /reasoning on or /reasoning low|medium|high to enable it."
+            if self.provider.get("reasoning_enabled"):
+                detail = f"Provider reasoning is on ({self.provider.get('reasoning_effort', 'medium')})."
+            else:
+                detail = "Provider reasoning is off. Use /reasoning on or /reasoning low|medium|high to enable it."
         elif choice not in {"on", "enable", "enabled", "low", "medium", "high"}:
             await self._fail("Use /reasoning, /reasoning on|off, or /reasoning low|medium|high.", "Invalid reasoning setting")
             return

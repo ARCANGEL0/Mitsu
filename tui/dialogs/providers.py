@@ -13,7 +13,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList, Static
 
 from mitsu.config import CredentialStore, PROVIDERS, PROVIDER_BY_ID
-from mitsu.providers import ProviderRequestError, list_models
+from mitsu.providers import ProviderRequestError, apply_reasoning_default, list_models
 
 
 class ProviderDialog(ModalScreen[dict | None]):
@@ -267,10 +267,16 @@ class ProviderDialog(ModalScreen[dict | None]):
     async def _save_selection(self, profile: dict, model: str) -> None:
         selected = dict(profile)
         if model != str(profile.get("model", "")):
-            selected["reasoning_enabled"] = False
+            selected["reasoning_enabled"] = None
             selected["reasoning_parameter"] = ""
             selected["reasoning_effort"] = "medium"
         selected["model"] = model
+        if not isinstance(selected.get("reasoning_enabled"), bool):
+            self.query_one("#provider-dialog-detail", Static).update("Checking model reasoning support…")
+            try:
+                await asyncio.to_thread(apply_reasoning_default, selected)
+            except ProviderRequestError:
+                pass
         try:
             self.credentials.save_profile(selected)
         except OSError as error:

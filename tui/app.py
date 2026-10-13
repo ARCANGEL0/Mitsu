@@ -10,6 +10,7 @@ from textual.widgets import Static
 
 from mitsu.pets import companion_by_id
 from mitsu.config import CredentialStore, PreferencesStore, SessionStore, THEMES
+from mitsu.providers import ProviderRequestError, apply_reasoning_default
 from mitsu.services.searxng import stop_local_searxng
 from mitsu.tui.menu import MainMenuScreen
 from mitsu.tui.onboarding import OnboardingScreen
@@ -100,6 +101,7 @@ class MitsuApp(App):
         if not profile:
             await self.open_setup()
             return
+        profile_model_matches_session = True
         if session_id:
             record = self.sessions.load_session(session_id)
             if not record or not record.get("id"):
@@ -110,15 +112,23 @@ class MitsuApp(App):
             if not selected_profile:
                 await self.open_setup()
                 return
+            stored_model = str(selected_profile.get("model", ""))
             session_model = str(record.get("model") or selected_profile.get("model"))
-            if session_model != str(selected_profile.get("model", "")):
-                selected_profile["reasoning_enabled"] = False
+            profile_model_matches_session = session_model == stored_model
+            if not profile_model_matches_session:
+                selected_profile["reasoning_enabled"] = None
                 selected_profile["reasoning_parameter"] = ""
                 selected_profile["reasoning_effort"] = "medium"
             selected_profile["model"] = session_model
         else:
             record = self.sessions.create_session(profile)
             selected_profile = profile
+        try:
+            reasoning_defaulted = await asyncio.to_thread(apply_reasoning_default, selected_profile)
+        except ProviderRequestError:
+            reasoning_defaulted = False
+        if reasoning_defaulted and profile_model_matches_session:
+            self.credentials.save_profile(selected_profile)
         companion = companion_by_id(self.preferences.load().get("companion", "mitsu"))
         theme_id = self.preferences.load().get("theme", "ember")
         screen = SessionScreen(

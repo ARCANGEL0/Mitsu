@@ -24,7 +24,7 @@ from mitsu.armory import CATEGORIES as ARMORY_CATEGORIES
 from mitsu.armory import TOOLS, TOOLS_BY_CATEGORY, TOOL_BY_ID
 from mitsu.pets import COMPANIONS, companion_by_id
 from mitsu.config import CredentialStore, PreferencesStore, PROVIDERS, PROVIDER_BY_ID, SessionStore, THEMES
-from mitsu.providers import ProviderRequestError, list_models
+from mitsu.providers import ProviderRequestError, apply_reasoning_default, list_models
 from mitsu.services.host_environment import HostEnvironment, load_host_environment
 from mitsu.services.redteam_armory import (
     ArmoryError,
@@ -1816,10 +1816,15 @@ class MainMenuScreen(Screen):
             return
         flow = self.inline_flow
         if model != str(self.pending_profile.get("model", "")):
-            self.pending_profile["reasoning_enabled"] = False
+            self.pending_profile["reasoning_enabled"] = None
             self.pending_profile["reasoning_parameter"] = ""
             self.pending_profile["reasoning_effort"] = "medium"
         self.pending_profile["model"] = model
+        if not isinstance(self.pending_profile.get("reasoning_enabled"), bool):
+            try:
+                await asyncio.to_thread(apply_reasoning_default, self.pending_profile)
+            except ProviderRequestError:
+                pass
         try:
             self.credentials.save_profile(self.pending_profile)
         except OSError as error:

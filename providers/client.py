@@ -91,8 +91,9 @@ def request_agent_turn(
             api_key,
             messages,
             tools,
-            str(profile.get("reasoning_parameter", "")) if profile.get("reasoning_enabled") else "",
+            str(profile.get("reasoning_parameter", "")),
             str(profile.get("reasoning_effort", "medium")),
+            profile.get("reasoning_enabled") is True,
             on_event,
             cancellation,
         )
@@ -109,6 +110,7 @@ def _request_openai_turn(
     tools: list[dict[str, Any]],
     reasoning_parameter: str,
     reasoning_effort: str,
+    reasoning_enabled: bool,
     on_event: StreamCallback | None = None,
     cancellation: RequestCancellation | None = None,
 ) -> ProviderTurn:
@@ -132,10 +134,17 @@ def _request_openai_turn(
         ],
         "stream": False,
     }
-    if reasoning_parameter == "reasoning_effort":
+    if reasoning_parameter == "reasoning_effort" and reasoning_enabled:
         payload["reasoning_effort"] = reasoning_effort
-    elif reasoning_parameter == "reasoning":
+    elif reasoning_parameter == "reasoning" and reasoning_enabled:
         payload["reasoning"] = {"effort": reasoning_effort}
+    elif reasoning_parameter == "nvidia_chat_template":
+        template_options = {"enable_thinking": reasoning_enabled}
+        if reasoning_enabled and tools:
+            template_options["force_nonempty_content"] = True
+        if reasoning_enabled and reasoning_effort == "medium":
+            template_options["medium_effort"] = True
+        payload["chat_template_kwargs"] = template_options
     if on_event is not None:
         streamed = _request_openai_stream(endpoint, headers, payload, on_event, cancellation)
         if streamed is not None:
@@ -647,8 +656,9 @@ def send_chat(profile: dict[str, Any], messages: list[dict[str, str]]) -> str:
             model,
             api_key,
             messages,
-            str(profile.get("reasoning_parameter", "")) if profile.get("reasoning_enabled") else "",
+            str(profile.get("reasoning_parameter", "")),
             str(profile.get("reasoning_effort", "medium")),
+            profile.get("reasoning_enabled") is True,
         )
     except ProviderRequestError as error:
         message = str(error)
@@ -818,23 +828,19 @@ def list_models(profile: dict[str, Any]) -> list[str]:
 def check_reasoning_support(profile: dict[str, Any]) -> str | None:
     protocol = str(profile.get("protocol", "openai"))
     provider_id = str(profile.get("provider_id", ""))
-    if protocol == "anthropic" or provider_id == "cloudflare":
-        return None
-    base_url = str(profile.get("base_url", "")).rstrip("/")
     model = str(profile.get("model", ""))
+    if protocol == "anthropic":
+        return None
+    if provider_id == "nvidia_nim" and "nemotron-3-ultra" in model.casefold():
+        return "nvidia_chat_template"
+    base_url = str(profile.get("base_url", "")).rstrip("/")
     api_key = str(profile.get("api_key", ""))
     if not base_url or not model:
         raise ProviderRequestError("Provider setup is incomplete. Choose a provider and model first.")
-    if protocol == "anthropic":
-        endpoint = f"{base_url}/models" if base_url.endswith("/v1") else f"{base_url}/v1/models"
-        headers = {"anthropic-version": "2023-06-01"}
-        if api_key:
-            headers["x-api-key"] = api_key
-    else:
-        endpoint = f"{base_url}/models"
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
+    endpoint = f"{base_url}/models"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     request = Request(endpoint, headers=headers, method="GET")
     try:
         with urlopen(request, timeout=15) as response:
@@ -853,6 +859,8 @@ def check_reasoning_support(profile: dict[str, Any]) -> str | None:
         raise ProviderRequestError("The provider returned invalid model metadata.") from error
     if not isinstance(decoded, dict):
         return None
+    if provider_id == "cloudflare" and isinstance(decoded.get("result"), dict):
+        decoded = decoded["result"]
     items = decoded.get("data", decoded.get("models", []))
     if not isinstance(items, list):
         return None
@@ -873,7 +881,6 @@ def check_reasoning_support(profile: dict[str, Any]) -> str | None:
             return "reasoning_effort"
         if "reasoning" in normalized:
             return "reasoning"
-        return "unsupported"
     capabilities = metadata.get("capabilities")
     if isinstance(capabilities, dict) and isinstance(capabilities.get("reasoning"), bool):
         if not capabilities["reasoning"]:
@@ -885,7 +892,26 @@ def check_reasoning_support(profile: dict[str, Any]) -> str | None:
     if metadata.get("supports_reasoning") is True:
         parameter = metadata.get("reasoning_parameter")
         return str(parameter) if parameter in {"reasoning", "reasoning_effort"} else None
+    if isinstance(parameters, list):
+        return "unsupported"
     return None
+
+
+def apply_reasoning_default(profile: dict[str, Any]) -> bool:
+    if isinstance(profile.get("reasoning_enabled"), bool):
+        return False
+    capability = check_reasoning_support(profile)
+    if capability == "unsupported":
+        profile["reasoning_enabled"] = False
+        profile["reasoning_parameter"] = ""
+        profile["reasoning_effort"] = "medium"
+        return True
+    if capability is None:
+        return False
+    profile["reasoning_enabled"] = True
+    profile["reasoning_parameter"] = capability
+    profile["reasoning_effort"] = "medium"
+    return True
 
 
 def _hide_secret(message: str, secret: str) -> str:
@@ -922,16 +948,22 @@ def _send_openai_compatible(
     messages: list[dict[str, str]],
     reasoning_parameter: str = "",
     reasoning_effort: str = "medium",
+    reasoning_enabled: bool = False,
 ) -> str:
     endpoint = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     payload = {"model": model, "messages": messages, "stream": False}
-    if reasoning_parameter == "reasoning_effort":
+    if reasoning_parameter == "reasoning_effort" and reasoning_enabled:
         payload["reasoning_effort"] = reasoning_effort
-    elif reasoning_parameter == "reasoning":
+    elif reasoning_parameter == "reasoning" and reasoning_enabled:
         payload["reasoning"] = {"effort": reasoning_effort}
+    elif reasoning_parameter == "nvidia_chat_template":
+        template_options = {"enable_thinking": reasoning_enabled}
+        if reasoning_enabled and reasoning_effort == "medium":
+            template_options["medium_effort"] = True
+        payload["chat_template_kwargs"] = template_options
     response = _request_json(endpoint, headers, payload)
     try:
         return str(response["choices"][0]["message"]["content"])
