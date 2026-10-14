@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mitsu"
-version = "1.2.0"
+version = "1.2.1"
 description = "A terminal-native coding and security companion"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -35,21 +35,22 @@ packages = [
   "mitsu.tui.widgets",
   "mitsu.workspace",
 ]
-package-dir = {
-  "mitsu" = ".",
-  "mitsu.agents" = "agents",
-  "mitsu.armory" = "armory",
-  "mitsu.config" = "config",
-  "mitsu.pets" = "pets",
-  "mitsu.providers" = "providers",
-  "mitsu.search" = "search",
-  "mitsu.services" = "services",
-  "mitsu.tools" = "tools",
-  "mitsu.tui" = "tui",
-  "mitsu.tui.dialogs" = "tui/dialogs",
-  "mitsu.tui.widgets" = "tui/widgets",
-  "mitsu.workspace" = "workspace",
-}
+
+[tool.setuptools.package-dir]
+"mitsu" = "."
+"mitsu.agents" = "agents"
+"mitsu.armory" = "armory"
+"mitsu.config" = "config"
+"mitsu.pets" = "pets"
+"mitsu.providers" = "providers"
+"mitsu.search" = "search"
+"mitsu.services" = "services"
+"mitsu.tools" = "tools"
+"mitsu.tui" = "tui"
+"mitsu.tui.dialogs" = "tui/dialogs"
+"mitsu.tui.widgets" = "tui/widgets"
+"mitsu.workspace" = "workspace"
 
 [tool.setuptools.package-data]
 mitsu = ["assets/pets/*.webp"]
+"mitsu.tui" = ["theme.tcss"]

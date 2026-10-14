@@ -6,12 +6,11 @@ import json
 import os
 import re
 import shlex
-import shutil
-import subprocess
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 import tempfile
+from typing import Any
 from urllib.parse import urlsplit
 
 from pygments.token import Token
@@ -24,8 +23,8 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Click, Key, Paste, ScreenResume, ScreenSuspend
-from textual import on
 from textual.message import Message
+from textual import on
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Input, OptionList, SelectionList, Static, TextArea
 
@@ -34,6 +33,7 @@ from mitsu.armory import CATEGORY_BY_ID, TOOLS, TOOLS_BY_CATEGORY, TOOL_BY_ID
 from mitsu.agents import history_from_legacy, run_agent_turn
 from mitsu.pets import COMPANIONS, companion_by_id
 from mitsu.config import PROVIDER_BY_ID, THEMES, CredentialStore, SessionStore
+from mitsu.search.vulnerabilities import search_vulnerabilities
 from mitsu.workspace.intel import (
     ensure_intel,
     intel_page,
@@ -102,12 +102,12 @@ LEVEL_DESCRIPTIONS = {
     5: "Mista Robot: hack the planet and make some noise—in this authorized scope. Sweep wide, chase credible paths to RCE, and keep working toward a pwned box until you stop her (｡•̀ᴗ-)✧",
 }
 
+
 class ImagePaste(Message):
     def __init__(self, data: bytes, media_type: str) -> None:
         self.data = data
         self.media_type = media_type
         super().__init__()
-
 
 
 class PromptTextArea(TextArea):
@@ -146,7 +146,7 @@ class PromptTextArea(TextArea):
         ("/scrape", "run an authorized web scrape", True),
         ("/setup", "open setup and preferences", False),
         ("/verbose", "toggle detailed output", True),
-        ("/vulnsearch", "search local exploit references", True),
+        ("/vulnsearch", "search Intel, web, Vulnx, and SearchSploit", True),
         ("/theme", "change the TUI color palette", False),
         ("/quit", "return to the command center", False),
     )
@@ -164,9 +164,9 @@ class PromptTextArea(TextArea):
         self.file_suggestions: list[Path] = []
         self.file_suggestion_index = 0
         self.file_token_range: tuple[int, int] | None = None
-        self.image_attachments: dict[str, Path] = {}
         self._workspace_files: list[Path] | None = None
-        self._last_paste: tuple[str | bytes, str, float] | None = None
+        self.image_attachments: dict[str, Path] = {}
+        self._last_paste: tuple[str | bytes, float] | None = None
 
     class Submitted(Message):
         def __init__(self, prompt: str) -> None:
@@ -272,50 +272,43 @@ class PromptTextArea(TextArea):
         if self.read_only:
             return
         event.stop()
+        event.prevent_default()
         if not event.text:
             clipboard_image = read_clipboard_image()
             if clipboard_image:
                 data, media_type = clipboard_image
-                self._paste_image(data, media_type, "event")
+                self._paste_image(data, media_type)
             return
-        self._paste_text(event.text, "event")
+        self._paste_text(event.text)
 
     def action_paste(self) -> None:
         if self.read_only:
             return
-        clipboard = self.app.clipboard
-        if not clipboard:
-            clipboard_image = read_clipboard_image()
-            if clipboard_image:
-                data, media_type = clipboard_image
-                self._paste_image(data, media_type, "action")
-            return
-        self._paste_text(clipboard, "action")
+        clipboard_image = read_clipboard_image()
+        if clipboard_image:
+            data, media_type = clipboard_image
+            self._paste_image(data, media_type)
 
-    def _paste_text(self, text: str, source: str) -> None:
+    def _paste_text(self, text: str) -> None:
         pasted = normalize_file_paste(text)
-        if not pasted or self._paste_was_repeated(pasted, source):
+        if not pasted or self._paste_was_repeated(pasted):
             return
         if result := self._replace_via_keyboard(pasted, *self.selection):
             self.move_cursor(result.end_location)
             self.focus()
 
-    def _paste_image(self, data: bytes, media_type: str, source: str) -> None:
-        if self._paste_was_repeated(data, source):
+    def _paste_image(self, data: bytes, media_type: str) -> None:
+        if self._paste_was_repeated(data):
             return
         self.screen.post_message(ImagePaste(data, media_type))
 
-    def _paste_was_repeated(self, value: str | bytes, source: str) -> bool:
+    def _paste_was_repeated(self, value: str | bytes) -> bool:
         now = time.monotonic()
         previous = self._last_paste
-        if (
-            previous is not None
-            and previous[0] == value
-            and previous[1] != source
-            and now - previous[2] < 0.3
-        ):
+        if previous is not None and previous[0] == value and now - previous[1] < 0.5:
+            self._last_paste = (value, now)
             return True
-        self._last_paste = (value, source, now)
+        self._last_paste = (value, now)
         return False
 
     def get_line(self, line_index: int) -> Text:
@@ -387,7 +380,6 @@ class PromptTextArea(TextArea):
         self.image_attachments[label] = path
         self.insert(label)
         return label
-
 
 
 class MitsuSyntaxTheme(SyntaxTheme):
@@ -587,8 +579,6 @@ class DeleteSessionDialog(ModalScreen[bool]):
         Binding("escape", "cancel", "Cancel", priority=True),
         Binding("n", "cancel", "Cancel", priority=True),
         Binding("y", "delete_session", "Delete session", priority=True),
-        Binding("left", "focus_cancel", "Focus Cancel", priority=True),
-        Binding("right", "focus_delete", "Focus Delete", priority=True),
     ]
 
     def __init__(self, in_menu: bool = False, session_title: str = "this session") -> None:
@@ -598,34 +588,23 @@ class DeleteSessionDialog(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="delete-session-dialog"):
-            yield Static("DELETE THIS SESSION?", id="delete-session-title", markup=False)
-            message = (
-                f"You suuure you want to remove “{self.session_title}”? Everything will be lost…\n"
-                "(｡•́︿•̀｡)"
-                if self.in_menu
-                else f"Are you sure you want to delete “{self.session_title}”? Everything will be lost!\n"
-                "(｡•́︿•̀｡)"
+            action = "remove" if self.in_menu else "delete"
+            yield Static(
+                f"Are you sure you want to {action} “{self.session_title}”? (｡•́︿•̀｡)",
+                id="delete-session-message",
+                markup=False,
             )
-            yield Static(message, id="delete-session-message", markup=False)
-            with Horizontal(id="delete-session-actions"):
-                yield Button("Cancel", id="delete-session-cancel", compact=True)
-                yield Button("Delete it!", variant="error", id="delete-session-confirm", compact=True)
-            yield Static("← / → choose    Enter select    Esc cancel", id="delete-session-hint", markup=False)
+            yield OptionList("Yes, delete it", "No, keep it", id="delete-session-options", compact=True)
+            yield Static("↑ / ↓ choose    Enter select    Esc cancel", id="delete-session-hint", markup=False)
 
     def on_mount(self) -> None:
-        self.query_one("#delete-session-cancel", Button).focus()
+        options = self.query_one("#delete-session-options", OptionList)
+        options.highlighted = 1
+        options.focus()
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "delete-session-cancel":
-            self.dismiss(False)
-        elif event.button.id == "delete-session-confirm":
-            self.dismiss(True)
-
-    def action_focus_cancel(self) -> None:
-        self.query_one("#delete-session-cancel", Button).focus()
-
-    def action_focus_delete(self) -> None:
-        self.query_one("#delete-session-confirm", Button).focus()
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id == "delete-session-options":
+            self.dismiss(event.option_index == 0)
 
     def action_cancel(self) -> None:
         self.dismiss(False)
@@ -894,52 +873,81 @@ class AskUserDialog(ModalScreen[str]):
 class OperatorDialog(ModalScreen[str | None]):
     BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
 
-    def __init__(
-        self,
-        question: str,
-        options: list[str],
-        mode: str = "single",
-        allow_other: bool = False,
-    ) -> None:
+    def __init__(self, dialog: dict[str, Any]) -> None:
         super().__init__()
-        self.question = question
-        self.options = options[:12]
-        self.mode = mode
-        self.allow_other = allow_other
+        self.dialog = dialog
+        self.questions = [
+            {
+                "options": [],
+                "allow_other": False,
+                "required": True,
+                "placeholder": "Type your answer…",
+                **question,
+            }
+            for question in dialog["questions"]
+        ]
 
     def compose(self) -> ComposeResult:
         with Vertical(id="operator-dialog"):
-            yield Static("MITSU ASKS", id="operator-dialog-title", markup=False)
-            yield Static(self.question, id="operator-dialog-question", markup=False)
-            if self.mode == "multiple" and self.options:
-                yield SelectionList(
-                    *((option, index) for index, option in enumerate(self.options)),
-                    id="operator-dialog-options",
-                )
-            elif self.options:
-                yield OptionList(*self.options, id="operator-dialog-options", markup=False)
-            if self.mode == "text" or self.allow_other:
-                yield Input(placeholder="Type another answer…", id="operator-dialog-input")
+            yield Static(self.dialog["title"], id="operator-dialog-title", markup=False)
+            yield Static(self.dialog["message"], id="operator-dialog-question", markup=False)
+            with VerticalScroll(id="operator-dialog-form"):
+                for index, question in enumerate(self.questions):
+                    yield Static(
+                        question["prompt"],
+                        classes="operator-dialog-field-label",
+                        markup=False,
+                    )
+                    question_type = question["type"]
+                    if question_type == "choice":
+                        yield OptionList(
+                            *question["options"],
+                            id=f"operator-options-{index}",
+                            classes="operator-dialog-options",
+                            markup=False,
+                        )
+                    elif question_type == "multi_choice":
+                        yield SelectionList(
+                            *((option, option_index) for option_index, option in enumerate(question["options"])),
+                            id=f"operator-options-{index}",
+                            classes="operator-dialog-options",
+                        )
+                    if question_type == "text" or question["allow_other"]:
+                        placeholder = question["placeholder"]
+                        if question["allow_other"] and question_type != "text":
+                            placeholder = "Something else…"
+                        yield Input(
+                            placeholder=placeholder,
+                            id=f"operator-input-{index}",
+                            classes="operator-dialog-input",
+                        )
             with Horizontal(id="operator-dialog-actions"):
-                yield Button("Next", id="operator-dialog-next", compact=True)
-                yield Button("Cancel", id="operator-dialog-cancel", compact=True)
-            hint = (
-                "↑ / ↓ move    Space select    Tab to Next    Enter continue    Esc cancel"
-                if self.mode == "multiple"
-                else "↑ / ↓ choose    Enter continue    Esc cancel"
+                yield Button(
+                    self.dialog["submit_label"],
+                    id="operator-dialog-next",
+                    compact=True,
+                )
+                yield Button(
+                    self.dialog["cancel_label"],
+                    id="operator-dialog-cancel",
+                    compact=True,
+                )
+            yield Static("", id="operator-dialog-error", markup=False)
+            yield Static(
+                "↑ / ↓ choose    Space select    Tab move    Enter continue    Esc cancel",
+                id="operator-dialog-hint",
+                markup=False,
             )
-            yield Static(hint, id="operator-dialog-hint", markup=False)
 
     def on_mount(self) -> None:
-        if self.mode == "text":
-            self.query_one("#operator-dialog-input", Input).focus()
-        elif self.options:
-            self.query_one("#operator-dialog-options").focus()
-        else:
-            self.query_one("#operator-dialog-input", Input).focus()
+        self._focus_question(0)
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        if self.mode != "multiple" and event.option_list.id == "operator-dialog-options":
+        if (
+            len(self.questions) == 1
+            and self.questions[0]["type"] == "choice"
+            and not self.questions[0]["allow_other"]
+        ):
             self._submit()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -949,28 +957,57 @@ class OperatorDialog(ModalScreen[str | None]):
             self.dismiss(None)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id == "operator-dialog-input":
+        if event.input.id.startswith("operator-input-"):
             self._submit()
 
     def on_key(self, event) -> None:
-        if self.mode == "multiple" and event.key == "enter":
+        if event.key == "enter" and isinstance(self.focused, SelectionList):
             event.stop()
             self._submit()
 
     def _submit(self) -> None:
-        typed = ""
-        if self.mode == "text" or self.allow_other:
-            typed = self.query_one("#operator-dialog-input", Input).value.strip()
-        if self.mode == "multiple":
-            selected = self.query_one("#operator-dialog-options", SelectionList).selected
-            choices = [self.options[index] for index in selected if isinstance(index, int) and 0 <= index < len(self.options)]
-        elif self.options:
-            options = self.query_one("#operator-dialog-options", OptionList)
-            highlighted = options.highlighted
-            choices = [self.options[highlighted]] if highlighted is not None and 0 <= highlighted < len(self.options) else []
+        answers: dict[str, Any] = {}
+        for index, question in enumerate(self.questions):
+            question_type = question["type"]
+            if question_type == "choice":
+                options = self.query_one(f"#operator-options-{index}", OptionList)
+                highlighted = options.highlighted
+                answer: Any = (
+                    question["options"][highlighted]
+                    if highlighted is not None and 0 <= highlighted < len(question["options"])
+                    else ""
+                )
+                if question["allow_other"]:
+                    other = self.query_one(f"#operator-input-{index}", Input).value.strip()
+                    if other:
+                        answer = other
+            elif question_type == "multi_choice":
+                options = self.query_one(f"#operator-options-{index}", SelectionList)
+                selected = options.selected
+                answer = [
+                    question["options"][choice]
+                    for choice in selected
+                    if isinstance(choice, int) and 0 <= choice < len(question["options"])
+                ]
+            else:
+                answer = self.query_one(f"#operator-input-{index}", Input).value.strip()
+
+            if question["required"] and not answer:
+                self.query_one("#operator-dialog-error", Static).update(
+                    f"Please answer: {question['prompt']}"
+                )
+                self._focus_question(index)
+                return
+            answers[question["id"]] = answer
+
+        self.dismiss(json.dumps({"answers": answers, "cancelled": False}, ensure_ascii=False))
+
+    def _focus_question(self, index: int) -> None:
+        question = self.questions[index]
+        if question["type"] == "text" or question["allow_other"]:
+            self.query_one(f"#operator-input-{index}", Input).focus()
         else:
-            choices = []
-        self.dismiss(json.dumps({"selected": choices, "text": typed}, ensure_ascii=False))
+            self.query_one(f"#operator-options-{index}").focus()
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -1015,6 +1052,35 @@ class SudoPasswordDialog(ModalScreen[str | None]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+
+class ShowCommandDialog(ModalScreen[bool]):
+    BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
+
+    def __init__(self, message: str, command: str) -> None:
+        super().__init__()
+        self.message = message
+        self.command = command
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="show-command-dialog"):
+            yield Static("QUICK HANDOFF", id="show-command-title", markup=False)
+            yield Static(self.message, id="show-command-message", markup=False)
+            yield Static(self.command, id="show-command-value", markup=False)
+            yield OptionList("Copy", "Cancel", id="show-command-options", markup=False)
+            yield Static("↑ / ↓ choose    Enter select    Esc cancel", id="show-command-hint", markup=False)
+
+    def on_mount(self) -> None:
+        options = self.query_one("#show-command-options", OptionList)
+        options.highlighted = 0
+        options.focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id == "show-command-options":
+            self.dismiss(event.option_index == 0)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
 
 
 class ToolCallCard(Static):
@@ -1355,6 +1421,8 @@ class SessionScreen(Screen):
             search_settings=self.app.credentials.search_engines,
             operator_dialog=self._operator_dialog,
             sudo_password=self._request_sudo_password,
+            show_command=self._show_command,
+            mode_dialog=self._request_mode_change,
         )
         self._tool_connection_task: asyncio.Task | None = None
         self._tool_reconnect_task: asyncio.Task | None = None
@@ -1362,11 +1430,13 @@ class SessionScreen(Screen):
         self._tool_host_shutdown = asyncio.Event()
         self._agent_running = False
         self._agent_task: asyncio.Task | None = None
-        self._queued_prompts: list[str] = []
+        self._agent_interruptible = False
+        self._pending_redirects: list[tuple[str, list[Path]]] = []
+        self._queued_prompts: list[tuple[str, list[Path]]] = []
         self._queue_drain_scheduled = False
         self._command_running = False
-        self._image_support_cache: dict[str, bool] = {}
         self._dispatching_prompt = False
+        self._image_support_cache: dict[str, bool] = {}
         self._thinking_timer = None
         self._thinking_started: float | None = None
         self._thinking_frame = 0
@@ -1446,8 +1516,8 @@ class SessionScreen(Screen):
         with Vertical(id="composer"):
             yield Static("", id="thinking-status", markup=False)
             yield Static("", id="queue-status", markup=False)
-            yield Static("", id="file-suggestions", markup=False)
             yield Static("", id="slash-suggestions", markup=False)
+            yield Static("", id="file-suggestions", markup=False)
             with Vertical(id="command-panel"):
                 yield Static("", id="command-panel-title", markup=False)
                 with VerticalScroll(id="command-panel-scroll"):
@@ -1473,9 +1543,14 @@ class SessionScreen(Screen):
     def on_mount(self) -> None:
         self._update_context()
         self._update_search_sidebar()
+        self.call_after_refresh(self._scroll_to_latest_message)
         self.call_after_refresh(self._focus_prompt)
         self.query_one(MitsuCompanion).set_state("idle")
         self._tool_connection_task = asyncio.create_task(self._connect_tool_host())
+
+    def _scroll_to_latest_message(self) -> None:
+        if self.is_mounted:
+            self.query_one("#conversation", VerticalScroll).scroll_end(animate=False)
 
     def on_click(self, _event: Click) -> None:
         self.call_after_refresh(self._focus_prompt)
@@ -1574,6 +1649,7 @@ class SessionScreen(Screen):
         self, event: PromptTextArea.SlashSuggestionsChanged
     ) -> None:
         self._render_slash_suggestions(self.query_one("#prompt-input", PromptTextArea))
+
     def on_prompt_text_area_file_suggestions_changed(
         self, event: PromptTextArea.FileSuggestionsChanged
     ) -> None:
@@ -1630,7 +1706,6 @@ class SessionScreen(Screen):
             self._image_support_cache[cache_key] = support
         return support
 
-
     def _render_slash_suggestions(self, prompt: PromptTextArea) -> None:
         panel = self.query_one("#slash-suggestions", Static)
         if not prompt.slash_suggestions:
@@ -1661,6 +1736,7 @@ class SessionScreen(Screen):
         if prompt.startswith("/") and not self._dispatching_prompt:
             await self._dispatch_prompt(prompt)
             self.call_after_refresh(self._focus_prompt)
+            return
         prompt, image_paths = prepare_image_prompt(prompt, prompt_input.image_attachments)
         if image_paths:
             try:
@@ -1698,6 +1774,9 @@ class SessionScreen(Screen):
                 self.call_after_refresh(self._focus_prompt)
                 return
             prompt_input.image_attachments.clear()
+        if self.mode == "AutoPwn" and self._agent_running:
+            await self._redirect_autopwn(prompt, image_paths)
+            self.call_after_refresh(self._focus_prompt)
             return
         if self._agent_running or self._command_running or self._dispatching_prompt or self._queued_prompts:
             self._queued_prompts.append((prompt, image_paths))
@@ -1710,7 +1789,55 @@ class SessionScreen(Screen):
         if self.app.screen is self and not self._agent_running:
             self.call_after_refresh(self._focus_prompt)
 
-    async def _dispatch_prompt(self, prompt: str, image_paths: list[Path] | None = None) -> None:
+    async def _redirect_autopwn(self, prompt: str, image_paths: list[Path]) -> None:
+        await self._append_message(prompt, "user", context_text=prompt)
+        should_interrupt = not self._pending_redirects
+        self._pending_redirects.append((prompt, image_paths))
+        self._set_activity("Following your redirect…")
+        self._set_companion("thinking", "Following your redirect")
+        task = self._agent_task
+        if should_interrupt and self._agent_interruptible and task and not task.done():
+            self._agent_interruptible = False
+            task.cancel()
+        elif not self._agent_running:
+            await self._dispatch_pending_redirects()
+
+    async def _dispatch_pending_redirects(self) -> None:
+        if not self._pending_redirects:
+            return
+        redirects = self._pending_redirects
+        self._pending_redirects = []
+        redirect_prompt = "\n\n".join(text for text, _ in redirects)
+        redirect_images = [path for _, paths in redirects for path in paths]
+        await self._dispatch_prompt(
+            redirect_prompt,
+            redirect_images,
+            preappended_user_messages=len(redirects),
+        )
+
+    def _save_pending_redirects(self) -> None:
+        if not self._pending_redirects:
+            return
+        redirects = self._pending_redirects
+        self._pending_redirects = []
+        prompt = "\n\n".join(text for text, _ in redirects)
+        paths = [path for _, image_paths in redirects for path in image_paths]
+        content: str | list[dict[str, Any]] = prompt
+        if paths:
+            content = [
+                {"type": "text", "text": prompt},
+                *({"type": "mitsu_image", "path": str(path)} for path in paths),
+            ]
+        self.agent_history.append({"role": "user", "content": content})
+        self.session["agent_history"] = redact_history(copy.deepcopy(self.agent_history))
+        self.sessions.save_session(self.session)
+
+    async def _dispatch_prompt(
+        self,
+        prompt: str,
+        image_paths: list[Path] | None = None,
+        preappended_user_messages: int = 0,
+    ) -> None:
         self._dispatching_prompt = True
         try:
             if prompt.startswith("/"):
@@ -1743,9 +1870,16 @@ class SessionScreen(Screen):
                     self._command_running = previous_command_running
                     self._active_command = previous_active_command
             else:
-                await self._append_message(prompt, "user", context_text=prompt)
+                if not preappended_user_messages:
+                    await self._append_message(prompt, "user", context_text=prompt)
                 self._agent_running = True
-                self._agent_task = asyncio.create_task(self._ask_provider(prompt, image_paths or []))
+                self._agent_task = asyncio.create_task(
+                    self._ask_provider(
+                        prompt,
+                        image_paths or [],
+                        preappended_user_messages or 1,
+                    )
+                )
                 self._agent_task.add_done_callback(self._agent_task_finished)
         finally:
             self._dispatching_prompt = False
@@ -2182,14 +2316,23 @@ class SessionScreen(Screen):
         if self.app.screen is self and not self._agent_running:
             self.call_after_refresh(self._focus_prompt)
 
-    async def _ask_provider(self, prompt: str, image_paths: list[Path] | None = None) -> None:
+    async def _ask_provider(
+        self,
+        prompt: str,
+        image_paths: list[Path] | None = None,
+        preappended_user_messages: int = 0,
+    ) -> None:
         image_paths = image_paths or []
+        preappended_user_messages += len(self._pending_redirects)
         self._agent_running = True
+        self._agent_interruptible = True
         self._agent_task = asyncio.current_task()
         history_checkpoint = copy.deepcopy(self.agent_history)
         messages = self.session.get("messages", [])
         messages_before = len(messages) if isinstance(messages, list) else 0
-        if isinstance(messages, list) and messages:
+        if preappended_user_messages:
+            messages_before = max(0, messages_before - preappended_user_messages)
+        elif isinstance(messages, list) and messages:
             last_message = messages[-1]
             if (
                 isinstance(last_message, dict)
@@ -2199,7 +2342,9 @@ class SessionScreen(Screen):
                 messages_before -= 1
         chat_history = copy.deepcopy(self.session.get("chat_history", []))
         chat_history_before = len(chat_history) if isinstance(chat_history, list) else 0
-        if isinstance(chat_history, list) and chat_history:
+        if preappended_user_messages:
+            chat_history_before = max(0, chat_history_before - preappended_user_messages)
+        elif isinstance(chat_history, list) and chat_history:
             last_chat_entry = chat_history[-1]
             if (
                 isinstance(last_chat_entry, dict)
@@ -2209,13 +2354,13 @@ class SessionScreen(Screen):
                 chat_history_before -= 1
         agent_history_before = len(history_checkpoint)
         workspace_root = Path.cwd().resolve()
+        workspace_before: dict[str, bytes] | None = None
         user_content: str | list[dict[str, Any]] = prompt
         if image_paths:
             user_content = [
                 {"type": "text", "text": prompt},
                 *({"type": "mitsu_image", "path": str(path)} for path in image_paths),
             ]
-        workspace_before: dict[str, bytes] | None = None
         prompt_input = self.query_one("#prompt-input", PromptTextArea)
         provider_spec = PROVIDER_BY_ID.get(str(self.provider.get("provider_id", "")))
         provider_name = provider_spec.name if provider_spec else "your configured provider"
@@ -2234,8 +2379,16 @@ class SessionScreen(Screen):
             self.agent_history.append({"role": "assistant", "content": note})
             save_history()
 
+        def preserve_interrupted_history() -> None:
+            if len(self.agent_history) == len(history_checkpoint):
+                self.agent_history.append({"role": "user", "content": user_content})
+            save_history()
+
         was_cancelled = False
         try:
+            if self._pending_redirects:
+                self._agent_interruptible = False
+                raise asyncio.CancelledError
             workspace_before = await asyncio.to_thread(capture_workspace, workspace_root)
             if self._tool_connection_task:
                 if self._tool_reconnect_task and not self._tool_reconnect_task.done():
@@ -2252,8 +2405,8 @@ class SessionScreen(Screen):
                 self._approve_tool,
                 save_history,
                 get_mode=lambda: self.mode,
-                image_paths=[str(path) for path in image_paths],
                 get_system_prompt=self._system_prompt,
+                image_paths=[str(path) for path in image_paths],
             ):
                 if event.kind == "assistant_turn":
                     text = str(event.data.get("text", "")).strip()
@@ -2292,6 +2445,14 @@ class SessionScreen(Screen):
                     text = str(event.data.get("text", "")).strip()
                     if text:
                         await self._append_message(text, "assistant", context_text=text)
+                elif event.kind == "completion_check":
+                    self._set_activity("Mitsu is checking whether there’s another step…")
+                    self._set_companion("thinking", "Checking the next step")
+                elif event.kind == "assistant_suppressed":
+                    await self._remove_stream_preview()
+                    self._current_request_characters = 0
+                    self._set_activity("Mitsu is preparing a quick question…")
+                    self._set_companion("thinking", "Preparing a question")
                 elif event.kind == "delta":
                     await self._show_stream_delta(str(event.data.get("text", "")))
                 elif event.kind == "usage":
@@ -2357,31 +2518,41 @@ class SessionScreen(Screen):
         except asyncio.CancelledError:
             was_cancelled = True
             await self._remove_stream_preview()
-            restore_history(
-                "This operator request was interrupted before completion. Keep it in context; resume only if the operator asks to continue."
-            )
-            self._set_activity("Stopped by operator.")
-            self._set_companion("idle", "Mitsu is Ready to Pwn!")
-            await self._append_message("Stopped the current action.", "system")
+            if self._pending_redirects:
+                preserve_interrupted_history()
+            else:
+                restore_history(
+                    "This operator request was interrupted before completion. Keep it in context; resume only if the operator asks to continue."
+                )
+                self._set_activity("Stopped by operator.")
+                self._set_companion("idle", "Mitsu is Ready to Pwn!")
+                await self._append_message("Stopped the current action.", "system")
         except ProviderRequestError as error:
             await self._remove_stream_preview()
-            restore_history(
-                "The provider failed before this request finished. Keep the request in context; resume only if the operator asks to continue."
-            )
-            self._set_activity("The provider returned an error.")
-            self._set_companion("error", "Provider error", reset_after=2.2)
-            status = self.query_one("#thinking-status", Static)
-            status.update(Text("⚠ API Error (｡•́︿•̀｡) · retries exhausted", style="bold #f07882"))
-            await self._append_message(str(error), "error")
+            if self._pending_redirects:
+                preserve_interrupted_history()
+            else:
+                restore_history(
+                    "The provider failed before this request finished. Keep the request in context; resume only if the operator asks to continue."
+                )
+                self._set_activity("The provider returned an error.")
+                self._set_companion("error", "Provider error", reset_after=2.2)
+                status = self.query_one("#thinking-status", Static)
+                status.update(Text("⚠ API Error (｡•́︿•̀｡) · retries exhausted", style="bold #f07882"))
+                await self._append_message(str(error), "error")
         except Exception as error:
             await self._remove_stream_preview()
-            restore_history(
-                "Mitsu stopped before this request finished. Keep the request in context; resume only if the operator asks to continue."
-            )
-            self._set_activity("The agent stopped after an internal error.")
-            self._set_companion("error", "Agent error", reset_after=2.2)
-            await self._append_message(f"Agent error: {type(error).__name__}: {error}", "error")
+            if self._pending_redirects:
+                preserve_interrupted_history()
+            else:
+                restore_history(
+                    "Mitsu stopped before this request finished. Keep the request in context; resume only if the operator asks to continue."
+                )
+                self._set_activity("The agent stopped after an internal error.")
+                self._set_companion("error", "Agent error", reset_after=2.2)
+                await self._append_message(f"Agent error: {type(error).__name__}: {error}", "error")
         finally:
+            self._agent_interruptible = False
             try:
                 await self._record_rewind_checkpoint(
                     prompt,
@@ -2400,10 +2571,15 @@ class SessionScreen(Screen):
             self._agent_running = False
             self._agent_task = None
             self._stop_thinking()
+            if self._pending_redirects and not (self.is_mounted and self.app.screen is self):
+                self._save_pending_redirects()
             if self.is_mounted:
                 prompt_input.focus()
                 self._update_queue_status()
-                self._schedule_next_queued_prompt()
+                if self.app.screen is self and self._pending_redirects:
+                    await self._dispatch_pending_redirects()
+                elif not self._pending_redirects:
+                    self._schedule_next_queued_prompt()
 
     async def _record_rewind_checkpoint(
         self,
@@ -2473,7 +2649,7 @@ class SessionScreen(Screen):
         status = self.query_one("#thinking-status", Static)
         status.display = True
         self._animate_thinking()
-        self._thinking_timer = self.set_interval(0.18, self._animate_thinking)
+        self._thinking_timer = self.set_interval(0.08, self._animate_thinking)
 
     def _stop_thinking(self) -> None:
         if self._thinking_timer:
@@ -2521,9 +2697,9 @@ class SessionScreen(Screen):
         self._thinking_frame += 1
         accent = THEMES.get(self.theme_id, THEMES["ember"])["accent"]
         renderable = Text()
-        icon = ("✧", "✦", "♡", "✦")[(frame // 2) % 4]
+        icon = ("✧", "✦", "♡", "✦")[(frame // 3) % 4]
         phrase = self._thinking_phrases[self._thinking_phrase_index]
-        shimmer_at = (frame // 2) % max(len(phrase), 1)
+        shimmer_at = frame % max(len(phrase), 1)
         renderable.append(f"{icon}  ", style=f"bold {accent}")
         for index, character in enumerate(phrase):
             style = f"bold {accent}"
@@ -2638,6 +2814,9 @@ class SessionScreen(Screen):
     async def _show_stream_delta(self, text: str) -> None:
         if not text:
             return
+        conversation = self.query_one("#conversation", VerticalScroll)
+        #fix scroll thing whenever mitsu is streaming
+        follow_output = conversation.max_scroll_y - conversation.scroll_y <= 1
         if self._stream_preview is None:
             self._set_thinking_task(tool_name="assistant_response")
         self._stream_text += text
@@ -2650,10 +2829,11 @@ class SessionScreen(Screen):
                 classes="assistant-message streaming-message",
                 markup=False,
             )
-            await self.query_one("#conversation", VerticalScroll).mount(self._stream_preview)
+            await conversation.mount(self._stream_preview)
         else:
             self._stream_preview.update(self._message_renderable(self._stream_text, "assistant"))
-        self.query_one("#conversation", VerticalScroll).scroll_end(animate=False)
+        if follow_output:
+            conversation.scroll_end(animate=False)
         self._animate_thinking()
 
     def _agent_task_finished(self, task: asyncio.Task) -> None:
@@ -2690,48 +2870,85 @@ class SessionScreen(Screen):
         answer = await self._await_modal(AskUserDialog(question, choices))
         return str(answer)
 
-    async def _operator_dialog(
-        self,
-        question: str,
-        options: list[str],
-        mode: str,
-        allow_other: bool,
-    ) -> str | None:
-        answer = await self._await_modal(OperatorDialog(question, options, mode, allow_other))
+    async def _operator_dialog(self, dialog: dict[str, Any]) -> str | None:
+        answer = await self._await_modal(OperatorDialog(dialog))
         return str(answer) if answer is not None else None
 
     async def _request_sudo_password(self, command: str) -> str | None:
         answer = await self._await_modal(SudoPasswordDialog(redact_command(command)))
         return str(answer) if answer is not None else None
 
+    async def _show_command(self, message: str, command: str) -> bool:
+        copied = bool(await self._await_modal(ShowCommandDialog(message, command)))
+        if copied:
+            self.app.copy_to_clipboard(command)
+            self.app.notify("Command copied to clipboard", title="Ready to paste")
+        return copied
+
+    async def _mode_switch_dialog(self, reason: str) -> str | None:
+        answer = await self._operator_dialog(
+            {
+                "title": "MITSU NEEDS A MODE CHANGE",
+                "message": reason.strip(),
+                "questions": [
+                    {
+                        "id": "mode",
+                        "prompt": "How should I continue?",
+                        "type": "choice",
+                        "options": [
+                            "Switch to Guided · review each active step",
+                            "Switch to AutoPwn · continue autonomously in scope",
+                            "No · keep it passive",
+                        ],
+                        "required": True,
+                    }
+                ],
+                "submit_label": "Continue",
+                "cancel_label": "Cancel",
+            }
+        )
+        try:
+            selection = json.loads(answer or "{}")
+        except json.JSONDecodeError:
+            selection = {}
+        answers = selection.get("answers", {}) if isinstance(selection, dict) else {}
+        choice = str(answers.get("mode", "")) if isinstance(answers, dict) else ""
+        if choice.startswith("Switch to Guided"):
+            await self._set_mode("Guided")
+            return "Guided"
+        if choice.startswith("Switch to AutoPwn"):
+            await self._set_mode("AutoPwn")
+            return "AutoPwn"
+        if choice.startswith("No"):
+            return "Recon"
+        return None
+
+    async def _request_mode_change(self, reason: str) -> str:
+        if self.mode != "Recon":
+            return json.dumps({"mode": self.mode, "changed": False})
+        selected_mode = await self._mode_switch_dialog(
+            f"We’re in Recon, so this step needs active target interaction.\n\n{reason}"
+        )
+        return json.dumps(
+            {
+                "mode": self.mode,
+                "selected": selected_mode or "cancelled",
+                "active_checks_allowed": self.mode != "Recon",
+            },
+            ensure_ascii=False,
+        )
+
     async def _approve_tool(self, name: str, arguments: dict) -> bool:
         if self.mode == "Recon":
             detail = self._format_tool_call(name, arguments)
             purpose = str(arguments.get("purpose", "")).strip()
             reason = f"\n\nWhy: {purpose}" if purpose else ""
-            answer = await self._operator_dialog(
-                f"This step goes beyond passive Recon and may actively probe the target or change local state.\n\n{detail}{reason}\n\nHow should I continue?",
-                [
-                    "Switch to Guided · review each active step",
-                    "Switch to AutoPwn · continue autonomously in scope",
-                    "No · keep it passive",
-                ],
-                "single",
-                False,
+            selected_mode = await self._mode_switch_dialog(
+                f"This step goes beyond passive Recon and may actively probe the target or change local state.\n\n{detail}{reason}"
             )
-            try:
-                selection = json.loads(answer or "{}")
-            except json.JSONDecodeError:
-                selection = {}
-            selected = selection.get("selected", []) if isinstance(selection, dict) else []
-            choice = str(selected[0]) if selected else ""
-            if choice.startswith("Switch to Guided"):
-                await self._set_mode("Guided")
+            if selected_mode == "Guided":
                 return await self._approve_tool(name, arguments)
-            if choice.startswith("Switch to AutoPwn"):
-                await self._set_mode("AutoPwn")
-                return True
-            return False
+            return selected_mode == "AutoPwn"
         if name.endswith("__bash"):
             command = str(arguments.get("command", "")).strip()
             if any(command.startswith(prefix) for prefix in self.trusted_command_prefixes):
@@ -2958,6 +3175,9 @@ class SessionScreen(Screen):
             command = redact_command(str(arguments.get("command", "")))
             purpose = redact_command(str(arguments.get("purpose", "")))
             return "Shell command\n$ " + command + (f"\n↳ {purpose}" if purpose else "")
+        if name.endswith("__show_cmd") and isinstance(arguments, dict):
+            message = redact_command(str(arguments.get("message", ""))).strip()
+            return "Command handoff\n" + message
         if name.startswith("mitsu__armory_") and isinstance(arguments, dict):
             tool_id = name.removeprefix("mitsu__armory_").replace("_", "-")
             tool = TOOL_BY_ID.get(tool_id)
@@ -2978,7 +3198,7 @@ class SessionScreen(Screen):
             if tool == "list files":
                 return f"Listing {arguments.get('path', '.')}"
             if tool == "web search":
-                return f"Searching the web · {arguments.get('query', '')}"
+                return f"WebSearch\n{arguments.get('query', '')}"
             if tool == "system info":
                 return "Checking system information"
         try:
@@ -3087,7 +3307,7 @@ class SessionScreen(Screen):
             await self._append_message(
                 "Commands: /connect, /model, /config, /theme, /mcp, /new, /rename [name], "
                 "/level, /pet, /export, /rewind, /reasoning [on|off|low|medium|high], /verbose, /permissions [clear], /search <text>, /report, /map, "
-                "/vulnsearch <criteria>, /mode [recon|guided|autopwn], /delete-session, /clear, /menu. "
+                "/vulnsearch [criteria], /mode [recon|guided|autopwn], /delete-session, /clear, /menu. "
                 "Shift+Tab cycles modes. Ask naturally to inspect files, search the web, or run a shell command. "
                 "Ctrl+F opens transcript search; press it again for the next match. Esc exits search mode. "
                 "Recon favors passive and low-impact checks; Guided reviews shell and external MCP tools; AutoPwn runs autonomously within scope."
@@ -3446,54 +3666,24 @@ class SessionScreen(Screen):
         await self._append_message("\n".join(lines))
 
     async def _vulnsearch_command(self, query: str) -> None:
-        if not query:
-            await self._fail("Use /vulnsearch <product, version, or vulnerability criteria>.", "Search criteria required")
-            return
-        self._set_activity(f"Searching local exploit references for {query}…")
-        result = await asyncio.to_thread(self._searchsploit, query)
+        label = query or "saved Intel"
+        self._set_activity(f"Searching Intel, Vulnx, web, and Exploit-DB for {label}…")
+        intel = copy.deepcopy(self.intel)
+        local_searcher, local_status, vulnx_searcher, vulnx_status = (
+            await self._tool_host._prepare_vulnsearch_backends(query, intel)
+        )
+        result = await asyncio.to_thread(
+            search_vulnerabilities,
+            query,
+            intel,
+            self.app.credentials.search_engines(),
+            local_searcher=local_searcher,
+            vulnx_searcher=vulnx_searcher,
+            local_status=local_status,
+            vulnx_status=vulnx_status,
+        )
         await self._append_message(result)
-        self._set_activity("Exploit references searched; results were not added to target Intel.")
-
-    @staticmethod
-    def _searchsploit(query: str) -> str:
-        if len(query) > 200 or any(token.startswith("-") for token in query.split()):
-            return "Use search terms up to 200 characters; command-line options are not accepted."
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._:/+-]*", query):
-            return "Use plain product, version, CVE, or vulnerability terms for this local lookup."
-        executable = shutil.which("searchsploit")
-        if not executable:
-            return "searchsploit is not installed, so local exploit references could not be searched. No network lookup or exploit execution was attempted."
-        try:
-            completed = subprocess.run(
-                [executable, "--json", query],
-                capture_output=True,
-                text=True,
-                timeout=20,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            return f"Could not search the local exploit database: {error}"
-        try:
-            payload = json.loads(completed.stdout)
-        except json.JSONDecodeError:
-            detail = completed.stderr.strip() or completed.stdout.strip() or "No results returned."
-            return f"searchsploit returned an unreadable result: {detail[:800]}"
-        results = payload.get("RESULTS_EXPLOIT", []) if isinstance(payload, dict) else []
-        if not isinstance(results, list) or not results:
-            return f"No local exploit references matched “{query}”. No exploit was run."
-        lines = [f"LOCAL EXPLOIT REFERENCES · {query}"]
-        for item in results[:10]:
-            if not isinstance(item, dict):
-                continue
-            title = str(item.get("Title", "Untitled reference"))
-            exploit_id = str(item.get("EDB-ID", ""))
-            path = str(item.get("Path", ""))
-            suffix = f" [EDB-{exploit_id}]" if exploit_id else ""
-            if path:
-                suffix += f" · {path}"
-            lines.append(f"• {title}{suffix}")
-        lines.append("\nThese are unverified references from the local database. No exploit was opened or executed.")
-        return "\n".join(lines)
+        self._set_activity("Vulnerability leads ready; checking applicability still comes next.")
 
     async def _tool_command(self, tool: str, target: str) -> None:
         if target and target not in self.targets:
@@ -3597,6 +3787,8 @@ class SessionScreen(Screen):
             search_settings=self.app.credentials.search_engines,
             operator_dialog=self._operator_dialog,
             sudo_password=self._request_sudo_password,
+            show_command=self._show_command,
+            mode_dialog=self._request_mode_change,
         )
         self._tool_host_ready = asyncio.Event()
         self._tool_host_shutdown = asyncio.Event()
@@ -3772,13 +3964,18 @@ AUTHORIZATION AND SCOPE
 
 SESSION INTEL
 - This session has a local, persistent Intel record ({intel_counts}). Use `mitsu__intel_get_map` to retrieve its summary or paginated asset, observation, finding, and exploit records when needed. `record_exploit` and `remove_exploit` update this same record.
+- Treat Intel as the investigation's working map, not optional note-taking. At the start of every target assessment, fetch its summary, then read the target-relevant asset, observation, finding, and exploit pages; follow `next_offset` until those records are covered before relying on earlier work. Before finishing, fetch the summary again and make sure every material fact from this run has been saved.
+- Once Intel contains a product, version, or CVE, use `mitsu__vulnsearch` to check Vulnx, configured web engines, and local SearchSploit against those clues. It can also search saved Intel with no criteria; inspect the references and affected-version details before treating a lead as applicable.
 - At the start of an assessment, save the operator's explicitly requested primary target with `mitsu__intel_upsert_asset`, using source `operator request`, scope `in_scope`, verification `discovered`, and `primary=true`. Authorization does not by itself validate that the host is reachable.
 - Use `mitsu__intel_upsert_asset` to record evidence-backed targets, domains, hostnames, IPs, URLs, services, endpoints, technologies, and relationships. Include the source and the exact observation; use attributes for details such as ports, protocols, banners, and versions. Repeated observations update the same asset and retain their provenance.
+- Map every distinct target-side IP found in operator input, DNS, host discovery, or service results as its own IP asset. Link it to the evidenced hostname/domain with `parent`; record source, verification, confidence, and relevant DNS/service details. Keep scope unknown unless the operator authorized that asset. Do not mistake the operator's VPN/callback/local IP for a target IP; if it matters, label its role in attributes.
+- Build useful graph relationships as evidence arrives: domain to hostname, hostname to IP, IP to service, and service to endpoint or technology. Use the `parent` field only when the output supports that relationship. Keep separate assets for different hosts, ports, and services instead of burying the whole map in one note.
 - Use `mitsu__intel_upsert_observation` for sourced technical facts and leads that do not fit an asset attribute or finding. Keep the observation tied to an asset when possible, and distinguish unverified leads from validated observations.
 - Keep the Intel sidebar current during the work, not just in the final summary. Save each material service, version, hostname, endpoint, authentication behavior, and useful lead as soon as evidence supports it. Make each observation self-contained with the affected asset, exact evidence, source, status, and confidence.
 - Mark an asset `in_scope` only when the operator's request explicitly authorizes it. Keep discovered related assets at `unknown` scope until the request covers them. Set `primary` only for the operator's explicitly requested main target.
 - Use `mitsu__intel_upsert_finding` to save material security findings with their affected asset, severity, status, source, and evidence. Keep unverified ideas as `lead`; use `confirmed` only when the collected evidence supports the finding. Update a finding as new evidence changes its status.
-- When a vulnerability is only a version-based possibility, record it as a lead or candidate. Add a confirmed finding or confirmed exploit only after evidence demonstrates applicability or a scoped validation succeeds; include the CVE, affected service, proof, and source.
+- Save each material CVE or vulnerability lead as an observation and a `lead` finding as soon as it is relevant to observed target evidence. Keep search-only references clearly unverified. Record an exploit as `candidate` only when the target's observed product/version and prerequisites match; update the same records when validation adds evidence.
+- For an RCE attempt, save the affected service, exploit/CVE, source, and what the tool actually demonstrated. Keep delivery or HTTP 200 as a lead; only after a harmless command proof or verified callback, update the observation/finding and exploit to validated/confirmed. Never copy flags, credentials, or unrelated sensitive files into Intel.
 - Record useful results as the investigation progresses instead of relying on transcript history alone. Do not store passwords, API tokens, or other secrets in Intel.
 
 INVESTIGATION INTENSITY
@@ -3788,16 +3985,16 @@ INVESTIGATION INTENSITY
 ASSESSMENT WORKFLOW
 1. Understand the requested outcome, target, constraints, and evidence already available. If the request is clear, begin; don’t replace action with a generic authorization lecture.
 2. Use native tools to investigate. For a subdomain-enumeration request, start with proportionate passive sources and DNS checks, record the source for each result, and distinguish discovered names from verified live hosts. Don’t claim a scan ran unless a tool result confirms it.
-3. Follow evidence with focused checks. Prefer a narrow check that answers the next question over broad scanning. Keep request rates reasonable, especially on production systems.
+3. Follow evidence with focused checks. Prefer a narrow check that answers the next question over broad scanning. When a product, version, or CVE appears, search it with `mitsu__vulnsearch`; compare the affected version and prerequisites with observed Intel before choosing a validation. Keep request rates reasonable, especially on production systems.
 4. For an explicitly authorized CTF or training lab, use a practical evidence-led sequence: confirm reachability, enumerate TCP services, identify versions, then choose protocol-specific checks from the observed services. Treat credentials supplied by the operator as useful lab credentials and test them against relevant exposed services once; record which service accepted or rejected them without saving the secret. Don’t keep guessing tools, flags, usernames, or passwords after an observed failure.
 5. Match each check to a confirmed open service. For example, only try SSH credentials when SSH is exposed, and use an RDP client only for an exposed RDP service. A reachable host alone does not justify trying unrelated protocols. Use the exact installed client reported by `mitsu__armory_tool_catalog` or the host’s command lookup; don’t cycle guessed executable aliases. If an Armory tool is missing, `mitsu__armory_run` asks before installing it and runs it after successful installation. Keep arguments scoped to the authorized host, and don’t put passwords in command-line arguments or transcript text.
-6. Before installing any package, dependency, CLI, or script-based tool through shell, call `mitsu__user_dialog` with `mode="yes_no"`, clear Yes/No choices, and `install_target` set to the exact package or tool names. Explain why each item is needed. Run the install only after Yes; the command runner also blocks unapproved installs. Armory installs have their own confirmation dialog. Never install merely because AutoPwn is selected. Never request sudo passwords through the general dialog; the command runner presents a masked password prompt only after installation or another sudo action is approved.
-7. Use `mitsu__user_dialog` for other decisions that genuinely need the operator: `single` for one choice, `multiple` for checkboxes, or `text` for a short answer. Ask one focused question and offer concrete choices.
+6. Before installing any package, dependency, CLI, or script-based tool through shell, call `mitsu__user_dialog` to design a compact dialog with a title, a clear reason, and one required choice question containing explicit Yes and No options. Set `install_target` to the exact package or tool names. If its result includes `install_approved`, that approval is registered for those exact packages; run the install without asking again. The shell runner holds that approval through retries and clears it after a successful install, so don’t open another dialog for the same attempt. Run the install only after Yes; the command runner also blocks unapproved installs. Armory installs have their own confirmation dialog. Never install merely because AutoPwn is selected. If an authorized command needs sudo, don’t avoid the step or ask for the password in chat: run the command through the shell tool with sudo and let its masked TUI prompt ask the operator for the password. Never put a sudo password in a general dialog, command argument, or transcript. If sudo is unavailable or the operator cancels, report that and choose a useful alternative.
+7. Design dialogs around what you need from the operator instead of asking choices in plain chat. Call `mitsu__user_dialog` with your own concise title and message, then build one or more question objects: use `choice` for a decision, `multi_choice` for a questionnaire, or `text` for a value or explanation. Give every question a useful id and prompt, concrete options where needed, and a clear submit label. Add an “Other” input when it helps. Don’t repeat answers or interrupt for choices that do not affect the work. Whenever the operator needs to run a command in their own terminal or environment, call `mitsu__show_cmd` with a short explanation and the exact command; let its Copy/Cancel dialog handle the handoff instead of asking them to copy it from chat text. Keep the command out of your reply text. If they cancel, adapt without running it on their behalf.
 8. For current-news questions, use one precise web search with the requested place/topic and the current date. The search tool queries every configured engine concurrently and merges duplicate links. If some engines fail, report which ones returned results and which were unavailable; if none return recognizable links, explain that the provider/parser failed and never claim the topic has no results. If no engines are configured, tell the operator to configure them with /config. Only make one focused alternate query when it is likely to improve coverage.
-9. Explain observed facts, hypotheses, and confidence separately. Never invent hosts, scan results, findings, credentials, or tool output. A failed or missing tool is a recoverable result: inspect its output and status, then continue with the most useful next check. Retry a call whenever it can advance or validate the investigation; there is no duplicate-call or retry-count limit. Do not stop just because a command failed. A zero exit status only proves the local process completed; HTTP 200 or payload delivery alone does not prove target-side code execution. For exploit attempts, require an observable harmless proof or a verified callback before calling RCE confirmed. If operator input is genuinely needed, ask one concrete question.
+9. Explain observed facts, hypotheses, and confidence separately. Never invent hosts, scan results, findings, credentials, or tool output. When a check fails, say what that result rules out, then pick a different evidence-led check; distinguish a local tool/dependency error from a target response. Retry when it can validate a specific hypothesis, and put that reason in the tool purpose. If a relevant local command fails only because it lacks permission, retry through the shell tool with sudo and let the masked password prompt handle it instead of abandoning the check. Do not stop just because a command failed or repeat near-identical payloads without learning anything. A zero exit status only proves the local process completed; HTTP 200 or payload delivery alone does not prove target-side code execution. For exploit attempts, require an observable harmless proof or a verified callback before calling RCE confirmed. If operator input is genuinely needed, ask one concrete question.
 10. Stop before destructive changes, denial of service, persistence, or accessing unrelated users’ data. Don’t expand the authorized target based on a redirect, DNS record, certificate, or page link alone.
 11. Summarize what ran, what it found, any limits, and the next useful step. If a requested action is unavailable in the current mode or tool set, say exactly which capability is missing and offer the smallest useful alternative; don’t misstate that the target is forbidden because it is production.
-- `/vulnsearch` and searchsploit output are unverified references, never target findings. Do not add those results to the Exploits sidebar. Use the session `record_exploit` tool only when observed product/version evidence supports applicability or a scoped validation succeeds; mark `confirmed` only after success, otherwise `candidate`. If later evidence disproves an entry, remove it with `remove_exploit` and state the reason.
+- `/vulnsearch` and `mitsu__vulnsearch` combine saved product/version clues with Vulnx, configured web search, and local SearchSploit. They ask before installing either missing local search tool. Their results are unverified references, never target findings. Do not add those results to the Exploits sidebar. Use the session `record_exploit` tool only when observed product/version evidence supports applicability or a scoped validation succeeds; mark `confirmed` only after success, otherwise `candidate`. If later evidence disproves an entry, remove it with `remove_exploit` and state the reason.
 
 ARMORY MCP TOOLS
 - Each `mitsu__armory_*` tool runs one installed RedTeam Armory executable and has its own documentation and argument field. The field is named `<tool_id>_argv` (for example `nmap_argv`); pass a list with one string per CLI argument, without the executable or shell syntax. `purpose` can briefly state the check, and `timeout_seconds` can extend the default when needed.
@@ -3810,6 +4007,8 @@ CUSTOM CLI MCP TOOLS
 
 LIVE PROGRESS
 - Before a meaningful batch of tool calls, write one or two user-visible sentences about the clue, why the next check fits, and what it can confirm. After a significant result, explain what changed and update Intel before moving on; do not let the conversation become only command cards and exit statuses.
+- Do not announce a future check and end the turn without calling the tool. Make the call in the same response; if a missing detail, approval, or safety boundary blocks it, state that clearly and ask the operator what is needed.
+- Use `mitsu__web_search` for public web research. When the operator supplies a URL and asks Mitsu to inspect or research it, pass that URL to `mitsu__web_search` to read the page; do not use shell `curl` or `wget` for ordinary browsing. Use shell networking only when the requested check specifically needs command-line behavior, headers, or protocol-level details.
 - Keep the tone lively when evidence warrants it, but separate a promising lead from a confirmed result. When evidence confirms a vulnerability, state the proof plainly and save it to Findings and Exploits with its source.
 - These are concise status updates, not private chain-of-thought. Never reveal hidden internal reasoning or dress an unverified guess up as a discovery. Avoid narrating every command when the tool cards already show it.
 
@@ -3835,9 +4034,9 @@ CURRENT MODE: {self.mode}
 
     def _mode_prompt_instruction(self) -> str:
         mode_instructions = {
-            "Recon": "Work in passive, operator-led mode. Use public sources, DNS, and local read-only inspection only; do not send requests or probes to the target. If a direct target interaction would answer the next question, pause and offer the operator a switch to Guided, a switch to AutoPwn, or staying in Recon.",
-            "Guided": "Work interactively. Before each shell command, RedTeam Armory tool, and external MCP tool, pause for the TUI approval choice. The operator can approve once, trust the shown command prefix/tool for this session, or deny. Never continue a denied action by changing its wording.",
-            "AutoPwn": "Work autonomously within the explicitly authorized scope and keep investigating after recoverable errors. Installation and sudo prompts still need operator approval. Keep the operator informed through concise progress updates; use active tools when evidence supports them, and never perform destructive, disruptive, persistent, or unrelated actions.",
+            "Recon": "Work in passive, operator-led mode. Use public sources, DNS, and local read-only inspection only; do not send requests or probes to the target. When the requested next step needs target interaction, call `mitsu__request_mode` to open the mode-choice dialog and wait for the selection. Never ask the operator to choose a mode in plain chat. The dialog applies Guided or AutoPwn immediately; if they keep Recon or cancel, continue with passive work or explain the limit.",
+            "Guided": "Work interactively. Before each shell command, RedTeam Armory tool, and external MCP tool, pause for the TUI approval choice. The operator can approve once, trust the shown command prefix/tool for this session, or deny. Never continue a denied action by changing its wording. For an approved action that needs sudo, run it and let the masked TUI password prompt handle the credential; don’t avoid the step just because it needs sudo.",
+            "AutoPwn": "Work autonomously within the explicitly authorized scope and keep investigating after recoverable errors. Installation and sudo prompts still need operator approval. When a useful authorized command needs sudo, run it through the shell tool and let the masked TUI password prompt handle the credential; don’t silently skip the step. Keep the operator informed through concise progress updates; use active tools when evidence supports them, and never perform destructive, disruptive, persistent, or unrelated actions.",
         }
         return mode_instructions[self.mode]
 
@@ -3862,6 +4061,7 @@ CURRENT MODE: {self.mode}
             self._show_command_panel(title, message)
             return
         conversation = self.query_one("#conversation", VerticalScroll)
+        follow_output = role == "user" or conversation.max_scroll_y - conversation.scroll_y <= 1
         if role == "tool":
             message_widget = ToolCallCard(message, running=True, theme_id=self.theme_id)
         elif role == "tool-result":
@@ -3871,7 +4071,8 @@ CURRENT MODE: {self.mode}
                 self._message_renderable(message, role), classes=self._message_class(role), markup=False
             )
         await conversation.mount(message_widget)
-        conversation.scroll_end(animate=False)
+        if follow_output:
+            conversation.scroll_end(animate=False)
         if role != "system":
             self._message_widgets.append(message_widget)
             entry = {"role": role, "text": message}

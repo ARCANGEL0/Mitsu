@@ -48,8 +48,10 @@ from mitsu.tools.custom_mcp import CustomMCPAdapter
 
 MAX_TOOL_RESULT = 40_000
 IntelUpdateHandler = Callable[[str, dict[str, Any]], Awaitable[str]]
-OperatorDialogHandler = Callable[[str, list[str], str, bool], Awaitable[str | None]]
+OperatorDialogHandler = Callable[[dict[str, Any]], Awaitable[str | None]]
 SudoPasswordHandler = Callable[[str], Awaitable[str | None]]
+ShowCommandHandler = Callable[[str, str], Awaitable[bool]]
+ModeDialogHandler = Callable[[str], Awaitable[str]]
 
 
 def _is_low_impact_recon_command(command: str) -> bool:
@@ -171,6 +173,34 @@ def _installation_request(command: str) -> tuple[str, str] | None:
     return manager_summary, package_summary
 
 
+def _dialog_install_targets(dialog: dict[str, Any], install_target: str) -> set[str]:
+    targets = AgentToolHost._normalize_install_targets(install_target)
+    if targets:
+        return targets
+
+    parts = [str(dialog.get("title", "")), str(dialog.get("message", ""))]
+    for question in dialog.get("questions", []):
+        if not isinstance(question, dict):
+            continue
+        parts.append(str(question.get("prompt", "")))
+        parts.extend(str(option) for option in question.get("options", []))
+    text = " ".join(parts)
+    if not re.search(r"\binstall(?:ing|ation)?\b", text, re.IGNORECASE):
+        return set()
+
+    ignored = {
+        "it", "this", "that", "something", "package", "tool", "dependency",
+        "the", "a", "an", "to", "using", "via", "request",
+    }
+    found = re.findall(
+        r"\binstall(?:ing)?\s+([A-Za-z0-9][A-Za-z0-9_.+:-]{0,119})",
+        text,
+        re.IGNORECASE,
+    )
+    names = [name for name in found if name.casefold() not in ignored]
+    return AgentToolHost._normalize_install_targets(",".join(names))
+
+
 class ToolHostError(Exception):
     pass
 
@@ -184,6 +214,8 @@ class AgentToolHost:
         search_settings: Callable[[], dict[str, dict[str, Any]]] | None = None,
         operator_dialog: OperatorDialogHandler | None = None,
         sudo_password: SudoPasswordHandler | None = None,
+        show_command: ShowCommandHandler | None = None,
+        mode_dialog: ModeDialogHandler | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self.ask_user = ask_user
@@ -191,6 +223,8 @@ class AgentToolHost:
         self.search_settings = search_settings or (lambda: {})
         self.operator_dialog = operator_dialog or self._default_operator_dialog
         self.sudo_password = sudo_password
+        self.show_command = show_command
+        self.mode_dialog = mode_dialog
         self.install_approvals: dict[str, float] = {}
         self.server = MCPServer("Mitsu built-in tools")
         self._stack = AsyncExitStack()
@@ -289,36 +323,119 @@ class AgentToolHost:
 
         @self.server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
         async def user_dialog(
-            question: str,
-            options: list[str] | None = None,
-            mode: Literal["single", "multiple", "yes_no", "text"] = "single",
-            allow_other: bool = False,
+            title: str,
+            message: str,
+            questions: list[dict[str, Any]],
+            submit_label: str = "Continue",
+            cancel_label: str = "Cancel",
             install_target: str = "",
         ) -> str:
-            """Ask the operator in an interactive dialog. Set install_target to the exact package or tool name for one-time install consent."""
-            choices = [str(option).strip()[:240] for option in (options or []) if str(option).strip()][:12]
-            if mode == "yes_no" and not choices:
-                choices = ["Yes", "Yes, but…", "No"]
-            if mode in {"single", "multiple", "yes_no"} and not choices:
-                raise ToolHostError("Provide at least one option for this dialog.")
-            if not question.strip():
-                raise ToolHostError("The dialog question cannot be empty.")
-            install_names = self._normalize_install_targets(install_target)
+            """Design and open an operator dialog. Provide a title, message, and one or more question objects with an id, prompt, and type ('choice', 'multi_choice', or 'text'). Choice questions also need options; optional fields are allow_other, required, and placeholder. Use several questions for a short questionnaire, and choose clear submit/cancel labels. For install consent, set install_target and make the first required choice question offer explicit Yes and No options."""
+            if not title.strip() or not message.strip():
+                raise ToolHostError("Provide a title and message for the dialog.")
+            if not isinstance(questions, list) or not questions or len(questions) > 6:
+                raise ToolHostError("Provide between one and six dialog questions.")
+
+            clean_questions: list[dict[str, Any]] = []
+            seen_ids: set[str] = set()
+            for index, raw_question in enumerate(questions, start=1):
+                if not isinstance(raw_question, dict):
+                    raise ToolHostError("Each dialog question must be an object.")
+                question_id = str(raw_question.get("id", f"question_{index}")).strip()
+                if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", question_id) or question_id in seen_ids:
+                    raise ToolHostError("Dialog question IDs must be unique and use letters, numbers, '_' or '-'.")
+                prompt = str(raw_question.get("prompt", "")).strip()
+                question_type = str(raw_question.get("type", "")).strip().casefold()
+                if not prompt:
+                    raise ToolHostError(f"Dialog question {question_id} needs a prompt.")
+                if question_type not in {"choice", "multi_choice", "text"}:
+                    raise ToolHostError(f"Dialog question {question_id} needs type choice, multi_choice, or text.")
+                raw_options = raw_question.get("options", [])
+                if not isinstance(raw_options, list):
+                    raise ToolHostError(f"Options for {question_id} must be a list of strings.")
+                options = [str(option).strip()[:160] for option in raw_options if str(option).strip()][:10]
+                if question_type in {"choice", "multi_choice"} and not options:
+                    raise ToolHostError(f"Dialog question {question_id} needs at least one option.")
+                if question_type == "text" and options:
+                    raise ToolHostError(f"Text question {question_id} cannot include choices.")
+                seen_ids.add(question_id)
+                clean_questions.append(
+                    {
+                        "id": question_id,
+                        "prompt": prompt[:240],
+                        "type": question_type,
+                        "options": options,
+                        "allow_other": bool(raw_question.get("allow_other", False)),
+                        "required": bool(raw_question.get("required", True)),
+                        "placeholder": str(raw_question.get("placeholder", "Type your answer…"))[:120],
+                    }
+                )
+
+            install_names = _dialog_install_targets(
+                {"title": title, "message": message, "questions": clean_questions},
+                install_target,
+            )
             if install_names:
-                if mode != "yes_no" or not any(option.casefold().startswith("yes") for option in choices):
-                    raise ToolHostError("Install consent requires a yes/no dialog with an explicit Yes option.")
-                question = f"{question.strip()}\n\nInstall requested: {', '.join(install_names)}"
-            answer = await self.operator_dialog(question.strip()[:1200], choices, mode, allow_other)
+                first_question = clean_questions[0]
+                first_options = first_question["options"]
+                if (
+                    first_question["type"] != "choice"
+                    or not first_question["required"]
+                    or not any(option.casefold().startswith("yes") for option in first_options)
+                    or not any(option.casefold().startswith("no") for option in first_options)
+                ):
+                    raise ToolHostError("Install consent needs a required first choice with explicit Yes and No options.")
+
+            dialog = {
+                "title": title.strip()[:80],
+                "message": message.strip()[:1200],
+                "questions": clean_questions,
+                "submit_label": submit_label.strip()[:24] or "Continue",
+                "cancel_label": cancel_label.strip()[:24] or "Cancel",
+            }
+            answer = await self.operator_dialog(dialog)
             try:
                 response = json.loads(answer or "{}")
             except json.JSONDecodeError:
-                response = {"selected": [answer]}
-            selected = response.get("selected", []) if isinstance(response, dict) else []
-            if install_names and selected and str(selected[0]).casefold().startswith("yes"):
+                response = {}
+            answers = response.get("answers", {}) if isinstance(response, dict) else {}
+            decision = answers.get(clean_questions[0]["id"]) if isinstance(answers, dict) else None
+            if install_names and isinstance(decision, str) and decision.casefold().startswith("yes"):
                 self.install_approvals.update(
-                    {name: time.monotonic() + 120 for name in install_names}
+                    {name: time.monotonic() + 1800 for name in install_names}
                 )
-            return answer or json.dumps({"selected": [], "text": "", "cancelled": True})
+                response["install_approved"] = sorted(install_names)
+                return json.dumps(response, ensure_ascii=False)
+            if isinstance(response, dict) and install_target:
+                response["install_approved"] = []
+                response["install_approval_note"] = (
+                    "The dialog did not approve installation; ask before running an install command."
+                )
+                return json.dumps(response, ensure_ascii=False)
+            return answer or json.dumps({"answers": {}, "cancelled": True})
+
+        @self.server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
+        async def request_mode(reason: str) -> str:
+            """Open the mode-switch dialog when a requested step needs active target interaction from Recon. The selection changes the active session mode."""
+            if not reason.strip():
+                raise ToolHostError("Explain why an active mode is needed.")
+            if self.mode_dialog is None:
+                raise ToolHostError("The mode-switch dialog is unavailable.")
+            return await self.mode_dialog(reason.strip()[:1200])
+
+        @self.server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
+        async def show_cmd(message: str, command: str) -> str:
+            """Show the operator a short explanation and command with Copy and Cancel choices. Use when the operator needs to run a command themselves."""
+            if not message.strip() or not command.strip():
+                raise ToolHostError("Provide an explanation and the command to show.")
+            if self.show_command is None:
+                raise ToolHostError("The command handoff dialog is unavailable.")
+            copied = await self.show_command(message.strip()[:1200], command.strip())
+            return (
+                "The operator copied the command."
+                if copied
+                else "The operator cancelled the command handoff."
+            )
 
         @self.server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
         async def armory_tool_catalog(category: str = "") -> str:
@@ -361,7 +478,7 @@ class AgentToolHost:
             offset: int = 0,
             limit: int = 8,
         ) -> str:
-            """Read this session's Intel summary or a page of assets, observations, findings, and evidence."""
+            """Read the session Intel summary or a page of assets, observations, findings, and exploits. Pages contain at most eight records; follow next_offset until the relevant section is complete. Read the sections for a full target map before relying on saved context."""
             return await self._update_session_intel(
                 "get_map", {"section": section, "offset": offset, "limit": limit}
             )
@@ -729,25 +846,57 @@ class AgentToolHost:
 
     async def _default_operator_dialog(
         self,
-        question: str,
-        options: list[str],
-        mode: str,
-        allow_other: bool,
+        dialog: dict[str, Any],
     ) -> str | None:
+        questions = dialog.get("questions", [])
+        if not questions:
+            return None
+        first = questions[0]
+        options = first.get("options", [])
+        question = f"{dialog.get('message', '')}\n\n{first.get('prompt', '')}".strip()
         answer = await self.ask_user(question, options)
-        selected = [answer] if answer in options else []
-        text = answer if mode == "text" or allow_other or not options else ""
-        return json.dumps({"selected": selected, "text": text}, ensure_ascii=False)
+        value: Any = answer if first.get("type") == "text" or answer not in options else answer
+        return json.dumps(
+            {"answers": {first.get("id", "question_1"): value}, "cancelled": False},
+            ensure_ascii=False,
+        )
+
+    async def _confirm_install(self, message: str, yes_label: str, no_label: str) -> bool:
+        answer = await self.operator_dialog(
+            {
+                "title": "MITSU ASKS",
+                "message": message,
+                "questions": [
+                    {
+                        "id": "install",
+                        "prompt": "May I go ahead?",
+                        "type": "choice",
+                        "options": [yes_label, no_label],
+                        "required": True,
+                    }
+                ],
+                "submit_label": "Continue",
+                "cancel_label": "Cancel",
+            }
+        )
+        try:
+            response = json.loads(answer or "{}")
+        except json.JSONDecodeError:
+            return False
+        answers = response.get("answers", {}) if isinstance(response, dict) else {}
+        choice = answers.get("install", "") if isinstance(answers, dict) else ""
+        return isinstance(choice, str) and choice.casefold().startswith("yes")
 
     @staticmethod
     def _normalize_install_targets(value: str) -> set[str]:
         if not isinstance(value, str):
             return set()
-        return {
-            item.strip().casefold()
-            for item in value.split(",")
-            if item.strip()
-        }
+        targets = set()
+        for item in value.split(","):
+            name = re.sub(r"\s*\([^)]*\)", "", item).split()
+            if name:
+                targets.add(re.sub(r"[-_.]+", "-", name[0].strip().casefold()))
+        return targets
 
     def _armory_tool_selected(self, tool_id: str) -> bool:
         tool = TOOL_BY_ID[tool_id]
@@ -790,21 +939,13 @@ class AgentToolHost:
         if status.installed:
             return True, f"{tool.name} is already installed."
 
-        answer = await self.operator_dialog(
-            f"Hey operator, {tool.name} is missing. I need it to {purpose.strip() or 'continue the requested investigation'}. May I install it and then run it?",
-            [f"Yes · install {tool.name}", "No · skip this tool"],
-            "yes_no",
-            False,
+        approved = await self._confirm_install(
+            f"Hey operator, {tool.name} is missing. I need it to {purpose.strip() or 'continue the requested investigation'}.",
+            f"Yes · install {tool.name}",
+            "No · skip this tool",
         )
-        if not answer:
+        if not approved:
             return False, f"Installation of {tool.name} was cancelled by the operator."
-        try:
-            selection = json.loads(answer)
-        except json.JSONDecodeError:
-            selection = {"selected": [answer]}
-        selected = selection.get("selected", []) if isinstance(selection, dict) else []
-        if not selected or not str(selected[0]).startswith("Yes"):
-            return False, f"{tool.name} was not installed; the operator declined."
         try:
             script, method_id, privileged_commands = await asyncio.to_thread(
                 build_install_script,
@@ -927,26 +1068,23 @@ class AgentToolHost:
                 for target, expires in self.install_approvals.items()
                 if expires > now
             }
-            if install_targets.issubset(self.install_approvals):
-                for target in install_targets:
-                    self.install_approvals.pop(target, None)
-            else:
+            approved_targets = {
+                target for target, expires in self.install_approvals.items() if expires > now
+            }
+            missing_targets = install_targets - approved_targets
+            if missing_targets:
                 reason = purpose.strip() or "continue the requested investigation"
-                answer = await self.operator_dialog(
-                    f"Hey operator, I need to install {packages} using {manager} so I can {reason}. May I go ahead?",
-                    [f"Yes · install {packages}", "No · continue without installing"],
-                    "yes_no",
-                    False,
+                missing_packages = ", ".join(sorted(missing_targets))
+                approved = await self._confirm_install(
+                    f"Hey operator, I need to install {missing_packages} using {manager} so I can {reason}.",
+                    f"Yes · install {missing_packages}",
+                    "No · continue without installing",
                 )
-                if not answer:
-                    return "exit_code=130\nThe operator cancelled the installation request; nothing was installed and the command was not run."
-                try:
-                    selection = json.loads(answer)
-                except json.JSONDecodeError:
-                    selection = {"selected": [answer]}
-                selected = selection.get("selected", []) if isinstance(selection, dict) else []
-                if not selected or not str(selected[0]).startswith("Yes"):
+                if not approved:
                     return "exit_code=130\nThe operator declined the installation request; nothing was installed and the command was not run."
+                self.install_approvals.update(
+                    {target: time.monotonic() + 1800 for target in missing_targets}
+                )
         needs_sudo = os.name == "posix" and os.geteuid() != 0 and bool(
             re.search(r"(?<![A-Za-z0-9_])sudo(?![A-Za-z0-9_])", command)
         )
@@ -1010,6 +1148,9 @@ class AgentToolHost:
         text = output.decode("utf-8", errors="replace")
         if truncated:
             text += "\n… output truncated"
+        if install_request is not None and process.returncode == 0:
+            for target in install_targets:
+                self.install_approvals.pop(target, None)
         return f"exit_code={process.returncode}\npurpose={purpose or '(not specified)'}\n{text}"
 
     @staticmethod
