@@ -13,6 +13,7 @@ ASSET_TYPES = {
     "target",
     "domain",
     "hostname",
+    "nameserver",
     "ip",
     "url",
     "service",
@@ -27,10 +28,17 @@ SCOPE_STATES = {"unknown", "in_scope", "out_of_scope"}
 FINDING_SEVERITIES = {"critical", "high", "medium", "low", "informational", "unknown"}
 FINDING_STATES = {"lead", "confirmed", "false_positive", "remediated"}
 EXPLOIT_STATES = {"candidate", "confirmed"}
+OBSERVATION_STATES = {"draft", "active", "unverified", "validated", "rejected", "resolved"}
+ACCOUNT_TYPES = {"user", "group", "service", "token", "credential", "flag", "other"}
+SECRET_TYPES = {"password", "token", "hash", "key", "flag", "other"}
+ACCOUNT_STATES = {"discovered", "validated", "rejected"}
+MANHUNT_TYPES = {"name", "email", "phone", "social", "organization", "location", "other"}
 MAX_ASSETS = 2_000
 MAX_FINDINGS = 1_000
 MAX_OBSERVATIONS = 4_000
 MAX_EXPLOITS = 1_000
+MAX_ACCOUNTS = 2_000
+MAX_MANHUNT = 2_000
 MAX_EVIDENCE_PER_RECORD = 100
 
 
@@ -56,7 +64,15 @@ def _guess_asset_type(value: str) -> str:
 
 
 def empty_intel() -> dict[str, Any]:
-    return {"schema_version": 1, "assets": [], "observations": [], "findings": [], "exploits": []}
+    return {
+        "schema_version": 2,
+        "assets": [],
+        "observations": [],
+        "findings": [],
+        "exploits": [],
+        "accounts": [],
+        "manhunt": [],
+    }
 
 
 def ensure_intel(session: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -67,7 +83,9 @@ def ensure_intel(session: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         value = empty_intel()
         session["intel"] = value
         changed = True
-    value.setdefault("schema_version", 1)
+    if value.get("schema_version") != 2:
+        value["schema_version"] = 2
+        changed = True
     if not isinstance(value.get("assets"), list):
         value["assets"] = []
         changed = True
@@ -79,6 +97,12 @@ def ensure_intel(session: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         changed = True
     if not isinstance(value.get("exploits"), list):
         value["exploits"] = []
+        changed = True
+    if not isinstance(value.get("accounts"), list):
+        value["accounts"] = []
+        changed = True
+    if not isinstance(value.get("manhunt"), list):
+        value["manhunt"] = []
         changed = True
 
     # Older sessions kept scope, IPs, and findings in independent string lists.
@@ -410,16 +434,22 @@ def upsert_observation(
     details: str,
     source: str,
     confidence: str = "medium",
+    worked: str = "",
+    failed: str = "",
+    next_step: str = "",
 ) -> tuple[dict[str, Any], bool]:
     title = _required_text(title, "observation title", 240)
     asset = asset.strip()[:1_000]
     category = _choice(
         category,
-        {"recon", "service", "authentication", "behavior", "configuration", "other"},
+        {"recon", "service", "authentication", "behavior", "configuration", "exploit", "credentials", "pivot", "enumeration", "workflow", "other"},
         "observation category",
     )
-    status = _choice(status, {"unverified", "validated", "rejected"}, "observation status")
+    status = _choice(status, OBSERVATION_STATES, "observation status")
     details = _required_text(details, "observation details", 8_000)
+    worked = worked.strip()[:2_000]
+    failed = failed.strip()[:2_000]
+    next_step = next_step.strip()[:2_000]
     confidence = _choice(confidence, CONFIDENCE_LEVELS, "confidence")
     evidence_record = record_evidence(source, details, confidence)
 
@@ -447,7 +477,18 @@ def upsert_observation(
             "first_seen": now,
         }
         entries.append(observation)
-    observation.update({"category": category, "status": status, "confidence": confidence})
+    observation.update(
+        {
+            "category": category,
+            "status": status,
+            "confidence": confidence,
+            "details": details,
+            "worked": worked,
+            "failed": failed,
+            "next_step": next_step,
+            "source": source,
+        }
+    )
     evidence_items = observation.setdefault("evidence", [])
     if not any(
         item.get("source") == evidence_record["source"] and item.get("details") == evidence_record["details"]
@@ -467,12 +508,15 @@ def upsert_exploit(
     asset: str,
     evidence: str,
     status: str,
+    summary: str = "",
+    source: str = "Mitsu session analysis",
 ) -> tuple[dict[str, Any], bool]:
     title = _required_text(title, "exploit title", 240)
     asset = _required_text(asset, "affected asset", 1_000)
     evidence = _required_text(evidence, "exploit evidence", 4_000)
     status = _choice(status, EXPLOIT_STATES, "exploit status")
-    evidence_record = record_evidence("Mitsu session analysis", evidence, "high" if status == "confirmed" else "medium")
+    summary = summary.strip()[:4_000]
+    evidence_record = record_evidence(source or "Mitsu session analysis", evidence, "high" if status == "confirmed" else "medium")
     entries = intel["exploits"]
     exploit = next(
         (
@@ -498,6 +542,9 @@ def upsert_exploit(
         entries.append(exploit)
     exploit["status"] = status
     exploit["confidence"] = "high" if status == "confirmed" else "medium"
+    if summary:
+        exploit["summary"] = summary
+    exploit["source"] = source or "Mitsu session analysis"
     exploit["legacy_value"] = f"[{status.upper()}] {title} · {asset} — {evidence}"
     evidence_items = exploit.setdefault("evidence", [])
     if not any(
@@ -509,6 +556,146 @@ def upsert_exploit(
         del evidence_items[:-MAX_EVIDENCE_PER_RECORD]
     exploit["updated_at"] = now
     return exploit, created
+
+
+def upsert_account(
+    intel: dict[str, Any],
+    *,
+    name: str,
+    account_type: str,
+    target: str,
+    secret_type: str,
+    secret: str,
+    access: str,
+    status: str,
+    details: str,
+    source: str,
+    evidence: str,
+    confidence: str = "medium",
+) -> tuple[dict[str, Any], bool]:
+    name = _required_text(name, "account name", 500)
+    account_type = _choice(account_type, ACCOUNT_TYPES, "account type")
+    target = target.strip()[:1_000]
+    secret_type = _choice(secret_type, SECRET_TYPES, "secret type")
+    if not isinstance(secret, str) or len(secret) > 8_000 or "\0" in secret:
+        raise ValueError("secret must be text of at most 8000 characters")
+    access = access.strip()[:1_000]
+    status = _choice(status, ACCOUNT_STATES, "account status")
+    details = details.strip()[:4_000]
+    confidence = _choice(confidence, CONFIDENCE_LEVELS, "confidence")
+    evidence_record = record_evidence(source, evidence, confidence)
+    entries = intel["accounts"]
+    record = next(
+        (
+            item for item in entries
+            if isinstance(item, dict)
+            and str(item.get("name", "")).casefold() == name.casefold()
+            and str(item.get("type", "")).casefold() == account_type
+            and str(item.get("target", "")).casefold() == target.casefold()
+            and str(item.get("secret_type", "")).casefold() == secret_type
+        ),
+        None,
+    )
+    now = _now()
+    created = record is None
+    if record is None:
+        if len(entries) >= MAX_ACCOUNTS:
+            raise ValueError(f"session Intel already contains the maximum of {MAX_ACCOUNTS} account records")
+        record = {
+            "id": _stable_id("account", name, account_type, target, secret_type),
+            "first_seen": now,
+            "evidence": [],
+        }
+        entries.append(record)
+    record.update(
+        {
+            "name": name,
+            "type": account_type,
+            "target": target,
+            "secret_type": secret_type,
+            "secret": secret,
+            "access": access,
+            "status": status,
+            "details": details,
+            "source": source,
+            "confidence": confidence,
+        }
+    )
+    evidence_items = record.setdefault("evidence", [])
+    if not any(
+        item.get("source") == evidence_record["source"] and item.get("details") == evidence_record["details"]
+        for item in evidence_items if isinstance(item, dict)
+    ):
+        evidence_items.append(evidence_record)
+        del evidence_items[:-MAX_EVIDENCE_PER_RECORD]
+    record["updated_at"] = now
+    return record, created
+
+
+def upsert_manhunt(
+    intel: dict[str, Any],
+    *,
+    person: str,
+    detail_type: str,
+    value: str,
+    relationship: str,
+    details: str,
+    source: str,
+    evidence: str,
+    status: str,
+    confidence: str = "medium",
+) -> tuple[dict[str, Any], bool]:
+    person = _required_text(person, "person", 500)
+    detail_type = _choice(detail_type, MANHUNT_TYPES, "manhunt detail type")
+    value = _required_text(value, "person detail", 2_000)
+    relationship = relationship.strip()[:1_000]
+    details = details.strip()[:4_000]
+    status = _choice(status, {"unverified", "validated", "rejected"}, "manhunt status")
+    confidence = _choice(confidence, CONFIDENCE_LEVELS, "confidence")
+    evidence_record = record_evidence(source, evidence, confidence)
+    entries = intel["manhunt"]
+    record = next(
+        (
+            item for item in entries
+            if isinstance(item, dict)
+            and str(item.get("person", "")).casefold() == person.casefold()
+            and str(item.get("detail_type", "")).casefold() == detail_type
+            and str(item.get("value", "")).casefold() == value.casefold()
+        ),
+        None,
+    )
+    now = _now()
+    created = record is None
+    if record is None:
+        if len(entries) >= MAX_MANHUNT:
+            raise ValueError(f"session Intel already contains the maximum of {MAX_MANHUNT} manhunt records")
+        record = {
+            "id": _stable_id("manhunt", person, detail_type, value),
+            "first_seen": now,
+            "evidence": [],
+        }
+        entries.append(record)
+    record.update(
+        {
+            "person": person,
+            "detail_type": detail_type,
+            "value": value,
+            "relationship": relationship,
+            "details": details,
+            "status": status,
+            "confidence": confidence,
+            "source": source,
+        }
+    )
+    evidence_items = record.setdefault("evidence", [])
+    if not any(
+        item.get("source") == evidence_record["source"] and item.get("details") == evidence_record["details"]
+        for item in evidence_items if isinstance(item, dict)
+    ):
+        evidence_items.append(evidence_record)
+        del evidence_items[:-MAX_EVIDENCE_PER_RECORD]
+    record["updated_at"] = now
+    return record, created
 
 
 def _required_text(value: str, label: str, maximum: int) -> str:
@@ -526,14 +713,28 @@ def _choice(value: str, allowed: set[str], label: str) -> str:
 
 def intel_page(intel: dict[str, Any], section: str, offset: int = 0, limit: int = 8) -> str:
     """Return a bounded JSON view so larger session maps remain readable by an LLM."""
-    if section not in {"summary", "assets", "observations", "findings", "exploits"}:
-        raise ValueError('section must be "summary", "assets", "observations", "findings", or "exploits"')
+    sections = {
+        "summary", "assets", "targets", "services", "findings", "exploits",
+        "domains", "ips", "accounts", "manhunt", "observations",
+    }
+    if section not in sections:
+        raise ValueError("section must name a session Intel tab")
     offset = max(0, int(offset))
     limit = min(8, max(1, int(limit)))
     assets = [item for item in intel.get("assets", []) if isinstance(item, dict)]
     findings = [item for item in intel.get("findings", []) if isinstance(item, dict)]
     observations = [item for item in intel.get("observations", []) if isinstance(item, dict)]
     exploits = [item for item in intel.get("exploits", []) if isinstance(item, dict)]
+    accounts = [item for item in intel.get("accounts", []) if isinstance(item, dict)]
+    manhunt = [item for item in intel.get("manhunt", []) if isinstance(item, dict)]
+    targets = [
+        item for item in assets
+        if item.get("type") == "target" or item.get("primary") or item.get("scope") == "in_scope"
+    ]
+    services = [item for item in assets if item.get("type") == "service"]
+    domains = [item for item in assets if item.get("type") in {"domain", "hostname", "nameserver"}]
+    ips = [item for item in assets if item.get("type") == "ip"]
+    accounts.extend(item for item in assets if item.get("type") == "account")
     if section == "summary":
         return json.dumps(
             {
@@ -542,6 +743,10 @@ def intel_page(intel: dict[str, Any], section: str, offset: int = 0, limit: int 
                 "asset_count": len(assets),
                 "asset_types": _count_values(assets, "type"),
                 "scope_statuses": _count_values(assets, "scope"),
+                "target_count": len(targets),
+                "service_count": len(services),
+                "domain_count": len(domains),
+                "ip_count": len(ips),
                 "finding_count": len(findings),
                 "finding_severities": _count_values(findings, "severity"),
                 "finding_statuses": _count_values(findings, "status"),
@@ -549,11 +754,13 @@ def intel_page(intel: dict[str, Any], section: str, offset: int = 0, limit: int 
                 "observation_categories": _count_values(observations, "category"),
                 "exploit_count": len(exploits),
                 "exploit_statuses": _count_values(exploits, "status"),
+                "account_count": len(accounts),
+                "manhunt_count": len(manhunt),
                 "primary_assets": [
                     {"type": item.get("type"), "value": item.get("value"), "scope": item.get("scope")}
                     for item in assets if item.get("primary")
                 ],
-                "usage": "Request section=assets, observations, findings, or exploits with offset to read paginated records.",
+                "usage": "Request a named Intel section with offset to read paginated records.",
             },
             ensure_ascii=False,
             indent=2,
@@ -561,9 +768,15 @@ def intel_page(intel: dict[str, Any], section: str, offset: int = 0, limit: int 
 
     records = {
         "assets": assets,
+        "targets": targets,
+        "services": services,
         "observations": observations,
         "findings": findings,
         "exploits": exploits,
+        "domains": domains,
+        "ips": ips,
+        "accounts": accounts,
+        "manhunt": manhunt,
     }[section]
     page = [_bounded_record(record) for record in records[offset : offset + limit]]
     next_offset = offset + len(page)
@@ -578,6 +791,45 @@ def intel_page(intel: dict[str, Any], section: str, offset: int = 0, limit: int 
         ensure_ascii=False,
         indent=2,
     )
+
+
+def intel_context(intel: dict[str, Any], limit: int = 12) -> str:
+    assets = [item for item in intel.get("assets", []) if isinstance(item, dict)]
+    findings = [item for item in intel.get("findings", []) if isinstance(item, dict)]
+    exploits = [item for item in intel.get("exploits", []) if isinstance(item, dict)]
+    observations = [item for item in intel.get("observations", []) if isinstance(item, dict)]
+    accounts = [item for item in intel.get("accounts", []) if isinstance(item, dict)]
+    manhunt = [item for item in intel.get("manhunt", []) if isinstance(item, dict)]
+    sections = (
+        ("Targets", [item for item in assets if item.get("type") == "target" or item.get("primary") or item.get("scope") == "in_scope"]),
+        ("Services", [item for item in assets if item.get("type") == "service"]),
+        ("Findings", findings),
+        ("Exploits and vulnerabilities", exploits),
+        ("Domains", [item for item in assets if item.get("type") in {"domain", "hostname", "nameserver"}]),
+        ("IPs", [item for item in assets if item.get("type") == "ip"]),
+        ("Passwords and accounts", accounts + [item for item in assets if item.get("type") == "account"]),
+        ("Manhunt", manhunt),
+        ("Observations", observations),
+    )
+    lines = ["Session Intel is the current evidence record. Use it to continue from verified results; update it when new evidence arrives."]
+    for label, records in sections:
+        lines.append(f"{label} ({len(records)}):")
+        selected = records[-limit:]
+        if not selected:
+            lines.append("- none")
+            continue
+        for record in selected:
+            item = _bounded_record(record)
+            if label == "Observations":
+                item = {
+                    key: item[key]
+                    for key in ("title", "asset", "category", "status", "details", "worked", "failed", "next_step", "confidence", "source")
+                    if key in item
+                }
+            lines.append("- " + json.dumps(item, ensure_ascii=False, separators=(",", ":")))
+        if len(records) > limit:
+            lines.append(f"- {len(records) - limit} earlier records; use intel_get_map for those.")
+    return "\n".join(lines)
 
 
 def _count_values(records: list[dict[str, Any]], key: str) -> dict[str, int]:

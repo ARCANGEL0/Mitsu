@@ -474,11 +474,14 @@ class AgentToolHost:
 
         @self.server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
         async def intel_get_map(
-            section: Literal["summary", "assets", "observations", "findings", "exploits"] = "summary",
+            section: Literal[
+                "summary", "assets", "targets", "findings", "services", "exploits",
+                "domains", "ips", "accounts", "manhunt", "observations",
+            ] = "summary",
             offset: int = 0,
             limit: int = 8,
         ) -> str:
-            """Read the session Intel summary or a page of assets, observations, findings, and exploits. Pages contain at most eight records; follow next_offset until the relevant section is complete. Read the sections for a full target map before relying on saved context."""
+            """Read a section of the session Intel map. Sections are targets, findings, services, exploits, domains, IPs, accounts, manhunt, and observations. Pages contain at most eight records; follow next_offset when needed."""
             return await self._update_session_intel(
                 "get_map", {"section": section, "offset": offset, "limit": limit}
             )
@@ -487,7 +490,7 @@ class AgentToolHost:
         async def intel_upsert_asset(
             asset_type: Literal[
                 "target", "domain", "hostname", "ip", "url", "service",
-                "endpoint", "technology", "account", "other",
+                "nameserver", "endpoint", "technology", "account", "other",
             ],
             value: str,
             source: str,
@@ -499,12 +502,12 @@ class AgentToolHost:
             attributes: dict[str, str] | None = None,
             primary: bool = False,
         ) -> str:
-            """Add or update a target-map asset with provenance and observed evidence.
+            """Add or update a target, service, domain, nameserver, IP, or other map asset with provenance and observed evidence.
 
-            Record operator-provided targets and evidence-backed discoveries. Keep discovered
-            assets at unknown scope; mark an asset in_scope only when the operator's request
-            explicitly authorizes it. Use attributes for details such as port, protocol, banner,
-            product, version, or DNS records. Repeated calls merge evidence into the same asset.
+            Mark the primary target explicitly. Record service ports, protocols, banners, product,
+            version, and confirmation evidence in attributes. Record domain relationships, DNS
+            answers, authoritative nameservers, and related IPs with parent links. Repeated calls
+            merge evidence into the same asset.
             """
             return await self._update_session_intel(
                 "upsert_asset",
@@ -526,13 +529,19 @@ class AgentToolHost:
         async def intel_upsert_observation(
             title: str,
             asset: str,
-            category: Literal["recon", "service", "authentication", "behavior", "configuration", "other"],
-            status: Literal["unverified", "validated", "rejected"],
+            category: Literal[
+                "recon", "service", "authentication", "behavior", "configuration",
+                "exploit", "credentials", "pivot", "enumeration", "workflow", "other",
+            ],
+            status: Literal["draft", "active", "unverified", "validated", "rejected", "resolved"],
             details: str,
             source: str,
             confidence: Literal["low", "medium", "high", "unknown"] = "medium",
+            worked: str = "",
+            failed: str = "",
+            next_step: str = "",
         ) -> str:
-            """Save a sourced technical observation or useful lead to this session's Intel."""
+            """Save or update working notes for this lead. Include what worked, what failed, and one evidence-based next step; use draft or active while investigating, then validated, rejected, or resolved as evidence changes."""
             return await self._update_session_intel(
                 "upsert_observation",
                 {
@@ -543,6 +552,9 @@ class AgentToolHost:
                     "details": details,
                     "source": source,
                     "confidence": confidence,
+                    "worked": worked,
+                    "failed": failed,
+                    "next_step": next_step,
                 },
             )
 
@@ -558,7 +570,7 @@ class AgentToolHost:
             recommendation: str = "",
             confidence: Literal["low", "medium", "high", "unknown"] = "medium",
         ) -> str:
-            """Add or update an evidence-backed finding in this session's local Intel."""
+            """Add or update useful confirmed information in Findings. Keep unverified leads marked lead, and include the affected target, source, and evidence."""
             return await self._update_session_intel(
                 "upsert_finding",
                 {
@@ -576,17 +588,88 @@ class AgentToolHost:
 
         @self.server.tool(annotations=ToolAnnotations(read_only_hint=False, open_world_hint=False))
         async def record_exploit(
-            title: str, target: str, evidence: str, status: str = "candidate"
+            title: str,
+            target: str,
+            evidence: str,
+            status: str = "candidate",
+            summary: str = "",
+            source: str = "Mitsu session analysis",
         ) -> str:
-            """Add an applicable exploit to this session's Intel.
+            """Record an exploit or vulnerability with a short description and source.
 
-            Use only after observed target evidence matches the exploit's product/version or
-            after validation. Mark confirmed only when the test succeeded; local search hits
-            alone are not evidence and must never be recorded.
+            Keep search-only references as candidates. Add product/version evidence and update
+            status after validation; confirm exploitation only when the tool result demonstrates it.
             """
             return await self._update_session_intel(
                 "record_exploit",
-                {"title": title, "target": target, "evidence": evidence, "status": status},
+                {
+                    "title": title,
+                    "target": target,
+                    "evidence": evidence,
+                    "status": status,
+                    "summary": summary,
+                    "source": source,
+                },
+            )
+
+        @self.server.tool(annotations=ToolAnnotations(read_only_hint=False, open_world_hint=False))
+        async def intel_upsert_account(
+            name: str,
+            account_type: Literal["user", "group", "service", "token", "credential", "flag", "other"],
+            target: str,
+            secret_type: Literal["password", "token", "hash", "key", "flag", "other"],
+            secret: str,
+            access: str,
+            status: Literal["discovered", "validated", "rejected"],
+            details: str,
+            source: str,
+            evidence: str,
+            confidence: Literal["low", "medium", "high", "unknown"] = "medium",
+        ) -> str:
+            """Save account, group, access, password, token, key, hash, or CTF flag evidence in Passwords/Accounts. Keep the secret with its owner, target/service, source, and validation state so it can be used later in this authorized session."""
+            return await self._update_session_intel(
+                "upsert_account",
+                {
+                    "name": name,
+                    "account_type": account_type,
+                    "target": target,
+                    "secret_type": secret_type,
+                    "secret": secret,
+                    "access": access,
+                    "status": status,
+                    "details": details,
+                    "source": source,
+                    "evidence": evidence,
+                    "confidence": confidence,
+                },
+            )
+
+        @self.server.tool(annotations=ToolAnnotations(read_only_hint=False, open_world_hint=False))
+        async def intel_upsert_manhunt(
+            person: str,
+            detail_type: Literal["name", "email", "phone", "social", "organization", "location", "other"],
+            value: str,
+            relationship: str,
+            details: str,
+            source: str,
+            evidence: str,
+            status: Literal["unverified", "validated", "rejected"],
+            confidence: Literal["low", "medium", "high", "unknown"] = "medium",
+        ) -> str:
+            """Save person-scoped OSINT such as names, email addresses, phone numbers, social accounts, organizations, and relationships in Manhunt. Keep it separate from system accounts and credentials."""
+            return await self._update_session_intel(
+                "upsert_manhunt",
+                {
+                    "person": person,
+                    "detail_type": detail_type,
+                    "value": value,
+                    "relationship": relationship,
+                    "details": details,
+                    "source": source,
+                    "evidence": evidence,
+                    "status": status,
+                    "confidence": confidence,
+                },
             )
 
         @self.server.tool(annotations=ToolAnnotations(read_only_hint=False, open_world_hint=False))

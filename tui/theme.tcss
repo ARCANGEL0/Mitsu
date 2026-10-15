@@ -696,49 +696,74 @@ OptionList:focus > .option-list--option-highlighted {
 }
 
 #intel-summary,
-#target-summary,
-#target-list,
-#observations-summary,
-#findings-summary,
-#exploits-summary,
-#ips-summary,
-#harvested-summary,
 #activity-summary,
 #aggressive-level {
     height: auto;
     color: #aaa6a0;
 }
 
-#target-list {
-    margin-top: 1;
-}
-
-#findings-summary,
-#exploits-summary,
-#ips-summary,
-#harvested-summary,
-#activity-summary,
 #intel-summary {
+    margin-top: 1;
     margin-bottom: 1;
 }
 
-#observations-scroll {
+#intel-tabs {
     width: 100%;
-    height: 10;
-    max-height: 14;
+    height: auto;
     margin-bottom: 1;
-    padding-left: 1;
-    border-left: solid #315459;
-    background: #0d1114;
-    scrollbar-size-vertical: 1;
-    scrollbar-color: #315459;
-    scrollbar-color-hover: #55e5e8;
-    scrollbar-color-active: #55e5e8;
 }
 
-#observations-summary {
+.intel-tab-row {
+    width: 100%;
+    height: 1;
+}
+
+.intel-tab {
+    width: 1fr;
+    height: 1;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: $surface;
+    color: $text-muted;
+    text-align: center;
+}
+
+.intel-tab:hover {
+    background: $secondary;
+    color: $foreground;
+}
+
+.intel-tab.is-active {
+    background: $primary;
+    color: $background;
+    text-style: bold;
+}
+
+#intel-tab-scroll {
+    width: 100%;
+    height: 1fr;
+    min-height: 3;
+    padding: 0 1;
+    border: round $secondary;
+    background: $panel;
+    scrollbar-size-vertical: 1;
+    scrollbar-color: $secondary;
+    scrollbar-color-hover: $primary;
+    scrollbar-color-active: $primary;
+}
+
+#intel-tab-title {
     height: auto;
-    color: #aaa6a0;
+    margin-bottom: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+#intel-tab-content {
+    height: auto;
+    color: $text-muted;
 }
 
 #composer {
@@ -2058,12 +2083,8 @@ OptionList:focus > .option-list--option-highlighted {
 }
 
 #intel-summary,
-#target-summary,
-#target-list,
-#findings-summary,
-#exploits-summary,
-#ips-summary,
-#harvested-summary,
+#intel-tab-content,
+#intel-tab-title,
 #activity-summary,
 #aggressive-level {
     color: $text-muted;
@@ -2101,16 +2122,14 @@ OptionList:focus > .option-list--option-highlighted {
     text-style: none;
 }
 
-#observations-scroll {
-    border-left: solid $secondary;
-    background: $panel;
+#intel-tab-scroll:focus {
     scrollbar-color: $secondary;
     scrollbar-color-hover: $primary;
     scrollbar-color-active: $primary;
 }
 
-#observations-summary {
-    color: $text-muted;
+#intel-tab-title {
+    color: $accent;
 }
 
 #provider-dialog-input:focus,
