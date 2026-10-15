@@ -169,6 +169,8 @@ class SessionStore:
         self.path = _data_root() / "sessions"
 
     def list_sessions(self) -> list[dict[str, Any]]:
+        from datetime import datetime, timezone
+
         self._ensure_private_directory()
         sessions: list[dict[str, Any]] = []
         for session_path in self.path.glob("*.json"):
@@ -177,7 +179,19 @@ class SessionStore:
             record = _read_json(session_path, {})
             if record.get("id") == session_path.stem:
                 sessions.append(record)
-        return sorted(sessions, key=lambda item: item.get("updated_at", ""), reverse=True)
+
+        def session_order(record: dict[str, Any]) -> tuple[datetime, str]:
+            for field in ("updated_at", "created_at"):
+                try:
+                    updated = datetime.fromisoformat(str(record.get(field, "")))
+                except (TypeError, ValueError):
+                    continue
+                if updated.tzinfo is None:
+                    updated = updated.replace(tzinfo=timezone.utc)
+                return updated.astimezone(timezone.utc), str(record.get("id", ""))
+            return datetime.min.replace(tzinfo=timezone.utc), str(record.get("id", ""))
+
+        return sorted(sessions, key=session_order, reverse=True)
 
     def load_session(self, session_id: str) -> dict[str, Any] | None:
         if not self.SESSION_ID.fullmatch(session_id):
@@ -204,10 +218,11 @@ class SessionStore:
         from datetime import datetime, timezone
         from uuid import uuid4
 
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
         record = {
             "id": uuid4().hex,
             "title": "New session",
+            "title_source": "default",
             "created_at": now,
             "updated_at": now,
             "provider_id": provider.get("provider_id", ""),
@@ -226,7 +241,7 @@ class SessionStore:
 
         if not self.SESSION_ID.fullmatch(str(record.get("id", ""))):
             raise ValueError("Invalid session ID.")
-        record["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        record["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="microseconds")
         self._ensure_private_directory()
         _atomic_json(self.path / f"{record['id']}.json", record, private=True)
 

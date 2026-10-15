@@ -472,6 +472,11 @@ class AgentToolHost:
             """Run one catalogued Armory tool by ID with separate CLI arguments. If missing, Mitsu asks before installing it, then runs it."""
             return await self._run_armory_tool(tool_id, argv, purpose, timeout_seconds)
 
+        @self.server.tool(annotations=ToolAnnotations(read_only_hint=False, open_world_hint=False))
+        async def session_upsert(title: str) -> str:
+            """Set a concise title for a session that still has its default title. An operator-set title always takes priority."""
+            return await self._update_session_intel("upsert_title", {"title": title})
+
         @self.server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
         async def intel_get_map(
             section: Literal[
@@ -798,6 +803,7 @@ class AgentToolHost:
             and definition.get("server") == "mitsu"
             and (
                 name.endswith(("__record_exploit", "__remove_exploit"))
+                or name.endswith("__session_upsert")
                 or name.removeprefix("mitsu__").startswith("intel_")
             )
         ):
@@ -816,6 +822,7 @@ class AgentToolHost:
             definition.get("server") == "mitsu"
             and (
                 name.endswith(("__record_exploit", "__remove_exploit"))
+                or name.endswith("__session_upsert")
                 or name.removeprefix("mitsu__").startswith("intel_")
             )
         ):

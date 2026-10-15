@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 from textual.app import ComposeResult
@@ -1383,6 +1384,8 @@ class MainMenuScreen(Screen):
                     "label": f"[{index}] {str(record.get('title', 'Untitled session')).splitlines()[0]}",
                     "action": "open_session",
                     "session_id": str(record["id"]),
+                    "created_on": self._format_created_date(record.get("created_at", "")),
+                    "last_updated": self._format_date(record.get("updated_at", "")),
                     "detail": self._session_detail(record),
                 }
                 for index, record in enumerate(self.records, start=1)
@@ -1433,19 +1436,59 @@ class MainMenuScreen(Screen):
         detail_widget = self.query_one("#menu-right-detail", Static)
         output = Text()
         available_rows = max(1, min(18, list_widget.size.height or 18))
-        visible_count = min(14, len(self.right_items), max(1, available_rows - 2))
+        session_table = self.panel_kind == "sessions"
+        table_rows = int(session_table)
+        visible_count = min(14, len(self.right_items), max(1, available_rows - table_rows - 2))
         start = max(0, min(self.right_index - visible_count // 2, len(self.right_items) - visible_count))
         visible_items = self.right_items[start : start + visible_count]
         show_earlier = start > 0
         show_later = start + len(visible_items) < len(self.right_items)
-        if visible_count + int(show_earlier) + int(show_later) > available_rows:
+        if visible_count + table_rows + int(show_earlier) + int(show_later) > available_rows:
             show_earlier = show_later = False
+        if session_table:
+            width = list_widget.size.width or 80
+            created_width = 12
+            updated_width = 14
+            label_width = max(8, width - created_width - updated_width - 6)
+            output.append("  ")
+            output.append("SESSION".ljust(label_width)[:label_width], style="#aaa19a")
+            output.append("  ")
+            output.append("CREATED ON".rjust(created_width), style="#aaa19a")
+            output.append("  ")
+            output.append("LAST UPDATED".rjust(updated_width), style="#aaa19a")
+            output.append("\n")
         if show_earlier:
             output.append("  ↑ earlier items\n", style="#817a75")
         for offset, item in enumerate(visible_items):
             index = start + offset
             selected = index == self.right_index
             status = item.get("status")
+            row_style = (
+                Style(color=self.accent, bold=True, underline=True)
+                if selected and self.active_panel == "right"
+                else Style(color=self.accent, bold=True)
+                if selected
+                else Style(color="#d0cbc5")
+            )
+            if session_table:
+                width = list_widget.size.width or 80
+                created_width = 12
+                updated_width = 14
+                label_width = max(8, width - created_width - updated_width - 6)
+                output.append(
+                    "› " if selected and self.active_panel == "right" else "  ",
+                    style=Style(color=self.accent, bold=True) if selected else "#817a75",
+                )
+                label = Text(item["label"], style=row_style)
+                label.truncate(label_width, overflow="ellipsis")
+                output.append_text(label)
+                output.append(" " * max(2, label_width - cell_len(label.plain) + 2))
+                output.append(str(item.get("created_on", "")).rjust(created_width), style=row_style)
+                output.append("  ")
+                output.append(str(item.get("last_updated", "")).rjust(updated_width), style=row_style)
+                if index + 1 < start + len(visible_items):
+                    output.append("\n")
+                continue
             if status:
                 output.append("● ", style="#79d78c" if status == "installed" else "#ef7180")
             if selected and self.active_panel == "right":
@@ -1905,6 +1948,13 @@ class MainMenuScreen(Screen):
         provider = str(record.get("provider_id", "provider")).replace("_", " ").title()
         model = record.get("model", "")
         return f"{provider} · {model}\nUpdated {MainMenuScreen._format_date(record.get('updated_at', ''))}"
+
+    @staticmethod
+    def _format_created_date(value: str) -> str:
+        try:
+            return datetime.fromisoformat(value).astimezone().strftime("%b %d, %Y")
+        except (TypeError, ValueError):
+            return "Unknown"
 
     @staticmethod
     def _format_date(value: str) -> str:

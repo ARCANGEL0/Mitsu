@@ -572,6 +572,14 @@ OptionList:focus > .option-list--option-highlighted {
     color: $foreground;
 }
 
+#activity-summary {
+    height: auto;
+    max-height: 5;
+    margin: 0 0 1 0;
+    padding-left: 1;
+    border-left: tall $secondary;
+}
+
 #search-label {
     display: none;
 }
