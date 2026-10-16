@@ -16,6 +16,7 @@ import socket
 import sys
 import time
 from typing import Any, Awaitable, Callable, Literal
+from urllib.parse import urlsplit
 
 from mcp import Client, StdioServerParameters
 from mcp.server import MCPServer
@@ -52,6 +53,7 @@ OperatorDialogHandler = Callable[[dict[str, Any]], Awaitable[str | None]]
 SudoPasswordHandler = Callable[[str], Awaitable[str | None]]
 ShowCommandHandler = Callable[[str, str], Awaitable[bool]]
 ModeDialogHandler = Callable[[str], Awaitable[str]]
+ToolResultHandler = Callable[[str, dict[str, Any], str], Awaitable[str]]
 
 
 def _is_low_impact_recon_command(command: str) -> bool:
@@ -216,6 +218,7 @@ class AgentToolHost:
         sudo_password: SudoPasswordHandler | None = None,
         show_command: ShowCommandHandler | None = None,
         mode_dialog: ModeDialogHandler | None = None,
+        tool_result_handler: ToolResultHandler | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self.ask_user = ask_user
@@ -225,6 +228,7 @@ class AgentToolHost:
         self.sudo_password = sudo_password
         self.show_command = show_command
         self.mode_dialog = mode_dialog
+        self.tool_result_handler = tool_result_handler
         self.install_approvals: dict[str, float] = {}
         self.server = MCPServer("Mitsu built-in tools")
         self._stack = AsyncExitStack()
@@ -287,12 +291,24 @@ class AgentToolHost:
 
         @self.server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
         async def web_search(query: str, max_results: int = 5) -> str:
-            "Search configured web engines, or open a supplied HTTP or HTTPS URL and return readable page text. Prefer this tool over shell curl or wget for ordinary web research and operator-provided links."
+            "Search configured web engines, or open a supplied HTTP or HTTPS URL and return readable page text. If a supplied URL will not open, search its host and page path for a working result. Prefer this tool over shell curl or wget for ordinary web research and operator-provided links."
             if not query.strip():
                 raise ToolHostError("Enter a search query.")
             query = query.strip()
             if query.casefold().startswith(("http://", "https://")):
-                return await asyncio.to_thread(fetch_web_page, query)
+                try:
+                    return await asyncio.to_thread(fetch_web_page, query)
+                except (OSError, TimeoutError, ValueError) as error:
+                    parsed = urlsplit(query)
+                    page_terms = re.sub(r"[-_/]+", " ", parsed.path).strip()
+                    host = (parsed.hostname or "").removeprefix("www.")
+                    fallback = " ".join(part for part in (host, page_terms) if part)
+                    if not fallback:
+                        raise
+                    results = await asyncio.to_thread(
+                        perform_web_search, fallback, max_results, self.search_settings()
+                    )
+                    return f"Could not open {query}: {error}\n\nSearch results for {fallback}:\n{results}"
             return await asyncio.to_thread(
                 perform_web_search, query, max_results, self.search_settings()
             )
@@ -304,16 +320,42 @@ class AgentToolHost:
             local_searcher, local_status, vulnx_searcher, vulnx_status = (
                 await self._prepare_vulnsearch_backends(criteria, intel)
             )
-            return await asyncio.to_thread(
+            vulnx_records: list[tuple[str, str]] = []
+            related_records: list[tuple[str, dict[str, Any]]] = []
+
+            def capture_web(query: str, records: list[dict[str, Any]], _errors: list[str]) -> None:
+                related_records.extend(
+                    (query, lead)
+                    for lead in self._cve_search_leads(query, records, "Web search")
+                )
+
+            def capture_local(
+                query: str,
+                records: list[dict[str, str]],
+                _error: str | None,
+            ) -> None:
+                related_records.extend(
+                    (query, lead)
+                    for lead in self._cve_search_leads(query, records, "SearchSploit")
+                )
+
+            result = await asyncio.to_thread(
                 search_vulnerabilities,
                 criteria,
                 intel,
                 self.search_settings(),
                 local_searcher=local_searcher,
                 vulnx_searcher=vulnx_searcher,
+                vulnx_result_sink=lambda query, data: vulnx_records.append((query, data)),
+                web_result_sink=capture_web,
+                local_result_sink=capture_local,
                 local_status=local_status,
                 vulnx_status=vulnx_status,
             )
+            saved = await self._save_vulnerability_leads(criteria, intel, [*vulnx_records, *related_records])
+            if saved:
+                result += f"\n\nSaved {saved} CVE lead(s) to Findings and Exploits Intel for review."
+            return result
 
         @self.server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
         async def ask_user(question: str, choices: list[str] | None = None) -> str:
@@ -873,8 +915,7 @@ class AgentToolHost:
                 total = max(0, int(raw_total))
             except (TypeError, ValueError):
                 continue
-            start = max(0, total - 16)
-            for offset in range(start, total, 8):
+            for offset in range(0, total, 8):
                 try:
                     page = json.loads(
                         await self._update_session_intel(
@@ -888,6 +929,224 @@ class AgentToolHost:
                     record for record in records if isinstance(record, dict)
                 )
         return intel
+
+    async def _save_vulnerability_leads(
+        self,
+        criteria: str,
+        intel: dict[str, Any],
+        vulnx_results: list[tuple[str, str | dict[str, Any]]],
+    ) -> int:
+        assets = [item for item in intel.get("assets", []) if isinstance(item, dict)]
+
+        def asset_for(query: str) -> str:
+            terms = {
+                term for term in re.findall(r"[a-z0-9.]+", query.casefold()) if len(term) > 2
+            }
+            best_asset = ""
+            best_score = 0
+            for asset in assets:
+                material_parts = [str(asset.get("value", ""))]
+                attributes = asset.get("attributes", {})
+                if isinstance(attributes, dict):
+                    material_parts.extend(str(value) for value in attributes.values())
+                material = " ".join(material_parts).casefold()
+                score = sum(term in material for term in terms)
+                if score > best_score:
+                    best_asset = str(asset.get("value", ""))
+                    best_score = score
+            return best_asset or next(
+                (
+                    str(asset.get("value", ""))
+                    for asset in assets
+                    if asset.get("primary") or asset.get("scope") == "in_scope"
+                ),
+                (criteria.strip() or query.strip())[:255],
+            )
+
+        records: list[tuple[str, dict[str, Any]]] = []
+        for query, result in vulnx_results:
+            if isinstance(result, dict):
+                entries = [result]
+            else:
+                try:
+                    payload = json.loads(result)
+                except json.JSONDecodeError:
+                    continue
+                entries = payload.get("results", []) if isinstance(payload, dict) else []
+            if isinstance(entries, list):
+                records.extend(
+                    (query, item)
+                    for item in entries
+                    if isinstance(item, dict)
+                    and re.fullmatch(r"CVE-\d{4}-\d{3,}", str(item.get("cve_id", "")), re.IGNORECASE)
+                )
+
+        saved = 0
+        seen: set[tuple[str, str]] = set()
+        for query, record in records:
+            cve = str(record.get("cve_id", "")).upper()
+            target = asset_for(query)
+            identity = (cve, target.casefold())
+            if identity in seen:
+                continue
+            seen.add(identity)
+            title = str(record.get("name") or cve).strip()[:200]
+            description = str(record.get("description") or "Vulnerability record returned by Vulnx.").strip()
+            remediation = str(record.get("remediation") or "").strip()
+            source_type = str(record.get("_source_type") or "Vulnx")
+            citations = record.get("citations", [])
+            source_urls = [
+                str(item.get("url", "")).strip()
+                for item in citations
+                if isinstance(item, dict) and str(item.get("url", "")).strip()
+            ] if isinstance(citations, list) else []
+            source = (source_urls[0] if source_urls else "Vulnx vulnerability search")[:500]
+            severity = str(record.get("severity", "unknown")).casefold()
+            if severity == "moderate":
+                severity = "medium"
+            if severity not in {"critical", "high", "medium", "low", "informational"}:
+                score = record.get("cvss_score")
+                if isinstance(score, dict):
+                    score = score.get("baseScore") or score.get("base_score") or score.get("score")
+                try:
+                    score_value = float(score)
+                except (TypeError, ValueError):
+                    score_value = -1
+                severity = (
+                    "critical" if score_value >= 9 else
+                    "high" if score_value >= 7 else
+                    "medium" if score_value >= 4 else
+                    "low" if score_value > 0 else
+                    "unknown"
+                )
+            evidence = (
+                f"{source_type} returned {cve} for query {query!r}. {description[:1800]}"
+                + (f" Source: {', '.join(source_urls[:4])}." if source_urls else "")
+                + " Affected-version compatibility has not been checked against the observed service."
+            )[:3900]
+            summary = description[:2500]
+            if remediation:
+                summary += f" Remediation listed by source: {remediation[:900]}"
+            summary += " Applicability to the observed version is unverified."
+
+            current = next(
+                (
+                    item for item in intel.get("exploits", [])
+                    if isinstance(item, dict)
+                    and cve in str(item.get("title", "")).upper()
+                    and str(item.get("asset", "")).casefold() == target.casefold()
+                ),
+                None,
+            )
+            current_finding = next(
+                (
+                    item for item in intel.get("findings", [])
+                    if isinstance(item, dict)
+                    and cve in str(item.get("title", "")).upper()
+                    and str(item.get("asset", "")).casefold() == target.casefold()
+                ),
+                None,
+            )
+            await self._update_session_intel(
+                "upsert_finding",
+                {
+                    "title": f"{cve}: {title}",
+                    "asset": target,
+                    "severity": severity,
+                    "status": (
+                        current_finding.get("status")
+                        if current_finding and current_finding.get("status") in {"confirmed", "false_positive", "remediated"}
+                        else "lead"
+                    ),
+                    "summary": summary,
+                    "source": source,
+                    "evidence": evidence,
+                    "recommendation": remediation,
+                    "confidence": "medium",
+                },
+            )
+            current_observation = next(
+                (
+                    item for item in intel.get("observations", [])
+                    if isinstance(item, dict)
+                    and str(item.get("title", "")).casefold() == f"{cve} applicability".casefold()
+                    and str(item.get("asset", "")).casefold() == target.casefold()
+                ),
+                None,
+            )
+            observation_status = (
+                current_observation.get("status")
+                if current_observation and current_observation.get("status") in {"validated", "rejected", "resolved"}
+                else "unverified"
+            )
+            await self._update_session_intel(
+                "upsert_observation",
+                {
+                    "title": f"{cve} applicability",
+                    "asset": target,
+                    "category": "exploit",
+                    "status": observation_status,
+                    "details": evidence[:7900],
+                    "source": source,
+                    "confidence": "medium",
+                    "worked": f"Found a {source_type} reference for {cve}.",
+                    "failed": "Target-side applicability has not been verified.",
+                    "next_step": "Compare the observed product version and prerequisites with this record, then validate only with a safe check.",
+                },
+            )
+            if (
+                (not current or current.get("status") != "confirmed")
+                and not (
+                    current_finding
+                    and current_finding.get("status") in {"false_positive", "remediated"}
+                )
+            ):
+                await self._update_session_intel(
+                    "record_exploit",
+                    {
+                        "title": f"{cve}: {title}",
+                        "target": target,
+                        "evidence": evidence,
+                        "status": "candidate",
+                        "summary": summary,
+                        "source": source,
+                    },
+                )
+            saved += 1
+        return saved
+
+    @staticmethod
+    def _cve_search_leads(
+        query: str,
+        references: list[dict[str, Any]],
+        source_type: str,
+    ) -> list[dict[str, Any]]:
+        leads = []
+        for reference in references:
+            title = str(reference.get("title") or reference.get("name") or "Search reference").strip()
+            description = str(reference.get("snippet") or reference.get("description") or "").strip()
+            cves = set(
+                re.findall(r"\bCVE-\d{4}-\d{3,}\b", f"{title} {description}", re.IGNORECASE)
+            )
+            for cve in cves:
+                url = str(reference.get("url", "")).strip()
+                exploit_id = str(reference.get("id", "")).strip()
+                if source_type == "SearchSploit" and exploit_id:
+                    url = f"https://www.exploit-db.com/exploits/{exploit_id}"
+                    description = (
+                        f"{title}. EDB-ID {exploit_id}. Local reference: {reference.get('path', '')}"
+                    )
+                elif not description:
+                    description = f"{title} matched the {source_type} search for {query}."
+                leads.append({
+                    "cve_id": cve.upper(),
+                    "name": title,
+                    "description": description[:1800] or title,
+                    "severity": reference.get("severity", "unknown"),
+                    "citations": [{"source": source_type, "url": url}] if url else [],
+                    "_source_type": source_type,
+                })
+        return leads
 
     async def _prepare_vulnsearch_backends(
         self, criteria: str, intel: dict[str, Any]
@@ -1138,6 +1397,13 @@ class AgentToolHost:
             marker in output.casefold()
             for marker in ("timed out after", "installation failed", "could not start")
         )
+        if self.tool_result_handler:
+            try:
+                note = await self.tool_result_handler(name, arguments, output)
+            except Exception as error:
+                note = f"Intel capture failed: {type(error).__name__}: {error}"
+            if note:
+                output += f"\n\n{note}"
         return output, failed, not read_only
 
     async def close(self) -> None:

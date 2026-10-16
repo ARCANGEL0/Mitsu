@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import hashlib
 import ipaddress
 import json
+import re
 from typing import Any
 
 
@@ -41,6 +42,15 @@ MAX_ACCOUNTS = 2_000
 MAX_MANHUNT = 2_000
 MAX_EVIDENCE_PER_RECORD = 100
 
+_NMAP_HOST = re.compile(r"^Nmap scan report for (.+)$", re.IGNORECASE)
+_NMAP_PORT = re.compile(
+    r"^\s*(\d+)/(tcp|udp)\s+open\s+(\S+)(?:\s+(.*))?$",
+    re.IGNORECASE,
+)
+_PRODUCT_VERSION = re.compile(
+    r"^(.+?)\s+(v?\d+(?:\.\d+){0,3}(?:[pP]\d+|[-+][A-Za-z0-9.-]+)?)\b"
+)
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -73,6 +83,59 @@ def empty_intel() -> dict[str, Any]:
         "accounts": [],
         "manhunt": [],
     }
+
+
+def parse_nmap_services(output: str) -> list[dict[str, str]]:
+    services: list[dict[str, str]] = []
+    hostname = ""
+    address = ""
+
+    for line in output.splitlines():
+        host_match = _NMAP_HOST.match(line.strip())
+        if host_match:
+            reported = host_match.group(1).strip()
+            wrapped = re.fullmatch(r"(.+?)\s+\(([^()]+)\)", reported)
+            hostname = wrapped.group(1).strip().rstrip(".") if wrapped else ""
+            address = wrapped.group(2).strip() if wrapped else reported
+            try:
+                address = str(ipaddress.ip_address(address))
+            except ValueError:
+                if not hostname:
+                    hostname = address.rstrip(".")
+                address = ""
+            continue
+
+        port_match = _NMAP_PORT.match(line)
+        if not port_match or not (address or hostname):
+            continue
+
+        port, protocol, service, banner = port_match.groups()
+        banner = (banner or "").strip()
+        product = ""
+        version = ""
+        product_match = _PRODUCT_VERSION.match(banner)
+        if product_match:
+            product = product_match.group(1).strip()
+            version = product_match.group(2).strip()
+        elif banner:
+            product = banner
+
+        services.append(
+            {
+                "host": address or hostname,
+                "ip": address,
+                "hostname": hostname,
+                "port": port,
+                "protocol": protocol.casefold(),
+                "service": service,
+                "banner": banner,
+                "product": product,
+                "version": version,
+                "evidence": line.strip(),
+            }
+        )
+
+    return services
 
 
 def ensure_intel(session: dict[str, Any]) -> tuple[dict[str, Any], bool]:

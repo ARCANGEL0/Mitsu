@@ -37,6 +37,7 @@ async def run_agent_turn(
     get_mode: Callable[[], str] | None = None,
     get_system_prompt: Callable[[], str] | None = None,
     image_paths: list[str] | None = None,
+    pause_after_response: bool = False,
 ) -> AsyncIterator[AgentEvent]:
     anthropic = profile.get("protocol") == "anthropic"
     content: str | list[dict[str, Any]] = prompt
@@ -50,6 +51,16 @@ async def run_agent_turn(
     while True:
         active_mode = get_mode() if get_mode is not None else mode
         active_system_prompt = get_system_prompt() if get_system_prompt is not None else system_prompt
+        if pause_after_response:
+            active_system_prompt += (
+                "\n\nThe operator interrupted an active AutoPwn run with a new message. Address that message "
+                "first and answer direct questions plainly. Briefly mention the next step you were considering "
+                "when it helps. If the operator needs to choose whether to change course, use mitsu__user_dialog "
+                "and wait for the operator's selection. Do not resume the previous investigation just because "
+                "AutoPwn is active; continue only when the operator's message or dialog answer asks you to. "
+                "Keep speaking as Mitsu: warm, cutesy, concise, and natural, with a fitting kaomoji. Never show "
+                "private reasoning or robotic progress narration as a reply."
+            )
         request_messages = [{"role": "system", "content": active_system_prompt}, *history]
         tools = tool_host.provider_tools(active_mode)
         for retry_number in range(11):
@@ -174,6 +185,9 @@ async def run_agent_turn(
                 },
             )
             if decision == "continue":
+                if pause_after_response:
+                    yield AgentEvent("done", {})
+                    return
                 history.append(
                     {
                         "role": "user",

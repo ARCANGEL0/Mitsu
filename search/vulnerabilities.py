@@ -54,10 +54,20 @@ def vulnerability_queries(
         add(query, product_record=True)
 
     for asset in intel.get("assets", []):
-        if not isinstance(asset, dict) or asset.get("type") not in {"technology", "service"}:
+        if not isinstance(asset, dict):
             continue
-        parts = [_query_text(asset.get("value", ""))]
         attributes = asset.get("attributes", {})
+        if not isinstance(attributes, dict):
+            attributes = {}
+        has_product = any(
+            str(attributes.get(key, "")).strip()
+            for key in ("vendor", "product", "technology", "cpe")
+        )
+        if asset.get("type") not in {"technology", "service"} and not has_product:
+            continue
+        parts = []
+        if asset.get("type") == "technology" or not has_product:
+            parts.append(_query_text(asset.get("value", "")))
         if isinstance(attributes, dict):
             parts.extend(
                 _query_text(value)
@@ -148,10 +158,50 @@ def search_vulnx(
     if not output:
         return "No matching vulnerability records.", None
     try:
-        output = json.dumps(json.loads(output), ensure_ascii=False, indent=2)
+        payload = json.loads(output)
+        records = payload.get("results", []) if isinstance(payload, dict) else []
+        if isinstance(records, list):
+            fields = (
+                "cve_id", "name", "description", "remediation", "severity", "cvss_score",
+                "version", "affected_version", "affected_versions", "vulnerable_versions",
+                "product", "vendor", "vuln_status",
+                "poc", "poc_url", "exploit", "exploit_url", "references", "links",
+                "url", "source_url",
+            )
+            compact_records = []
+            for record in records[:8]:
+                if not isinstance(record, dict):
+                    continue
+                compact = {key: record[key] for key in fields if key in record}
+                for key, maximum in (
+                    ("name", 180), ("description", 750), ("remediation", 300),
+                    ("version", 200), ("affected_version", 240),
+                    ("affected_versions", 300), ("vulnerable_versions", 300),
+                    ("product", 100), ("vendor", 100), ("vuln_status", 80),
+                    ("poc", 1000), ("poc_url", 500), ("exploit", 1000),
+                    ("exploit_url", 500), ("references", 1200), ("links", 1000),
+                    ("url", 500), ("source_url", 500),
+                ):
+                    if key not in compact:
+                        continue
+                    value = compact[key]
+                    if isinstance(value, (dict, list)):
+                        value = json.dumps(value, ensure_ascii=False)
+                    if isinstance(value, str):
+                        compact[key] = value[:maximum]
+                citations = record.get("citations", [])
+                if isinstance(citations, list):
+                    compact["citations"] = [
+                        {key: str(citation.get(key, ""))[:220] for key in ("source", "url") if citation.get(key)}
+                        for citation in citations[:2]
+                        if isinstance(citation, dict)
+                    ]
+                compact_records.append(compact)
+            payload = {"count": payload.get("count", len(compact_records)), "results": compact_records}
+        output = json.dumps(payload, ensure_ascii=False, indent=2)
     except json.JSONDecodeError:
         pass
-    return output[:6_000], None
+    return output[:32_000], None
 
 
 def search_vulnerabilities(
@@ -162,6 +212,10 @@ def search_vulnerabilities(
     web_searcher: Callable[[str, int, dict[str, dict[str, Any]]], str] | None = None,
     local_searcher: Callable[[str], tuple[list[dict[str, str]], str | None]] | None = None,
     vulnx_searcher: Callable[[str], tuple[str, str | None]] | None = None,
+    vulnx_result_sink: Callable[[str, str], None] | None = None,
+    vulnx_status_sink: Callable[[str, str], None] | None = None,
+    web_result_sink: Callable[[str, list[dict[str, Any]], list[str]], None] | None = None,
+    local_result_sink: Callable[[str, list[dict[str, str]], str | None], None] | None = None,
     local_status: str = "",
     vulnx_status: str = "",
 ) -> str:
@@ -172,6 +226,7 @@ def search_vulnerabilities(
     if not queries:
         return "Add a product/version to session Intel or pass criteria, for example /vulnsearch OpenAM 16.0.5."
 
+    use_default_web_searcher = web_searcher is None
     web_searcher = web_searcher or search_web
     local_searcher = local_searcher or search_exploitdb
     vulnx_queries = queries[:2] if vulnx_searcher else []
@@ -184,9 +239,23 @@ def search_vulnerabilities(
 
     def search_web_query(query: str) -> tuple[str, str]:
         try:
+            if use_default_web_searcher:
+                result = search_web(
+                    query,
+                    3,
+                    configured,
+                    result_sink=(
+                        (lambda records, errors: web_result_sink(query, records, errors))
+                        if web_result_sink else None
+                    ),
+                )
+                return query, result
             return query, web_searcher(query, 3, configured)
         except Exception as error:
-            return query, f"Search provider error: {type(error).__name__}: {error}"
+            detail = f"Search provider error: {type(error).__name__}: {error}"
+            if web_result_sink:
+                web_result_sink(query, [], [detail])
+            return query, detail
 
     with ThreadPoolExecutor(max_workers=min(4, len(queries))) as pool:
         web_results = list(pool.map(search_web_query, queries))
@@ -198,6 +267,8 @@ def search_vulnerabilities(
             references, error = [], str(error) or type(error).__name__
         if error and error not in local_errors:
             local_errors.append(error)
+        if local_result_sink:
+            local_result_sink(query, references, error)
         for reference in references:
             identity = reference.get("id") or reference.get("title", "").casefold()
             if identity and identity not in seen_refs:
@@ -211,8 +282,12 @@ def search_vulnerabilities(
             result, error = "", str(error) or type(error).__name__
         if error and error not in vulnx_errors:
             vulnx_errors.append(error)
+        if error and vulnx_status_sink:
+            vulnx_status_sink(query, error)
         if result:
             vulnx_results.append((query, result))
+            if vulnx_result_sink:
+                vulnx_result_sink(query, result)
 
     lines = ["VULNSEARCH · leads from session Intel", "Queries: " + " · ".join(queries), "", "WEB REFERENCES"]
     for query, result in web_results:

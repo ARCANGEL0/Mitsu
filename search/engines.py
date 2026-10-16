@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 import json
 import re
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote_plus, urlencode, urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
@@ -500,13 +500,20 @@ def _search_one(engine_id: str, settings: dict[str, Any], query: str, count: int
         return spec.name, [], type(error).__name__
 
 
-def search_web(query: str, max_results: int, configured: dict[str, dict[str, Any]]) -> str:
+def search_web(
+    query: str,
+    max_results: int,
+    configured: dict[str, dict[str, Any]],
+    result_sink: Callable[[list[dict[str, Any]], list[str]], None] | None = None,
+) -> str:
     count = max(1, min(int(max_results), 8))
     engines = [
         engine for engine in SEARCH_ENGINES
         if configured.get(engine.id) and bool(configured[engine.id].get("enabled", True))
     ]
     if not engines:
+        if result_sink:
+            result_sink([], ["No web search engines are enabled."])
         return "No web search engines are enabled yet. Open /config to configure or enable one or more search engines."
 
     with ThreadPoolExecutor(max_workers=len(engines)) as pool:
@@ -552,10 +559,15 @@ def search_web(query: str, max_results: int, configured: dict[str, dict[str, Any
     failures = [f"{name}: {error}" for name, results, error in results_by_engine if not results]
     successes = [name for name, results, _error in results_by_engine if results]
     if not merged:
+        if result_sink:
+            result_sink([], failures)
         return (
             "No configured search engine returned recognizable results. This is a provider or parser "
             "failure, not evidence that the topic has no results. Attempts: " + "; ".join(failures)
         )
+
+    if result_sink:
+        result_sink(merged[:count], failures)
 
     formatted_items = []
     for index, item in enumerate(merged[:count], 1):
