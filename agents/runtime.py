@@ -38,6 +38,7 @@ async def run_agent_turn(
     get_system_prompt: Callable[[], str] | None = None,
     image_paths: list[str] | None = None,
     pause_after_response: bool = False,
+    interrupt_requested: Callable[[], bool] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     anthropic = profile.get("protocol") == "anthropic"
     content: str | list[dict[str, Any]] = prompt
@@ -49,17 +50,21 @@ async def run_agent_turn(
     history.append({"role": "user", "content": content})
     on_history()
     while True:
+        if interrupt_requested is not None and interrupt_requested():
+            raise asyncio.CancelledError
         active_mode = get_mode() if get_mode is not None else mode
         active_system_prompt = get_system_prompt() if get_system_prompt is not None else system_prompt
         if pause_after_response:
             active_system_prompt += (
-                "\n\nThe operator interrupted an active AutoPwn run with a new message. Address that message "
-                "first and answer direct questions plainly. Briefly mention the next step you were considering "
-                "when it helps. If the operator needs to choose whether to change course, use mitsu__user_dialog "
-                "and wait for the operator's selection. Do not resume the previous investigation just because "
-                "AutoPwn is active; continue only when the operator's message or dialog answer asks you to. "
-                "Keep speaking as Mitsu: warm, cutesy, concise, and natural, with a fitting kaomoji. Never show "
-                "private reasoning or robotic progress narration as a reply."
+                "\n\nThe operator interrupted an active AutoPwn run. Their latest message takes priority over the "
+                "old plan and earlier assistant suggestions. Treat direct corrections, rejected leads, and "
+                "requests to stop or focus elsewhere as decisions: stop that branch, do not run more tools for it, "
+                "and do not reintroduce it unless the operator asks or new independent evidence makes it relevant. "
+                "Answer the latest message first; if it gives a replacement task, work only on that task. If they "
+                "ask a direct question, answer it plainly before taking any action. Acknowledge a correction once "
+                "in Mitsu's warm, concise voice, without defending the old path. Ask a dialog question only when "
+                "their choice is genuinely needed. Never expose private reasoning, draft notes, or self-directed "
+                "planning as chat."
             )
         request_messages = [{"role": "system", "content": active_system_prompt}, *history]
         tools = tool_host.provider_tools(active_mode)
@@ -206,6 +211,8 @@ async def run_agent_turn(
             return
         anthropic_results: list[dict[str, Any]] = []
         for call_index, invocation in enumerate(turn.tool_calls):
+            if interrupt_requested is not None and interrupt_requested():
+                raise asyncio.CancelledError
             yield AgentEvent(
                 "tool_started",
                 {"name": invocation.name, "arguments": invocation.arguments},
@@ -214,6 +221,8 @@ async def run_agent_turn(
             result = ""
             is_error = False
             try:
+                if interrupt_requested is not None and interrupt_requested():
+                    raise asyncio.CancelledError
                 active_mode = get_mode() if get_mode is not None else mode
                 needs_approval = (active_mode == "Guided" and tool_host.requires_guided_approval(invocation.name)) or (
                     active_mode == "Recon"
@@ -260,6 +269,10 @@ async def run_agent_turn(
                             {"role": "tool", "tool_call_id": remaining.id, "content": result}
                         )
                 on_history()
+                yield AgentEvent(
+                    "tool_finished",
+                    {"name": invocation.name, "result": result, "is_error": True},
+                )
                 raise
             if anthropic:
                 anthropic_results.append(
@@ -306,11 +319,12 @@ async def _tool_progress_update(
         plans.append(f"and {len(tool_calls) - 4} more checks")
     checks = "; ".join(plans)
     prompt = (
-        "Write a short operator-facing progress update in Mitsu's warm, playful voice before these tool calls. "
-        "Include one fitting kaomoji. Use one or two sentences, "
-        "under 55 words. Refer only to evidence already present in the conversation; if there is no result "
-        "yet, explain what the planned check can establish. Keep hypotheses clearly uncertain. Do not reveal "
-        "private chain-of-thought, claim a result in advance, mention credentials, or call tools.\n\n"
+        "Write one short visible status update in Mitsu's warm, lightly playful voice, speaking directly to the "
+        "operator in first person. Say what question this batch of checks will answer, using only evidence in "
+        "the conversation. Keep it natural and under 30 words, with one fitting kaomoji. Do not narrate private "
+        "thoughts, explain command construction, list the plan step by step, or speak about the operator in third "
+        "person. Avoid phrases like 'the user wants', 'we need to', or 'let's do'. Do not claim results in advance "
+        "or call tools.\n\n"
         f"Planned checks: {checks}"
     )
     messages = [

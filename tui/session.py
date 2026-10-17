@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 from pygments.token import Token
 from pygments.util import ClassNotFound
 from rich.console import Group
+from rich.markdown import Markdown
 from rich.style import Style
 from rich.syntax import Syntax, SyntaxTheme
 from rich.text import Text
@@ -84,6 +85,33 @@ OPENING_GREETINGS = (
     "Hewwoo! I brought tiny hacker energy and too many tabs (๑>ᴗ<๑) what’s the mission?",
     "I’m online, I’m ready, and I promise not to bite the terminal (ง'̀-'́)ง What’s our plan?",
 )
+
+
+def _terminal_math(message: str) -> str:
+    def formula_code(value: str) -> str:
+        value = value.strip().replace("`", "ˋ").replace("\n", " ")
+        return f"`{value}`"
+
+    message = re.sub(
+        r"\$\$(.+?)\$\$|\\\[(.+?)\\\]",
+        lambda match: formula_code(match.group(1) or match.group(2)),
+        message,
+        flags=re.DOTALL,
+    )
+    message = re.sub(
+        r"\\\((.+?)\\\)",
+        lambda match: formula_code(match.group(1)),
+        message,
+        flags=re.DOTALL,
+    )
+
+    def inline_formula(match: re.Match[str]) -> str:
+        value = match.group(1)
+        if re.search(r"\\[A-Za-z]+|[=^_{}<>≤≥±×÷]", value):
+            return formula_code(value)
+        return match.group(0)
+
+    return re.sub(r"(?<!\\)\$(?!\$)([^$\n]+?)(?<!\\)\$", inline_formula, message)
 
 MODE_COLORS = {
     "Recon": {"foreground": "#18140b", "background": "#e9c46a"},
@@ -458,7 +486,22 @@ class SessionTopBar(Static):
         self.ip_count = ip_count
         self.theme_id = theme_id
         self.accent = THEMES.get(theme_id, THEMES["ember"])["accent"]
+        self._uptime_started: float | None = None
+        self._uptime_timer = None
         super().__init__(self._content(), markup=False, **kwargs)
+
+    def on_mount(self) -> None:
+        self._uptime_started = time.monotonic()
+        self._uptime_timer = self.set_interval(1, self._refresh_uptime)
+        self._refresh_uptime()
+
+    def on_unmount(self) -> None:
+        if self._uptime_timer is not None:
+            self._uptime_timer.stop()
+            self._uptime_timer = None
+
+    def _refresh_uptime(self) -> None:
+        self.update(self._content())
 
     def set_context(self, mode: str, asset_count: int, finding_count: int, ip_count: int) -> None:
         self.mode = mode
@@ -483,14 +526,19 @@ class SessionTopBar(Static):
         if len(model) > 27:
             model = f"…{model[-26:]}"
         line.append(f"{provider_name} · {model}   ", style="#e7e2dc")
+        elapsed = max(0, int(time.monotonic() - self._uptime_started)) if self._uptime_started is not None else 0
+        hours, remainder = divmod(elapsed, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        line.append(
+            f"{self.asset_count} assets · {self.finding_count} findings · {self.ip_count} IPs   ",
+            style=palette["code"]["string"],
+        )
+        line.append("UPTIME: ", style=palette["ui"]["muted"])
+        line.append(f"{hours:02}:{minutes:02}:{seconds:02}   ", style=palette["code"]["string"])
         mode_colors = MODE_COLORS.get(self.mode, MODE_COLORS["Recon"])
         line.append(
             f" {self.mode} ",
             style=f"bold {mode_colors['foreground']} on {mode_colors['background']}",
-        )
-        line.append(
-            f"   {self.asset_count} assets · {self.finding_count} findings · {self.ip_count} IPs",
-            style=palette["code"]["string"],
         )
         return line
 
@@ -1467,7 +1515,7 @@ class ToolResultCard(Static):
         renderable = Text()
         renderable.append("● ", style=f"bold {color}")
         renderable.append(status, style=f"bold {color}")
-        renderable.append("   ·   press Enter to inspect output", style=muted)
+        renderable.append("   ·   Click to Inspect Output", style=muted)
         return renderable
 
     def action_toggle(self) -> None:
@@ -2145,7 +2193,6 @@ class SessionScreen(Screen):
             self.call_after_refresh(self._focus_prompt)
 
     async def _redirect_autopwn(self, prompt: str, image_paths: list[Path]) -> None:
-        await self._append_message(prompt, "user", context_text=prompt)
         should_interrupt = not self._pending_redirects
         self._pending_redirects.append((prompt, image_paths))
         self._set_activity("Following your redirect…")
@@ -2154,7 +2201,8 @@ class SessionScreen(Screen):
         if should_interrupt and self._agent_interruptible and task and not task.done():
             self._agent_interruptible = False
             task.cancel()
-        elif not self._agent_running:
+        await self._append_message(prompt, "user", context_text=prompt)
+        if not self._agent_running:
             await self._dispatch_pending_redirects()
 
     async def _dispatch_pending_redirects(self) -> None:
@@ -2835,6 +2883,7 @@ class SessionScreen(Screen):
                 get_system_prompt=self._system_prompt,
                 image_paths=[str(path) for path in image_paths],
                 pause_after_response=pause_after_response,
+                interrupt_requested=lambda: bool(self._pending_redirects),
             ):
                 if event.kind == "assistant_turn":
                     text = str(event.data.get("text", "")).strip()
@@ -4785,7 +4834,8 @@ AUTHORIZATION AND SCOPE
 
 MITSU'S VOICE
 - Keep an unmistakably warm, cutesy, playful voice, with a fitting kaomoji in ordinary replies. Be technically clear without sounding like a generic assistant or a formal report.
-- Answer the operator's latest message first. Keep internal reasoning, draft notes, and self-directed narration out of chat.
+- Speak directly as Mitsu, using first person naturally. Never narrate private reasoning or draft notes, refer to yourself as an AI or assistant, or describe the operator in third person with lines like "the user wants". Turn conclusions into a brief, natural reply or useful status update.
+- The operator's latest correction overrides older plans, suggestions, and Intel leads. If they say to stop, ignore, or focus elsewhere, drop that path immediately and don't bring it back unless they ask or new independent evidence makes it relevant.
 
 SESSION INTEL
 - {title_guidance}
@@ -4860,7 +4910,7 @@ PERSONALITY AND OUTPUT
 - Keep tool output summaries short in the conversation. The full output is available on the tool result card when expanded; quote only the relevant lines in your explanation.
 - Call the user “operator” or “boss” once in a while, not in every reply. Avoid stiff stock greetings, repeated disclaimers, and robotic policy lectures.
 - Keep progress updates short while tools run. Give the useful result first, then evidence and next steps. Be concise by default; investigation intensity {self.level}/5 ({LEVEL_NAMES[self.level]}): {LEVEL_DESCRIPTIONS[self.level]}. Expanded explanations: {'on' if self.verbose else 'off'}.
-- The chat renders plain text, not Markdown. Avoid literal `**bold**` markers. Use short headings, bullets, and code fences only when they improve readability. Never reveal private chain-of-thought; provide brief conclusions and evidence instead.
+- The terminal chat renders Markdown, including headings, lists, emphasis, links, code, and tables. Use those when they make an answer easier to scan; don't print Markdown tables as unformatted pipe text. Keep LaTeX formulas concise and readable because the terminal shows their notation rather than typesetting them. Never reveal private chain-of-thought; provide brief conclusions and evidence instead.
 - If the operator provides output or files, analyze those directly rather than restarting the workflow. Clearly label unverified leads and never claim an action succeeded without its tool result.
 
 CURRENT MODE: {self.mode}
@@ -5319,7 +5369,7 @@ CURRENT MODE: {self.mode}
             self._message_renderable(text, role), classes=self._message_class(role), markup=False
         )
 
-    def _message_renderable(self, message: str, role: str = "assistant") -> Text | Group:
+    def _message_renderable(self, message: str, role: str = "assistant") -> Markdown | Group | Text:
         if role == "user":
             message = message.removeprefix("›  ").removeprefix("› ")
             label = "↗  You"
@@ -5333,17 +5383,15 @@ CURRENT MODE: {self.mode}
         code_blocks = list(re.finditer(r"```([^\n`]*)\n?(.*?)```", message, re.DOTALL))
         heading = Text(label + "\n", style=f"bold {label_style}") if label else None
         if not code_blocks:
-            if heading is None:
-                return Text(message)
-            heading.append_text(Text(message))
-            return heading
+            body = Markdown(_terminal_math(message), hyperlinks=True)
+            return body if heading is None else Group(heading, body)
         renderables = [heading] if heading is not None else []
         previous_end = 0
         syntax_theme = MitsuSyntaxTheme(self.theme_id)
         for match in code_blocks:
             prose = message[previous_end:match.start()]
             if prose:
-                renderables.append(Text(prose))
+                renderables.append(Markdown(_terminal_math(prose), hyperlinks=True))
             language = match.group(1).strip().split(maxsplit=1)[0:1]
             code = match.group(2).rstrip("\n")
             try:
@@ -5361,5 +5409,5 @@ CURRENT MODE: {self.mode}
             previous_end = match.end()
         trailing = message[previous_end:]
         if trailing:
-            renderables.append(Text(trailing))
+            renderables.append(Markdown(_terminal_math(trailing), hyperlinks=True))
         return Group(*renderables)

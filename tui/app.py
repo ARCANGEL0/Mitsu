@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
+import os
+import signal
 import subprocess
 import sys
+from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.theme import Theme
@@ -25,6 +29,7 @@ class MitsuApp(App):
     def __init__(self) -> None:
         super().__init__()
         self._ui_started = False
+        self._shutdown_signals: list[signal.Signals] = []
         self.credentials = CredentialStore()
         self.preferences = PreferencesStore()
         self.sessions = SessionStore()
@@ -64,6 +69,16 @@ class MitsuApp(App):
 
     def on_mount(self) -> None:
         self._ui_started = True
+        loop = asyncio.get_running_loop()
+        for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"):
+            signum = getattr(signal, name, None)
+            if signum is None:
+                continue
+            try:
+                loop.add_signal_handler(signum, self.exit)
+            except (NotImplementedError, RuntimeError, ValueError):
+                continue
+            self._shutdown_signals.append(signum)
         self.set_mitsu_theme(self._configured_theme_id)
         self.sessions.path.mkdir(parents=True, exist_ok=True, mode=0o700)
         if self.credentials.ready() and self.preferences.load().get("onboarding_complete"):
@@ -72,16 +87,16 @@ class MitsuApp(App):
             self.push_screen(OnboardingScreen(self.credentials, self.preferences))
 
     async def on_unmount(self) -> None:
-        """Stop Mitsu's local SearXNG service when the application exits."""
-
         settings = self.credentials.search_engines().get("searxng", {})
-        if not settings.get("managed_local"):
-            return
-        try:
-            await asyncio.to_thread(stop_local_searxng, settings)
-        except Exception as error:
-            # Shutdown should still complete if the container runtime went away.
-            self.log.error("Could not stop local SearXNG during shutdown: %s", error)
+        if settings.get("managed_local"):
+            try:
+                await asyncio.to_thread(stop_local_searxng, settings)
+            except Exception as error:
+                self.log.error("Could not stop local SearXNG during shutdown: %s", error)
+        loop = asyncio.get_running_loop()
+        for signum in self._shutdown_signals:
+            loop.remove_signal_handler(signum)
+        self._shutdown_signals.clear()
 
     async def finish_setup(self) -> None:
         if not self.credentials.ready() or not self.preferences.load().get("onboarding_complete"):
@@ -146,9 +161,27 @@ class MitsuApp(App):
 
 
 def main() -> None:
-    app = MitsuApp()
+    lock_path = Path("/tmp") / f"mitsu-{os.getuid()}.lock"
+    lock_flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    lock_fd = os.open(lock_path, lock_flags, 0o600)
+    os.fchmod(lock_fd, 0o600)
+    lock_file = os.fdopen(lock_fd, "r+")
     try:
-        app.run(mouse=True)
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_file.close()
+        print("Mitsu is already running for this user.", file=sys.stderr)
+        return
+    lock_file.seek(0)
+    lock_file.truncate()
+    lock_file.write(f"{os.getpid()}\n")
+    lock_file.flush()
+    try:
+        app = MitsuApp()
+        try:
+            app.run(mouse=True)
+        finally:
+            if app._ui_started and sys.stdout.isatty() and app.return_code in (None, 0):
+                subprocess.run(["reset"], check=False)
     finally:
-        if app._ui_started and sys.stdout.isatty() and app.return_code in (None, 0):
-            subprocess.run(["reset"], check=False)
+        lock_file.close()

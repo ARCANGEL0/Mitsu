@@ -1544,19 +1544,22 @@ class MainMenuScreen(Screen):
              if provider.id == self.profile.get("provider_id")),
             0,
         )
-        self.right_items = [
-            {
-                "label": f"[{index}] {provider.name}",
+        self.right_items = []
+        for index, provider in enumerate(PROVIDERS, start=1):
+            saved = self.credentials.profile_for(provider.id)
+            label = f"[{index}] {provider.name}"
+            if saved and saved.get("api_key"):
+                label += " [already set]"
+            self.right_items.append({
+                "label": label,
                 "action": "select_provider",
                 "provider_id": provider.id,
                 "detail": "Press Enter to configure this provider.",
-            }
-            for index, provider in enumerate(PROVIDERS, start=1)
-        ]
+            })
         self.query_one("#menu-right-title", Static).update("CHOOSE PROVIDER")
         self._render_right_list()
         self.query_one("#menu-right-detail", Static).update(
-            "Saved API keys are reused. Choose a provider with ↑ / ↓ and Enter."
+            "Providers marked [already set] have a saved key. Choose one to enter a replacement or keep the saved key."
         )
 
     def _begin_model_selection(self) -> None:
@@ -1695,7 +1698,7 @@ class MainMenuScreen(Screen):
                 "https://your-endpoint.example/v1",
             )
             return
-        if spec.requires_api_key and not profile.get("api_key"):
+        if spec.requires_api_key and not self.api_key_prompted:
             prompt = f"Please input your API key for {spec.name}."
             self.api_key_prompted = True
             self._request_inline_input("api_key", f"{spec.name.upper()} API KEY", prompt, "Paste API key", secret=True)
@@ -1746,7 +1749,7 @@ class MainMenuScreen(Screen):
         if stage == "api_key":
             profile = self.pending_profile or {}
             if profile.get("api_key"):
-                note = "\n\nAPI key already set [!]. Leave empty to keep unchanged."
+                note = "\n\nAPI key already set. Leave empty to keep the saved key."
             elif profile.get("provider_id") == "custom":
                 note = "\n\nLeave empty if no API key is used."
             else:

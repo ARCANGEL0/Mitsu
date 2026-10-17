@@ -1814,6 +1814,11 @@ Screen {
     color: $foreground;
 }
 
+ProviderDialog {
+    align: center middle;
+    background: #000000 48%;
+}
+
 ToolApprovalDialog {
     align: center bottom;
     background: transparent;

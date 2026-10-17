@@ -149,7 +149,7 @@ class ProviderDialog(ModalScreen[dict | None]):
                 initial_value=str(profile.get("base_url", "")),
             )
             return
-        if spec.requires_api_key:
+        if spec.requires_api_key and not self.key_prompted:
             self.key_prompted = True
             detail = f"Please input your API key for {spec.name}."
             if profile.get("api_key"):
