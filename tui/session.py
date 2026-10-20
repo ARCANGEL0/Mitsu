@@ -947,8 +947,53 @@ class MCPConfigDialog(ModalScreen[bool]):
         return True
 
 
+class EditableOtherOptionMixin:
+    def __init__(self, *args: Any, other_index: int, **kwargs: Any) -> None:
+        self.other_index = other_index
+        self.other_value = ""
+        super().__init__(*args, **kwargs)
+
+    async def _on_key(self, event: Key) -> None:
+        if self.highlighted == self.other_index:
+            if event.key == "backspace":
+                self.other_value = self.other_value[:-1]
+            elif event.is_printable and event.character and event.character not in "\r\n":
+                self.other_value += event.character
+            else:
+                await super()._on_key(event)
+                return
+            self._update_other_prompt()
+            event.stop()
+            event.prevent_default()
+            return
+        await super()._on_key(event)
+
+    def on_paste(self, event: Paste) -> None:
+        if self.highlighted != self.other_index:
+            return
+        self.other_value += event.text.replace("\r", " ").replace("\n", " ")
+        self._update_other_prompt()
+        event.stop()
+        event.prevent_default()
+
+    def _update_other_prompt(self) -> None:
+        prompt = f"Other: {self.other_value}▏" if self.other_value else "Other"
+        self.replace_option_prompt_at_index(self.other_index, prompt)
+
+
+class EditableOtherOptionList(EditableOtherOptionMixin, OptionList):
+    pass
+
+
+class EditableOtherSelectionList(EditableOtherOptionMixin, SelectionList):
+    pass
+
+
 class AskUserDialog(ModalScreen[str]):
-    BINDINGS = [Binding("escape", "skip", "Skip question", priority=True)]
+    BINDINGS = [
+        Binding("escape", "skip", "Skip question", priority=True),
+        Binding("enter", "submit_answer", "Submit answer", show=False, priority=True),
+    ]
 
     def __init__(self, question: str, choices: list[str]) -> None:
         super().__init__()
@@ -962,9 +1007,18 @@ class AskUserDialog(ModalScreen[str]):
             yield Static("MITSU HAS A QUESTION", id="ask-user-title", markup=False)
             yield Static(self.question, id="ask-user-question", markup=False)
             if self.choices:
-                yield OptionList(*self.choices, id="ask-user-choices", markup=False)
-            yield Input(placeholder="Or type another answer…", id="ask-user-input")
-            yield Static("↑ / ↓ choose    Enter answer    Esc skip", id="ask-user-hint", markup=False)
+                other_index = next(
+                    index for index, choice in enumerate(self.choices) if choice.strip().casefold() == "other"
+                )
+                yield EditableOtherOptionList(
+                    *self.choices,
+                    id="ask-user-choices",
+                    markup=False,
+                    other_index=other_index,
+                )
+            else:
+                yield Input(placeholder="Type your answer…", id="ask-user-input")
+            yield Static("↑ / ↓ choose    Type on Other    Enter answer    Esc skip", id="ask-user-hint", markup=False)
 
     def on_mount(self) -> None:
         if self.choices:
@@ -975,14 +1029,30 @@ class AskUserDialog(ModalScreen[str]):
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         if event.option_list.id == "ask-user-choices" and 0 <= event.option_index < len(self.choices):
             choice = self.choices[event.option_index]
-            if choice.strip().casefold() == "other":
-                self.query_one("#ask-user-input", Input).focus()
-            else:
+            if choice.strip().casefold() != "other":
                 self.dismiss(choice)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "ask-user-input" and event.value.strip():
             self.dismiss(event.value.strip())
+
+    def action_submit_answer(self) -> None:
+        if self.choices:
+            options = self.query_one("#ask-user-choices", EditableOtherOptionList)
+            highlighted = options.highlighted
+            if highlighted is None or not 0 <= highlighted < len(self.choices):
+                return
+            choice = self.choices[highlighted]
+            if choice.strip().casefold() == "other":
+                answer = options.other_value.strip()
+                if answer:
+                    self.dismiss(answer)
+            else:
+                self.dismiss(choice)
+            return
+        answer = self.query_one("#ask-user-input", Input).value.strip()
+        if answer:
+            self.dismiss(answer)
 
     def action_skip(self) -> None:
         self.dismiss("[The operator skipped this question.]")
@@ -1001,13 +1071,11 @@ class OperatorDialog(ModalScreen[str | None]):
         for source in dialog["questions"]:
             question = {
                 "options": [],
-                "allow_other": False,
                 "required": True,
                 "placeholder": "Type your answer…",
                 **source,
             }
             if question["type"] in {"choice", "multi_choice"}:
-                question["allow_other"] = True
                 if not any(option.strip().casefold() == "other" for option in question["options"]):
                     question["options"] = [*question["options"], "Other"]
             self.questions.append(question)
@@ -1025,22 +1093,32 @@ class OperatorDialog(ModalScreen[str | None]):
                     )
                     question_type = question["type"]
                     if question_type == "choice":
-                        yield OptionList(
+                        other_index = next(
+                            index
+                            for index, option in enumerate(question["options"])
+                            if option.strip().casefold() == "other"
+                        )
+                        yield EditableOtherOptionList(
                             *question["options"],
                             id=f"operator-options-{index}",
                             classes="operator-dialog-options",
                             markup=False,
+                            other_index=other_index,
                         )
                     elif question_type == "multi_choice":
-                        yield SelectionList(
+                        other_index = next(
+                            index
+                            for index, option in enumerate(question["options"])
+                            if option.strip().casefold() == "other"
+                        )
+                        yield EditableOtherSelectionList(
                             *((option, option_index) for option_index, option in enumerate(question["options"])),
                             id=f"operator-options-{index}",
                             classes="operator-dialog-options",
+                            other_index=other_index,
                         )
-                    if question_type == "text" or question["allow_other"]:
+                    if question_type == "text":
                         placeholder = question["placeholder"]
-                        if question["allow_other"] and question_type != "text":
-                            placeholder = "Something else…"
                         yield Input(
                             placeholder=placeholder,
                             id=f"operator-input-{index}",
@@ -1059,34 +1137,13 @@ class OperatorDialog(ModalScreen[str | None]):
                 )
             yield Static("", id="operator-dialog-error", markup=False)
             yield Static(
-                "↑ / ↓ choose    Space select    Tab move    Enter continue    Esc cancel",
+                "↑ / ↓ choose    Type on Other    Space select    Tab move    Enter continue    Esc cancel",
                 id="operator-dialog-hint",
                 markup=False,
             )
 
     def on_mount(self) -> None:
         self._focus_question(0)
-
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        for index, question in enumerate(self.questions):
-            if event.option_list.id != f"operator-options-{index}" or question["type"] != "choice":
-                continue
-            selected = question["options"][event.option_index]
-            if selected.strip().casefold() == "other":
-                self.query_one(f"#operator-input-{index}", Input).focus()
-            return
-
-    def on_selection_list_selection_toggled(self, event: SelectionList.SelectionToggled) -> None:
-        for index, question in enumerate(self.questions):
-            if event.selection_list.id != f"operator-options-{index}":
-                continue
-            if (
-                event.selection_index < len(question["options"])
-                and question["options"][event.selection_index].strip().casefold() == "other"
-                and event.selection_index in event.selection_list.selected
-            ):
-                self.query_one(f"#operator-input-{index}", Input).focus()
-            return
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "operator-dialog-next":
@@ -1115,7 +1172,7 @@ class OperatorDialog(ModalScreen[str | None]):
                 if highlighted is not None and 0 <= highlighted < len(question["options"]):
                     selected = question["options"][highlighted]
                     if selected.strip().casefold() == "other":
-                        other = self.query_one(f"#operator-input-{index}", Input).value.strip()
+                        other = options.other_value.strip()
                         answer = {"other": other} if other else ""
                     else:
                         answer = selected
@@ -1132,14 +1189,14 @@ class OperatorDialog(ModalScreen[str | None]):
                         other_selected = True
                     else:
                         choices.append(option)
-                other = self.query_one(f"#operator-input-{index}", Input).value.strip()
-                if other_selected and other:
+                other = options.other_value.strip()
+                if other:
                     choices.append({"other": other})
                 elif other_selected and question["required"]:
                     self.query_one("#operator-dialog-error", Static).update(
                         f"Type your answer for: {question['prompt']}"
                     )
-                    self.query_one(f"#operator-input-{index}", Input).focus()
+                    options.focus()
                     return
                 answer = choices
             else:
@@ -1569,6 +1626,28 @@ class ToolResultCard(Static):
         self.action_toggle()
 
 
+class ChatMessage(Static):
+    def __init__(self, message: str, content: Any, classes: str) -> None:
+        self.message_text = message
+        self._last_click_at = 0.0
+        super().__init__(content, classes=classes, markup=False)
+
+    def update_message(self, message: str, content: Any) -> None:
+        self.message_text = message
+        self.update(content)
+
+    def on_click(self, event: Click) -> None:
+        if event.button != 1 or not self.message_text.strip():
+            return
+        now = time.monotonic()
+        double_click = event.chain >= 2 or now - self._last_click_at <= 0.5
+        self._last_click_at = now
+        if not double_click:
+            return
+        self.app.copy_to_clipboard(self.message_text)
+        self.app.notify("Message copied to clipboard", title="Copied")
+
+
 class ConversationSearchDialog(ModalScreen[str | None]):
     BINDINGS = [Binding("escape", "cancel", "Close search", priority=True)]
 
@@ -1803,6 +1882,7 @@ class SessionScreen(Screen):
         self._companion_notice_generation = 0
         self._companion_status = "Mitsu is Ready to Pwn!"
         self._last_activity = "Mitsu is Ready to Pwn!"
+        self._running_tool_arguments: dict[str, Any] = {}
         self.level = int(session.get("level", 3)) if str(session.get("level", 3)).isdigit() else 3
         self.level = min(5, max(1, self.level))
         self.verbose = bool(session.get("verbose", False))
@@ -1864,7 +1944,7 @@ class SessionScreen(Screen):
         self._current_request_characters = 0
         self._current_input_estimate: int | None = None
         self._stream_text = ""
-        self._stream_preview: Static | None = None
+        self._stream_preview: ChatMessage | None = None
         self._exact_usage: dict[str, int] = {}
         self._retry_state: dict[str, Any] | None = None
 
@@ -3028,12 +3108,14 @@ class SessionScreen(Screen):
                 elif event.kind == "tool_started":
                     name = str(event.data.get("name", "tool"))
                     arguments = event.data.get("arguments", {})
+                    self._running_tool_arguments[name] = arguments
                     self._set_thinking_task(tool_name=name, arguments=arguments)
-                    self._set_activity(f"Running {name}…")
+                    self._set_activity(self._tool_activity(name, arguments))
                     self._set_companion("running", "Running a tool")
                     await self._append_message(self._format_tool_call(name, arguments), "tool")
                 elif event.kind == "tool_finished":
                     name = str(event.data.get("name", "tool"))
+                    arguments = self._running_tool_arguments.pop(name, {})
                     result = str(event.data.get("result", ""))
                     failed = ToolResultCard.is_failure(result, bool(event.data.get("is_error")))
                     for message_widget in reversed(self._message_widgets):
@@ -3051,7 +3133,7 @@ class SessionScreen(Screen):
                         )
                         // 4,
                     )
-                    self._set_activity(f"{name} {'failed' if failed else 'finished'}.")
+                    self._set_activity(self._tool_activity(name, arguments, failed=failed))
                     await self._append_message(result, "tool-result", tool_failed=failed)
                     if failed:
                         self._set_companion("failed", "Tool failed", reset_after=1.5)
@@ -3376,14 +3458,17 @@ class SessionScreen(Screen):
         self._current_request_characters += len(text)
         self._set_activity("Receiving Mitsu’s response…")
         if self._stream_preview is None:
-            self._stream_preview = Static(
+            self._stream_preview = ChatMessage(
+                self._stream_text,
                 self._message_renderable(self._stream_text, "assistant"),
-                classes="assistant-message streaming-message",
-                markup=False,
+                "assistant-message streaming-message",
             )
             await conversation.mount(self._stream_preview)
         else:
-            self._stream_preview.update(self._message_renderable(self._stream_text, "assistant"))
+            self._stream_preview.update_message(
+                self._stream_text,
+                self._message_renderable(self._stream_text, "assistant"),
+            )
         if follow_output:
             self._schedule_chat_follow()
         self._animate_thinking()
@@ -5089,6 +5174,12 @@ CURRENT MODE: {self.mode}
             message_widget = ToolCallCard(message, running=True, theme_id=self.theme_id)
         elif role == "tool-result":
             message_widget = ToolResultCard(message, tool_failed)
+        elif role in {"user", "assistant"}:
+            message_widget = ChatMessage(
+                message,
+                self._message_renderable(message, role),
+                self._message_class(role),
+            )
         else:
             message_widget = Static(
                 self._message_renderable(message, role), classes=self._message_class(role), markup=False
@@ -5145,6 +5236,147 @@ CURRENT MODE: {self.mode}
     def _set_activity(self, activity: str) -> None:
         self._last_activity = activity
         self.query_one("#activity-summary", Static).update(activity)
+
+    def _tool_activity(self, name: str, arguments: object = None, failed: bool | None = None) -> str:
+        normalized_name = name.casefold()
+        tool_arguments = arguments if isinstance(arguments, dict) else {}
+        armory_tool = None
+        if normalized_name.endswith("__armory_run"):
+            tool_id = str(tool_arguments.get("tool_id", "")).replace("_", "-")
+            armory_tool = TOOL_BY_ID.get(tool_id)
+        elif normalized_name.startswith("mitsu__armory_"):
+            tool_id = normalized_name.removeprefix("mitsu__armory_").replace("_", "-")
+            armory_tool = TOOL_BY_ID.get(tool_id)
+        if armory_tool is not None:
+            if failed is None:
+                return f"Mitsu is running {armory_tool.name}…"
+            if failed:
+                return f"Mitsu hit an issue while running {armory_tool.name}."
+            return f"Mitsu finished running {armory_tool.name}."
+
+        tool_key = normalized_name.rsplit("__", 1)[-1]
+        known_activity = {
+            "bash": ("Running bash!", "Bash finished.", "Bash failed."),
+            "web_search": (
+                "Mitsu is searching the web…",
+                "Mitsu finished searching the web.",
+                "Mitsu couldn’t finish searching the web.",
+            ),
+            "system_info": (
+                "Mitsu is checking system info…",
+                "Mitsu finished checking system info.",
+                "Mitsu couldn’t check system info.",
+            ),
+            "list_files": (
+                "Mitsu is checking workspace files…",
+                "Mitsu finished checking workspace files.",
+                "Mitsu couldn’t list those workspace files.",
+            ),
+            "read_file": (
+                "Mitsu is reading a file…",
+                "Mitsu finished reading the file.",
+                "Mitsu couldn’t read the file.",
+            ),
+            "artifact_search": (
+                "Mitsu is searching through an artifact…",
+                "Mitsu finished searching the artifact.",
+                "Mitsu couldn’t search the artifact.",
+            ),
+            "vulnsearch": (
+                "Mitsu is looking up vulnerability leads…",
+                "Mitsu finished checking vulnerability leads.",
+                "Mitsu couldn’t finish checking vulnerability leads.",
+            ),
+            "ask_user": (
+                "Mitsu is waiting for your answer…",
+                "Mitsu got your answer!",
+                "Mitsu couldn’t finish asking that question.",
+            ),
+            "user_dialog": (
+                "Mitsu is asking you a question…",
+                "Mitsu got your answers!",
+                "Mitsu couldn’t finish that questionnaire.",
+            ),
+            "request_mode": (
+                "Mitsu is opening the mode picker…",
+                "Mitsu got your mode choice!",
+                "Mitsu couldn’t switch modes.",
+            ),
+            "show_cmd": (
+                "Mitsu is preparing a command handoff…",
+                "Mitsu finished the command handoff.",
+                "Mitsu couldn’t prepare the command handoff.",
+            ),
+            "armory_tool_catalog": (
+                "Mitsu is checking which tools are ready…",
+                "Mitsu finished checking the tool kit.",
+                "Mitsu couldn’t check the tool kit.",
+            ),
+            "armory_run": (
+                "Mitsu is running a security tool…",
+                "Mitsu finished running the security tool.",
+                "Mitsu couldn’t finish running the security tool.",
+            ),
+            "session_upsert": (
+                "Mitsu is naming this session…",
+                "Mitsu updated the session name.",
+                "Mitsu couldn’t update the session name.",
+            ),
+            "intel_get_map": (
+                "Mitsu is checking the Intel map…",
+                "Mitsu finished checking the Intel map.",
+                "Mitsu couldn’t read the Intel map.",
+            ),
+            "intel_upsert_asset": (
+                "Mitsu is updating target details…",
+                "Mitsu updated the target details.",
+                "Mitsu couldn’t update the target details.",
+            ),
+            "intel_upsert_observation": (
+                "Mitsu is saving an investigation note…",
+                "Mitsu saved the investigation note.",
+                "Mitsu couldn’t save the investigation note.",
+            ),
+            "intel_upsert_finding": (
+                "Mitsu is saving a finding…",
+                "Mitsu saved the finding.",
+                "Mitsu couldn’t save the finding.",
+            ),
+            "record_exploit": (
+                "Mitsu is saving a vulnerability lead…",
+                "Mitsu saved the vulnerability lead.",
+                "Mitsu couldn’t save the vulnerability lead.",
+            ),
+            "remove_exploit": (
+                "Mitsu is updating vulnerability notes…",
+                "Mitsu updated the vulnerability notes.",
+                "Mitsu couldn’t update the vulnerability notes.",
+            ),
+            "intel_upsert_account": (
+                "Mitsu is saving account details…",
+                "Mitsu saved the account details.",
+                "Mitsu couldn’t save the account details.",
+            ),
+            "intel_upsert_manhunt": (
+                "Mitsu is saving a people lead…",
+                "Mitsu saved the people lead.",
+                "Mitsu couldn’t save the people lead.",
+            ),
+        }
+        activity = known_activity.get(tool_key)
+        if activity is not None:
+            if failed is None:
+                return activity[0]
+            return activity[2] if failed else activity[1]
+
+        display_name = name.rsplit("__", 1)[-1]
+        display_name = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", display_name)
+        display_name = " ".join(display_name.replace("_", " ").replace("-", " ").split()).casefold()
+        if failed is None:
+            return f"Mitsu is using {display_name or 'a tool'}…"
+        if failed:
+            return f"Mitsu had trouble using {display_name or 'that tool'}."
+        return f"Mitsu finished using {display_name or 'the tool'}."
 
     def _update_context(self) -> None:
         assets = [item for item in self.assets if isinstance(item, dict)]
@@ -5495,6 +5727,12 @@ CURRENT MODE: {self.mode}
             return ToolCallCard(text, running=False, theme_id=self.theme_id)
         if role == "tool-result":
             return ToolResultCard(text, bool(entry.get("tool_failed")))
+        if role in {"user", "assistant"}:
+            return ChatMessage(
+                text,
+                self._message_renderable(text, role),
+                self._message_class(role),
+            )
         return Static(
             self._message_renderable(text, role), classes=self._message_class(role), markup=False
         )

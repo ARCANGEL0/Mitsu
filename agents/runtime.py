@@ -370,42 +370,42 @@ async def run_agent_turn(
                         result, is_error, _ = await tool_host.call(invocation.name, invocation.arguments)
                     if is_error and failed_key is not None:
                         failed_calls.add(failed_key)
-            except asyncio.CancelledError:
-                result = "The operator interrupted this tool call. Do not retry it unless asked."
-                is_error = True
-                if anthropic:
-                    anthropic_results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": invocation.id,
-                            "content": result,
-                            "is_error": True,
-                        }
-                    )
-                    for remaining in turn.tool_calls[call_index + 1 :]:
+                except asyncio.CancelledError:
+                    result = "The operator interrupted this tool call. Do not retry it unless asked."
+                    is_error = True
+                    if anthropic:
                         anthropic_results.append(
                             {
                                 "type": "tool_result",
-                                "tool_use_id": remaining.id,
+                                "tool_use_id": invocation.id,
                                 "content": result,
                                 "is_error": True,
                             }
                         )
-                    history.append({"role": "user", "content": anthropic_results})
-                else:
-                    history.append(
-                        {"role": "tool", "tool_call_id": invocation.id, "content": result}
-                    )
-                    for remaining in turn.tool_calls[call_index + 1 :]:
+                        for remaining in turn.tool_calls[call_index + 1 :]:
+                            anthropic_results.append(
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": remaining.id,
+                                    "content": result,
+                                    "is_error": True,
+                                }
+                            )
+                        history.append({"role": "user", "content": anthropic_results})
+                    else:
                         history.append(
-                            {"role": "tool", "tool_call_id": remaining.id, "content": result}
+                            {"role": "tool", "tool_call_id": invocation.id, "content": result}
                         )
-                on_history()
-                yield AgentEvent(
-                    "tool_finished",
-                    {"name": invocation.name, "result": result, "is_error": True},
-                )
-                raise
+                        for remaining in turn.tool_calls[call_index + 1 :]:
+                            history.append(
+                                {"role": "tool", "tool_call_id": remaining.id, "content": result}
+                            )
+                    on_history()
+                    yield AgentEvent(
+                        "tool_finished",
+                        {"name": invocation.name, "result": result, "is_error": True},
+                    )
+                    raise
             if anthropic:
                 anthropic_results.append(
                     {

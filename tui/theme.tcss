@@ -1053,6 +1053,7 @@ OptionList:focus > .option-list--option-highlighted {
 
 ProviderDialog,
 SessionRenameDialog,
+SessionWorkdirDialog,
 MCPConfigDialog,
 AskUserDialog,
 ConversationSearchDialog,
