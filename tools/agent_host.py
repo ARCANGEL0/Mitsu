@@ -44,6 +44,7 @@ from mitsu.tools.armory_mcp import (
     normalize_armory_selection,
     resolve_executable,
 )
+from mitsu.tools.artifacts import search_artifact
 from mitsu.tools.custom_mcp import CustomMCPAdapter
 
 
@@ -293,6 +294,29 @@ class AgentToolHost:
             if file_path.stat().st_size > maximum:
                 text += f"\n… file truncated at {maximum} bytes"
             return text
+
+        @self.server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
+        async def artifact_search(
+            path: str,
+            terms: list[str] | None = None,
+            context_bytes: int = 256,
+            limit: int = 60,
+            min_offset: int = 0,
+        ) -> str:
+            file_path = self._safe_artifact_path(path)
+            if not file_path.is_file():
+                raise ToolHostError(f"Not a file in the current workspace or /tmp: {path}")
+            try:
+                return await asyncio.to_thread(
+                    search_artifact,
+                    file_path,
+                    terms,
+                    context_bytes,
+                    limit,
+                    min_offset,
+                )
+            except (OSError, ValueError) as error:
+                raise ToolHostError(f"Could not inspect artifact: {error}") from error
 
         @self.server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
         async def web_search(query: str, max_results: int = 5) -> str:
@@ -898,6 +922,53 @@ class AgentToolHost:
             return "Session Intel updates are unavailable."
         return await self.update_intel(action, values)
 
+    async def _record_artifact_search(self, output: str) -> str:
+        if self.update_intel is None:
+            return ""
+        try:
+            artifact = json.loads(output)
+        except json.JSONDecodeError:
+            return ""
+        if not isinstance(artifact, dict) or not artifact.get("unique_matches"):
+            return ""
+        path = str(artifact.get("path", "artifact"))
+        digest = str(artifact.get("sha256", ""))[:16]
+        terms = artifact.get("terms", {})
+        matches = artifact.get("matches", [])
+        if not isinstance(matches, list):
+            matches = []
+        term_summary = ", ".join(
+            f"{term}: {count}" for term, count in terms.items() if count
+        ) if isinstance(terms, dict) else ""
+        offsets = [
+            str(item.get("offset"))
+            for item in matches[:8]
+            if isinstance(item, dict) and item.get("offset") is not None
+        ]
+        saved = await self._update_session_intel(
+            "upsert_observation",
+            {
+                "title": f"Artifact review: {path}",
+                "asset": "",
+                "category": "workflow",
+                "status": "active",
+                "details": (
+                    f"Searched {artifact.get('format', 'artifact')} ({artifact.get('size_bytes', 0)} bytes, "
+                    f"SHA-256 {artifact.get('sha256', 'unknown')}). Found {artifact.get('unique_matches', 0)} "
+                    f"unique printable-string matches. Match counts by term: {term_summary or 'none'}; "
+                    f"sample byte offsets: {', '.join(offsets) or 'none'}."
+                ),
+                "source": f"artifact_search: {path} ({digest})",
+                "confidence": "medium",
+                "worked": f"Found {artifact.get('unique_matches', 0)} unique matching strings in the local artifact.",
+                "failed": "",
+                "next_step": "",
+            },
+        )
+        if saved.startswith("Observation was not saved"):
+            return saved
+        return f"Saved the artifact search summary to Intel Notes. {saved}"
+
     async def _vulnerability_intel(self) -> dict[str, list[dict[str, Any]]]:
         try:
             summary = json.loads(
@@ -1402,6 +1473,10 @@ class AgentToolHost:
             marker in output.casefold()
             for marker in ("timed out after", "installation failed", "could not start")
         )
+        if original_name == "artifact_search":
+            note = await self._record_artifact_search(output)
+            if note:
+                output += f"\n\n{note}"
         if self.tool_result_handler:
             try:
                 note = await self.tool_result_handler(name, arguments, output)
@@ -1547,6 +1622,17 @@ class AgentToolHost:
         except ValueError as error:
             raise ToolHostError("File access is limited to the current workspace.") from error
         return candidate
+
+    def _safe_artifact_path(self, value: str) -> Path:
+        requested = Path(value).expanduser()
+        candidate = (requested if requested.is_absolute() else self.workspace / requested).resolve()
+        for root in (self.workspace, Path("/tmp").resolve()):
+            try:
+                candidate.relative_to(root)
+                return candidate
+            except ValueError:
+                continue
+        raise ToolHostError("Artifact access is limited to the current workspace and /tmp.")
 
     def _safe_list_path(self, value: str) -> Path:
         requested = Path(value).expanduser()
