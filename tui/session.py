@@ -1035,8 +1035,6 @@ class OperatorDialog(ModalScreen[str | None]):
             selected = question["options"][event.option_index]
             if selected.strip().casefold() == "other":
                 self.query_one(f"#operator-input-{index}", Input).focus()
-            elif len(self.questions) == 1:
-                self._submit()
             return
 
     def on_selection_list_selection_toggled(self, event: SelectionList.SelectionToggled) -> None:
@@ -1062,7 +1060,7 @@ class OperatorDialog(ModalScreen[str | None]):
             self._submit()
 
     def on_key(self, event) -> None:
-        if event.key == "enter" and isinstance(self.focused, SelectionList):
+        if event.key == "enter" and isinstance(self.focused, (OptionList, SelectionList)):
             event.stop()
             self._submit()
 
@@ -1642,22 +1640,21 @@ class ToolApprovalDialog(ModalScreen[str]):
 
 
 class ConversationScroll(VerticalScroll):
-    def __init__(
-        self,
-        on_history_scroll: Callable[[], None],
-        on_latest_message: Callable[[], None],
-        **kwargs: Any,
-    ) -> None:
+    def __init__(self, on_latest_message: Callable[[], None], **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.on_history_scroll = on_history_scroll
         self.on_latest_message = on_latest_message
+        self.history_mode = False
 
     def _on_mouse_scroll_up(self, event: MouseScrollUp) -> None:
-        if self.scroll_y > 0:
-            self.on_history_scroll()
+        if not self.history_mode:
+            event.stop()
+            return
         super()._on_mouse_scroll_up(event)
 
     def _on_mouse_scroll_down(self, event: MouseScrollDown) -> None:
+        if not self.history_mode:
+            event.stop()
+            return
         super()._on_mouse_scroll_down(event)
         if self.max_scroll_y - self.scroll_y <= 1:
             self.on_latest_message()
@@ -1665,9 +1662,9 @@ class ConversationScroll(VerticalScroll):
 
 class SessionScreen(Screen):
     BINDINGS = [
-        Binding("ctrl+b", "back_to_menu", "Back to menu"),
+        Binding("ctrl+b", "toggle_chat_history", "Chat history", priority=True),
         Binding("ctrl+f", "search_chat", "Find in chat", priority=True),
-        Binding("escape", "cancel_agent", "Stop current action", priority=True),
+        Binding("escape", "cancel_agent", "Stop / latest", priority=True),
         Binding("shift+tab", "cycle_mode", "Switch mode", priority=True),
         Binding("pageup", "scroll_chat_up", "Scroll chat up", priority=True),
         Binding("pagedown", "scroll_chat_down", "Scroll chat down", priority=True),
@@ -1765,6 +1762,7 @@ class SessionScreen(Screen):
         self._search_mode = False
         self._chat_history_mode = False
         self._following_chat = True
+        self._chat_scroll_pending = False
         self._command_panel_active = False
         self._command_panel_actions: list[str] = []
         self._command_panel_stage: str | None = None
@@ -1844,11 +1842,7 @@ class SessionScreen(Screen):
                 with Vertical(id="session-heading"):
                     yield Static(self._session_title_renderable(), id="session-title", markup=False)
                     yield Static("Mitsu is Ready to Pwn!", id="session-subtitle", markup=False)
-                with ConversationScroll(
-                    self._pause_chat_follow,
-                    self._resume_chat_follow,
-                    id="conversation",
-                ):
+                with ConversationScroll(self._resume_chat_follow, id="conversation"):
                     if self.session.get("messages"):
                         for entry in self.session["messages"]:
                             message_widget = self._message_widget(entry)
@@ -1901,7 +1895,7 @@ class SessionScreen(Screen):
                     id="prompt-input",
                     show_line_numbers=False,
                 )
-            yield Static("Enter send    Shift+Enter new line    Shift+Tab mode    Esc stop    PgUp/PgDn history    Ctrl+B sessions", id="shortcut-hint", markup=False)
+            yield Static("Enter send    Shift+Enter new line    Shift+Tab mode    Esc stop    Ctrl+B chat history", id="shortcut-hint", markup=False)
 
     def on_mount(self) -> None:
         self._update_context()
@@ -1924,19 +1918,44 @@ class SessionScreen(Screen):
         self._render_intel_tab()
 
     def _scroll_to_latest_message(self) -> None:
-        self._resume_chat_follow()
+        self._chat_scroll_pending = False
+        if self.is_mounted and self._following_chat:
+            self.query_one("#conversation", ConversationScroll).scroll_end(animate=False)
+
+    def _schedule_chat_follow(self) -> None:
+        if not self.is_mounted or not self._following_chat or self._chat_scroll_pending:
+            return
+        self._chat_scroll_pending = True
+        self.call_after_refresh(self._scroll_to_latest_message)
+
+    def _scroll_up_to_history(self) -> None:
+        if self._chat_history_mode and self.is_mounted:
+            self.query_one("#conversation", ConversationScroll).scroll_page_up(animate=False)
 
     def _pause_chat_follow(self) -> None:
         self._following_chat = False
         self._chat_history_mode = True
+        if self.is_mounted:
+            self.query_one("#conversation", ConversationScroll).history_mode = True
         self._update_chat_follow_hint()
 
     def _resume_chat_follow(self) -> None:
         self._following_chat = True
         self._chat_history_mode = False
         if self.is_mounted:
-            self.query_one("#conversation", VerticalScroll).scroll_end(animate=False)
+            self.query_one("#conversation", ConversationScroll).history_mode = False
+            self._schedule_chat_follow()
         self._update_chat_follow_hint()
+
+    def action_toggle_chat_history(self) -> None:
+        if self._search_mode:
+            self._exit_search_mode()
+            return
+        if self._chat_history_mode:
+            self._resume_chat_follow()
+            return
+        self._pause_chat_follow()
+        self.call_after_refresh(self._scroll_up_to_history)
 
     def _update_chat_follow_hint(self) -> None:
         if not self.is_mounted or self._search_mode:
@@ -1949,11 +1968,11 @@ class SessionScreen(Screen):
             label.display = True
             status.update("Esc returns to latest")
             status.display = True
-            hint.update("Chat history    Esc latest    PgDn resume    Ctrl+B sessions")
+            hint.update("Chat history    Ctrl+B or Esc latest    PgUp/PgDn scroll")
         else:
             label.display = False
             status.display = False
-            hint.update("Enter send    Shift+Enter new line    Shift+Tab mode    Esc stop    PgUp/PgDn history    Ctrl+B sessions")
+            hint.update("Enter send    Shift+Enter new line    Shift+Tab mode    Esc stop    Ctrl+B chat history")
 
     def on_click(self, _event: Click) -> None:
         self.call_after_refresh(self._focus_prompt)
@@ -2436,7 +2455,8 @@ class SessionScreen(Screen):
         panel_input.display = False
         self.query_one("#prompt-line", Horizontal).display = True
         shortcut = self.query_one("#shortcut-hint", Static)
-        shortcut.update("Enter send    Shift+Enter new line    Shift+Tab mode    Esc stop    PgUp/PgDn history    Ctrl+B sessions")
+        self._update_search_sidebar()
+        self._update_chat_follow_hint()
         shortcut.display = True
         self.call_after_refresh(self._focus_prompt)
         self._schedule_next_queued_prompt()
@@ -3291,11 +3311,8 @@ class SessionScreen(Screen):
     async def _show_stream_delta(self, text: str) -> None:
         if not text:
             return
-        conversation = self.query_one("#conversation", VerticalScroll)
-        #fix scroll thing whenever mitsu is streaming
-        follow_output = self._following_chat and conversation.max_scroll_y - conversation.scroll_y <= 1
-        if self._following_chat and not follow_output:
-            self._pause_chat_follow()
+        conversation = self.query_one("#conversation", ConversationScroll)
+        follow_output = self._following_chat
         if self._stream_preview is None:
             self._set_thinking_task(tool_name="assistant_response")
         self._stream_text += text
@@ -3312,7 +3329,7 @@ class SessionScreen(Screen):
         else:
             self._stream_preview.update(self._message_renderable(self._stream_text, "assistant"))
         if follow_output:
-            conversation.scroll_end(animate=False)
+            self._schedule_chat_follow()
         self._animate_thinking()
 
     def _agent_task_finished(self, task: asyncio.Task) -> None:
@@ -4270,11 +4287,9 @@ class SessionScreen(Screen):
         status.display = self._search_mode
         if not self._search_mode:
             status.update("")
-            shortcut.update(
-                "Enter send    Shift+Enter new line    Shift+Tab mode    Esc stop    PgUp/PgDn history    Ctrl+B sessions"
-            )
+            shortcut.update("Enter send    Shift+Enter new line    Shift+Tab mode    Esc stop    Ctrl+B chat history")
             return
-        shortcut.update("Ctrl+F next match    Esc exit search")
+        shortcut.update("Ctrl+F next match    Ctrl+B or Esc latest")
         matches = len(self._search_matches)
         if matches:
             noun = "match" if matches == 1 else "matches"
@@ -4788,13 +4803,13 @@ class SessionScreen(Screen):
             self._agent_task.cancel()
 
     def action_scroll_chat_up(self) -> None:
-        conversation = self.query_one("#conversation", VerticalScroll)
-        if conversation.max_scroll_y:
-            self._pause_chat_follow()
-        conversation.scroll_page_up(animate=False)
+        if self._chat_history_mode:
+            self.query_one("#conversation", ConversationScroll).scroll_page_up(animate=False)
 
     def action_scroll_chat_down(self) -> None:
-        conversation = self.query_one("#conversation", VerticalScroll)
+        if not self._chat_history_mode:
+            return
+        conversation = self.query_one("#conversation", ConversationScroll)
         conversation.scroll_page_down(animate=False)
         if conversation.max_scroll_y - conversation.scroll_y <= 1:
             self._resume_chat_follow()
@@ -4945,16 +4960,10 @@ CURRENT MODE: {self.mode}
             title = "Command error" if role == "error" else f"{self._active_command or 'Command'} result"
             self._show_command_panel(title, message)
             return
-        conversation = self.query_one("#conversation", VerticalScroll)
+        conversation = self.query_one("#conversation", ConversationScroll)
         if role == "user":
-            self._following_chat = True
-            self._chat_history_mode = False
-            self._update_chat_follow_hint()
-        follow_output = role == "user" or (
-            self._following_chat and conversation.max_scroll_y - conversation.scroll_y <= 1
-        )
-        if self._following_chat and not follow_output:
-            self._pause_chat_follow()
+            self._resume_chat_follow()
+        follow_output = self._following_chat
         if role == "tool":
             message_widget = ToolCallCard(message, running=True, theme_id=self.theme_id)
         elif role == "tool-result":
@@ -4965,7 +4974,7 @@ CURRENT MODE: {self.mode}
             )
         await conversation.mount(message_widget)
         if follow_output:
-            conversation.scroll_end(animate=False)
+            self._schedule_chat_follow()
         if role != "system":
             self._message_widgets.append(message_widget)
             entry = {"role": role, "text": message}

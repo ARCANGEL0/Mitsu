@@ -612,13 +612,7 @@ OptionList:focus > .option-list--option-highlighted {
     width: 100%;
     height: 1fr;
     padding: 1 2;
-    scrollbar-size-vertical: 1;
-    scrollbar-color: #315459;
-    scrollbar-color-hover: #55e5e8;
-    scrollbar-color-active: #55e5e8;
-    scrollbar-background: #0b0a0b;
-    scrollbar-background-hover: #0b0a0b;
-    scrollbar-background-active: #0b0a0b;
+    scrollbar-size-vertical: 0;
 }
 
 .system-message,
@@ -1707,8 +1701,7 @@ ShowCommandDialog {
     scrollbar-size-vertical: 1;
 }
 
-#session-right:focus,
-#conversation:focus {
+#session-right:focus {
     scrollbar-color: #55e5e8;
 }
 
@@ -2105,15 +2098,6 @@ OptionList:focus > .option-list--option-highlighted {
     border-bottom: solid $secondary;
 }
 
-#conversation {
-    scrollbar-color: $primary;
-    scrollbar-color-hover: $accent;
-    scrollbar-color-active: $accent;
-    scrollbar-background: $background;
-    scrollbar-background-hover: $background;
-    scrollbar-background-active: $background;
-}
-
 .system-message,
 .assistant-message {
     border-left: solid $secondary;
@@ -2236,8 +2220,7 @@ OptionList:focus > .option-list--option-highlighted {
     border: round $primary;
 }
 
-#session-right:focus,
-#conversation:focus {
+#session-right:focus {
     scrollbar-color: $accent;
 }
 
