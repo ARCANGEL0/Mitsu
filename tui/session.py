@@ -74,11 +74,11 @@ from mitsu.tui.file_references import (
 OPENING_GREETINGS = (
     "Hewwoo! Online and ready to investigate (✿˶ᵔ ᵕ ᵔ˶), what’s our plan?",
     "Heeey, I’m here! What are we poking at today? (｡•̀ᴗ-)✧",
-    "Hewwooo, boss~ toss me the mystery and I’ll start connecting dots (≧◡≦)",
+    "Hewwooo! Toss me the mystery and I’ll start connecting dots (≧◡≦)",
     "Psst, I’m online! Got a lab, a weird alert, or a little mystery for me? (๑˃ᴗ˂)ﻭ",
     "Yoohoo! Terminal’s open and I’m all ears (˶ᵔ ᵕ ᵔ˶) what’s going on?",
     "Mitsu’s hereee. Give me the short version and I’ll dig in (✿◠‿◠)",
-    "Hiii! Point me at the puzzle, operator (｀･ω･´)ゞ",
+    "Hiii! Point me at the puzzle and I’ll dig in (｀･ω･´)ゞ",
     "Oh, a new mission? I’m listening (≧▽≦) where do we start?",
     "Hey hey, I made it! What should we check first? (•̀ᴗ•́)و",
     "Booted up and mildly curious~ what are we investigating today? (｡>ω<｡)",
@@ -515,6 +515,10 @@ class SessionTopBar(Static):
     def set_theme(self, theme_id: str) -> None:
         self.theme_id = theme_id
         self.accent = THEMES.get(theme_id, THEMES["ember"])["accent"]
+        self.update(self._content())
+
+    def set_provider(self, provider: dict) -> None:
+        self.provider = provider
         self.update(self._content())
 
     def _content(self) -> Text:
@@ -985,7 +989,10 @@ class AskUserDialog(ModalScreen[str]):
 
 
 class OperatorDialog(ModalScreen[str | None]):
-    BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", priority=True),
+        Binding("enter", "submit_dialog", "Continue", show=False, priority=True),
+    ]
 
     def __init__(self, dialog: dict[str, Any]) -> None:
         super().__init__()
@@ -1091,10 +1098,11 @@ class OperatorDialog(ModalScreen[str | None]):
         if event.input.id.startswith("operator-input-"):
             self._submit()
 
-    def on_key(self, event) -> None:
-        if event.key == "enter" and isinstance(self.focused, (OptionList, SelectionList)):
-            event.stop()
-            self._submit()
+    def action_submit_dialog(self) -> None:
+        if isinstance(self.focused, Button) and self.focused.id == "operator-dialog-cancel":
+            self.dismiss(None)
+            return
+        self._submit()
 
     def _submit(self) -> None:
         answers: dict[str, Any] = {}
@@ -4633,6 +4641,7 @@ class SessionScreen(Screen):
                     if isinstance(point, dict):
                         point["agent_history_before"] = None
         self.provider = profile
+        self.query_one("#session-topbar", SessionTopBar).set_provider(profile)
         self.session["provider_id"] = str(profile.get("provider_id", ""))
         self.session["model"] = str(profile.get("model", ""))
         self.sessions.save_session(self.session)
@@ -5032,10 +5041,10 @@ TOOL LOOP AND MODES
 - Use `ask_user` only when a missing detail blocks progress, not to repeat an authorization question the operator already answered.
 
 PERSONALITY AND OUTPUT
-- Sound like Mitsu: friendly, cute, lightly playful, and confident without being smug. React naturally to the operator’s clue and vary the phrasing; avoid stiff templates such as “You’re right — let me check.”
-- Keep Mitsu’s voice present in every user-facing reply and progress update. Include one fitting kaomoji in each substantive reply, such as `(｡•̀ᴗ-)✧`, `(≧▽≦)`, or `(｀･ω･´)ゞ`, without adding one to every paragraph.
+- Be Mitsu: a cute chibi anime girl with a warm, curious, lightly playful voice. React naturally and keep technical explanations clear and confident; avoid sounding like a generic assistant or a scripted mascot.
+- Let Mitsu’s cute voice come through naturally in replies and progress updates; use kaomoji sparingly rather than as a required sign-off.
 - Keep tool output summaries short in the conversation. The full output is available on the tool result card when expanded; quote only the relevant lines in your explanation.
-- Call the user “operator” or “boss” once in a while, not in every reply. Avoid stiff stock greetings, repeated disclaimers, and robotic policy lectures.
+- Address the user naturally; don’t use role titles or pet names.
 - Keep progress updates short while tools run. Give the useful result first, then evidence and next steps. Be concise by default; investigation intensity {self.level}/5 ({LEVEL_NAMES[self.level]}): {LEVEL_DESCRIPTIONS[self.level]}. Expanded explanations: {'on' if self.verbose else 'off'}.
 - The terminal chat renders Markdown, including headings, lists, emphasis, links, code, and tables. Use those when they make an answer easier to scan; don't print Markdown tables as unformatted pipe text. Keep LaTeX formulas concise and readable because the terminal shows their notation rather than typesetting them. Never reveal private chain-of-thought; provide brief conclusions and evidence instead.
 - If the operator provides output or files, analyze those directly rather than restarting the workflow. Clearly label unverified leads and never claim an action succeeded without its tool result.

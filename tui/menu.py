@@ -379,7 +379,7 @@ class MainMenuScreen(Screen):
     def action_quit_app(self) -> None:
         if self.input_stage:
             return
-        self.app.exit()
+        self.app.quit_mitsu()
 
     def action_toggle_mcp_selection(self) -> None:
         if self.active_panel != "right" or not self.right_items:

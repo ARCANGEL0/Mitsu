@@ -4,10 +4,11 @@ import asyncio
 import fcntl
 import os
 import signal
-import subprocess
 import sys
 from pathlib import Path
 
+from rich.console import Console
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.theme import Theme
 from textual.widgets import Static
@@ -29,6 +30,7 @@ class MitsuApp(App):
     def __init__(self) -> None:
         super().__init__()
         self._ui_started = False
+        self._show_bye_banner = False
         self._shutdown_signals: list[signal.Signals] = []
         self.credentials = CredentialStore()
         self.preferences = PreferencesStore()
@@ -63,6 +65,13 @@ class MitsuApp(App):
             theme_id = "ember"
         self.theme = f"mitsu-{theme_id}"
         self.console.show_cursor(False)
+
+    def quit_mitsu(self) -> None:
+        self._show_bye_banner = True
+        self.exit()
+
+    async def action_quit(self) -> None:
+        self.quit_mitsu()
 
     def compose(self) -> ComposeResult:
         yield Static("Mitsu is waking up…", id="boot-screen")
@@ -181,7 +190,23 @@ def main() -> None:
         try:
             app.run(mouse=True)
         finally:
-            if app._ui_started and sys.stdout.isatty() and app.return_code in (None, 0):
-                subprocess.run(["reset"], check=False)
+            if app._ui_started and app._show_bye_banner and sys.stdout.isatty():
+                Console().print(
+                    Text(
+                        "╭━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╮\n"
+                        "┃                                          ┃\n"
+                        "┃      █   █ █████ █████  ████ █   █       ┃\n"
+                        "┃      ██ ██   █     █   █     █   █       ┃\n"
+                        "┃      █ █ █   █     █    ███  █   █       ┃\n"
+                        "┃      █   █   █     █       █ █   █       ┃\n"
+                        "┃      █   █ █████   █   ████   ███        ┃\n"
+                        "┃                                          ┃\n"
+                        "┃              SESSION SAVED!              ┃\n"
+                        "┃          BYE-BYEE, SEE YA SOON~!          ┃\n"
+                        "┃                                          ┃\n"
+                        "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯",
+                        style="bold #f08ab6",
+                    )
+                )
     finally:
         lock_file.close()
