@@ -244,6 +244,11 @@ class AgentToolHost:
         self._custom_adapter = CustomMCPAdapter(self.workspace)
         self._register_builtin_tools()
 
+    def set_workspace(self, workspace: Path) -> None:
+        self.workspace = workspace.resolve()
+        self._armory_adapter.workspace = self.workspace
+        self._custom_adapter.workspace = self.workspace
+
     def _register_builtin_tools(self) -> None:
         @self.server.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True))
         async def bash(command: str, purpose: str = "") -> str:
@@ -265,7 +270,7 @@ class AgentToolHost:
 
         @self.server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
         async def list_files(path: str = ".", limit: int = 100) -> str:
-            "List a directory under the current workspace or the operator's home directory."
+            "List a directory under the current workspace."
             directory = self._safe_list_path(path)
             if not directory.is_dir():
                 raise ToolHostError(f"Not a directory: {path}")
@@ -1546,9 +1551,8 @@ class AgentToolHost:
     def _safe_list_path(self, value: str) -> Path:
         requested = Path(value).expanduser()
         candidate = (requested if requested.is_absolute() else self.workspace / requested).resolve()
-        allowed_roots = (self.workspace, Path.home().resolve())
-        if not any(candidate == root or candidate.is_relative_to(root) for root in allowed_roots):
-            raise ToolHostError("Directory listing is limited to the current workspace or home directory.")
+        if candidate != self.workspace and not candidate.is_relative_to(self.workspace):
+            raise ToolHostError("Directory listing is limited to the current workspace.")
         return candidate
 
     @staticmethod

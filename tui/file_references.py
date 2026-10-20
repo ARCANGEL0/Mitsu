@@ -9,8 +9,8 @@ from urllib.parse import unquote, urlsplit
 _SKIPPED_DIRECTORIES = {".git", ".venv", "__pycache__", "node_modules", "venv"}
 
 
-def workspace_file_index() -> list[Path]:
-    root = Path.cwd().resolve()
+def workspace_file_index(root: Path | None = None) -> list[Path]:
+    root = (root or Path.cwd()).resolve()
     paths: list[Path] = []
     for directory, names, files in os.walk(root):
         names[:] = sorted(
@@ -24,11 +24,14 @@ def workspace_file_index() -> list[Path]:
     return paths
 
 
-def workspace_files(index: list[Path], query: str, limit: int = 8) -> list[Path]:
+def workspace_files(
+    index: list[Path], query: str, limit: int = 8, root: Path | None = None
+) -> list[Path]:
+    root = (root or Path.cwd()).resolve()
     needle = query.casefold()
     matches: list[Path] = []
     for path in index:
-        relative = path.relative_to(Path.cwd()).as_posix()
+        relative = path.relative_to(root).as_posix()
         if not needle.startswith(".") and any(part.startswith(".") for part in Path(relative).parts):
             continue
         if needle not in relative.casefold():

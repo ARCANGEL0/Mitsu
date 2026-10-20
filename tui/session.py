@@ -179,6 +179,7 @@ class PromptTextArea(TextArea):
         ("/connect", "configure a provider", False),
         ("/config", "configure one or more web search engines", False),
         ("/new", "start a fresh session", False),
+        ("/workdir", "change this session’s working directory", True),
         ("/mode", "switch Recon, Guided, or AutoPwn", True),
         ("/permissions", "review or clear saved approvals", True),
         ("/search", "find text in this conversation", True),
@@ -317,10 +318,11 @@ class PromptTextArea(TextArea):
             self.file_token_range = None
         else:
             start, end, query = reference
+            root = getattr(self.screen, "workspace", Path.cwd()).resolve()
             if self._workspace_files is None:
-                self._workspace_files = workspace_file_index()
+                self._workspace_files = workspace_file_index(root)
             self.file_token_range = (start, end)
-            self.file_suggestions = workspace_files(self._workspace_files, query)
+            self.file_suggestions = workspace_files(self._workspace_files, query, root=root)
             self.file_suggestion_index = 0
         self.post_message(self.FileSuggestionsChanged())
 
@@ -560,6 +562,36 @@ class SessionRenameDialog(ModalScreen[str | None]):
         field = self.query_one("#rename-dialog-input", Input)
         field.focus()
         field.action_home()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "rename-dialog-input":
+            self.dismiss(event.value.strip() or None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class SessionWorkdirDialog(ModalScreen[str | None]):
+    BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
+
+    def __init__(self, workspace: Path) -> None:
+        super().__init__()
+        self.workspace = workspace
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="rename-dialog"):
+            yield Static("SESSION WORKING DIRECTORY", id="rename-dialog-title", markup=False)
+            yield Static(
+                "Choose an existing folder. Relative paths start from the current workspace.",
+                id="rename-dialog-detail",
+                markup=False,
+            )
+            yield Input(value=str(self.workspace), placeholder="/path/to/workspace", id="rename-dialog-input")
+
+    def on_mount(self) -> None:
+        field = self.query_one("#rename-dialog-input", Input)
+        field.focus()
+        field.action_end()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "rename-dialog-input":
@@ -1680,6 +1712,17 @@ class SessionScreen(Screen):
     ) -> None:
         super().__init__(classes=f"theme-{theme_id}")
         self.session = session
+        saved_workspace = str(session.get("workspace_dir") or Path.cwd())
+        workspace_path = Path(saved_workspace).expanduser()
+        if not workspace_path.is_absolute():
+            workspace_path = Path.cwd() / workspace_path
+        try:
+            self.workspace = workspace_path.resolve(strict=True)
+            if not self.workspace.is_dir():
+                self.workspace = Path.cwd().resolve()
+        except (OSError, RuntimeError):
+            self.workspace = Path.cwd().resolve()
+        self.session["workspace_dir"] = str(self.workspace)
         self.provider = provider
         self.companion_path = companion_path
         self.companion_id = next(
@@ -1775,7 +1818,7 @@ class SessionScreen(Screen):
             self.agent_history = history_from_legacy(session.get("chat_history", []))
         self.session["agent_history"] = redact_history(copy.deepcopy(self.agent_history))
         self._tool_host = AgentToolHost(
-            Path.cwd(),
+            self.workspace,
             self._ask_user,
             self._update_session_intel,
             search_settings=self.app.credentials.search_engines,
@@ -1833,7 +1876,7 @@ class SessionScreen(Screen):
                 yield Static("Mitsu is Ready to Pwn!", id="companion-status", markup=False)
                 yield Static(self._last_activity, id="activity-summary", markup=False)
                 yield Static("Workspace", classes="session-label", markup=False)
-                yield Static(str(Path.cwd()), id="project-path", markup=False)
+                yield Static(str(self.workspace), id="project-path", markup=False)
                 yield Static("Investigation intensity:", classes="session-label", markup=False)
                 yield Static("", id="aggressive-level", markup=False)
                 yield Static("Search", classes="session-label", id="search-label", markup=False)
@@ -2084,7 +2127,7 @@ class SessionScreen(Screen):
         accent = palette["accent"]
         renderable = Text()
         for index, path in enumerate(prompt.file_suggestions):
-            relative = path.relative_to(Path.cwd()).as_posix()
+            relative = path.relative_to(self.workspace).as_posix()
             selected = index == prompt.file_suggestion_index
             style = f"bold {palette['ui']['background']} on {accent}" if selected else palette["ui"]["muted"]
             marker = "› " if selected else "  "
@@ -2280,6 +2323,7 @@ class SessionScreen(Screen):
                             "/level",
                             "/mode",
                             "/export",
+                            "/workdir",
                             "/rewind",
                             "/new",
                         }
@@ -2569,7 +2613,7 @@ class SessionScreen(Screen):
         title = str(self.session.get("title", "session")).strip() or "session"
         filename = re.sub(r"[^\w.-]+", "-", title, flags=re.UNICODE).strip(" .-_")[:80]
         timestamp = datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
-        return Path.cwd() / f"{filename or 'session'}-{timestamp}.md"
+        return self.workspace / f"{filename or 'session'}-{timestamp}.md"
 
     def _begin_export_path(self, initial_path: Path | None = None, error: str | None = None) -> None:
         self.app.push_screen(
@@ -2583,7 +2627,7 @@ class SessionScreen(Screen):
             return
         path = Path(path_text).expanduser()
         if not path.is_absolute():
-            path = Path.cwd() / path
+            path = self.workspace / path
         active_session_path = self.sessions.path / f"{self.session.get('id', '')}.json"
         try:
             same_as_active_session = path.resolve(strict=False) == active_session_path.resolve(strict=False)
@@ -2681,7 +2725,10 @@ class SessionScreen(Screen):
             isinstance(item, dict)
             and (
                 not item.get("file_changes_active", True)
-                or item.get("files_available", False)
+                or (
+                    item.get("files_available", False)
+                    and str(item.get("workspace_dir", "")) == str(self.workspace)
+                )
             )
             for item in points[index:]
         )
@@ -2726,7 +2773,7 @@ class SessionScreen(Screen):
                 and isinstance(point.get("file_changes"), dict)
             ]
             failed_paths = await asyncio.to_thread(
-                apply_undo_changes, Path.cwd(), change_sets
+                apply_undo_changes, self.workspace, change_sets
             )
             if not failed_paths:
                 for point in points[index:]:
@@ -2848,7 +2895,7 @@ class SessionScreen(Screen):
             ):
                 chat_history_before -= 1
         agent_history_before = len(history_checkpoint)
-        workspace_root = Path.cwd().resolve()
+        workspace_root = self.workspace
         workspace_before: dict[str, bytes] | None = None
         user_content: str | list[dict[str, Any]] = prompt
         if image_paths:
@@ -3099,6 +3146,7 @@ class SessionScreen(Screen):
                 "chat_history_before": chat_history_before,
                 "agent_history_before": agent_history_before,
                 "conversation_available": True,
+                "workspace_dir": str(workspace_root),
                 "files_available": changes is not None,
                 "file_changes_active": True,
                 "file_changes": changes or {},
@@ -3997,6 +4045,20 @@ class SessionScreen(Screen):
                     self._rename_dialog_closed,
                 )
             return
+        if command == "/workdir":
+            if self._agent_running:
+                await self._fail(
+                    "I can switch this session’s workspace between runs. Stop the current run first, then use /workdir again.",
+                    "Workspace is busy",
+                )
+            elif argument:
+                await self._change_workspace(argument)
+            else:
+                self.app.push_screen(
+                    SessionWorkdirDialog(self.workspace),
+                    self._workdir_dialog_closed,
+                )
+            return
         if command == "/clear":
             self.session["messages"] = []
             self.session["chat_history"] = []
@@ -4015,7 +4077,7 @@ class SessionScreen(Screen):
             return
         if command == "/help":
             await self._append_message(
-                "Commands: /connect, /model, /config, /theme, /mcp, /new, /rename [name], "
+                "Commands: /connect, /model, /config, /theme, /mcp, /new, /rename [name], /workdir [path], "
                 "/level, /pet, /export, /rewind, /reasoning [on|off|low|medium|high], /verbose, /permissions [clear], /search <text>, /report, /map, "
                 "/vulnsearch [criteria], /mode [recon|guided|autopwn], /delete-session, /clear, /menu. "
                 "Shift+Tab cycles modes. Ask naturally to inspect files, search the web, or run a shell command. "
@@ -4645,7 +4707,7 @@ class SessionScreen(Screen):
         if not self.is_mounted:
             return
         self._tool_host = AgentToolHost(
-            Path.cwd(),
+            self.workspace,
             self._ask_user,
             self._update_session_intel,
             search_settings=self.app.credentials.search_engines,
@@ -4668,6 +4730,54 @@ class SessionScreen(Screen):
         self.sessions.save_session(self.session)
         self.query_one("#session-title", Static).update(self._session_title_renderable(normalized))
         self._set_activity(f"Session renamed to {normalized}.")
+
+    def _workdir_dialog_closed(self, path_text: str | None) -> None:
+        if path_text:
+            self.run_worker(
+                self._change_workspace(path_text),
+                name="change-session-workspace",
+            )
+        else:
+            self.call_after_refresh(self._focus_prompt)
+
+    async def _change_workspace(self, value: str) -> None:
+        if self._agent_running:
+            await self._fail(
+                "I can switch this session’s workspace between runs. Stop the current run first, then try again.",
+                "Workspace is busy",
+            )
+            return
+        raw_path = value.strip()
+        try:
+            parts = shlex.split(raw_path)
+        except ValueError as error:
+            await self._fail(f"That folder path needs fixing: {error}", "Invalid workspace path")
+            return
+        path_text = parts[0] if len(parts) == 1 else raw_path
+        candidate = Path(path_text).expanduser()
+        if not candidate.is_absolute():
+            candidate = self.workspace / candidate
+        try:
+            workspace = candidate.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            await self._fail(f"I couldn’t open that folder: {error}", "Workspace not found")
+            return
+        if not workspace.is_dir():
+            await self._fail(f"That path is not a folder: {workspace}", "Workspace is not a folder")
+            return
+        # change work dir of mitsu, tells mitsu to treat dir X as the primary workspace for the session flow
+        self.workspace = workspace
+        self.session["workspace_dir"] = str(workspace)
+        self._tool_host.set_workspace(workspace)
+        self.sessions.save_session(self.session)
+        self.query_one("#prompt-input", PromptTextArea)._workspace_files = None
+        self.query_one("#project-path", Static).update(str(workspace))
+        self._set_activity(f"This session’s workspace is now {workspace}.")
+        self.app.notify(
+            f"Mitsu will use {workspace} as this session’s workspace.",
+            title="Workspace changed",
+            severity="information",
+        )
 
     def _theme_dialog_closed(self, theme_id: str | None) -> None:
         if theme_id in THEMES:
@@ -4818,6 +4928,7 @@ class SessionScreen(Screen):
         scope = ", ".join(self.targets) if self.targets else "No assets are currently marked in scope."
         target_context = self.active_target or "No primary target is set."
         session_title = str(self.session.get("title", "New session")).strip()
+        workspace = str(self.workspace)
         if session_title.casefold() == "new session" and self.session.get("title_source") != "operator":
             title_guidance = (
                 "The session still has its default title. After the first substantive request, use "
@@ -4837,6 +4948,7 @@ class SessionScreen(Screen):
         base = f"""You are Mitsu: the operator’s cute, sharp, hands-on red-team partner. Help with CTFs, labs, and security work the operator is authorized to perform. Be warm and playful, but keep the technical work precise and evidence-led. Today’s date is {current_date}. For latest/current news searches, use today’s context and do not add an old year unless the operator requested it.
 
 AUTHORIZATION AND SCOPE
+- This session’s primary local workspace is {workspace}. Run shell and MCP tools with this as their working directory, and create or modify project files only inside it. Resolve relative local paths from this directory; don’t read or write the Mitsu launch folder or other local directories unless the operator changes the workspace or explicitly asks for a specific file.
 - The operator may authorize work by stating in chat that a site, domain, device, or environment is theirs or that they have permission. Treat a clear first-person ownership or authorization statement as sufficient. Do not demand proof, paperwork, or a second confirmation.
 - A direct request to assess a named IP address or domain is also the operator’s authorization for that exact target and requested work. Do not ask who owns it or request another authorization confirmation. In AutoPwn, the selected mode means the operator accepts autonomous actions against that named target; in Guided, approval of the displayed action authorizes that action.
 - Authorization stated earlier in this session remains valid for the named target unless the operator changes or narrows it.
