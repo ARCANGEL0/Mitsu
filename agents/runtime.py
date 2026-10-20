@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+import shlex
 import threading
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Awaitable, Callable
@@ -23,6 +25,54 @@ HistoryHandler = Callable[[], None]
 RequestTurn = Callable[
     [dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]], Awaitable[ProviderTurn]
 ]
+MAX_TOOL_CALLS_PER_TURN = 48
+MAX_BINARY_GREP_SEARCHES_PER_ARTIFACT = 3
+
+
+def _tool_name(name: str) -> str:
+    return name.rsplit("__", 1)[-1]
+
+
+def _failed_call_key(name: str, arguments: Any) -> str | None:
+    local_name = _tool_name(name)
+    if local_name not in {"bash", "armory_run"} or not isinstance(arguments, dict):
+        return None
+    if local_name == "bash":
+        command = str(arguments.get("command", "")).strip()
+        return json.dumps([local_name, command], ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(
+        [local_name, arguments.get("tool_id"), arguments.get("argv")],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _binary_grep_key(name: str, arguments: Any) -> str | None:
+    if _tool_name(name) != "bash" or not isinstance(arguments, dict):
+        return None
+    command = str(arguments.get("command", ""))
+    if not re.search(r"\bstrings\b", command) or not re.search(r"\b(?:grep|rg)\b", command):
+        return None
+    match = re.search(r"\bstrings\b([^|;&]+)", command)
+    if match is None:
+        return None
+    try:
+        tokens = shlex.split(match.group(1))
+    except ValueError:
+        return None
+    skip_value = False
+    for token in tokens:
+        if skip_value:
+            skip_value = False
+            continue
+        if token in {"-n", "--bytes"}:
+            skip_value = True
+        elif token.startswith("-"):
+            continue
+        else:
+            return f"strings-grep:{token}"
+    return None
 
 
 def _request_agent_turn_background(
@@ -85,11 +135,15 @@ async def run_agent_turn(
         ]
     history.append({"role": "user", "content": content})
     on_history()
+    tool_calls_this_turn = 0
+    failed_calls: set[str] = set()
+    binary_grep_counts: dict[str, int] = {}
     while True:
         if interrupt_requested is not None and interrupt_requested():
             raise asyncio.CancelledError
         active_mode = get_mode() if get_mode is not None else mode
         active_system_prompt = get_system_prompt() if get_system_prompt is not None else system_prompt
+        action_budget_exhausted = tool_calls_this_turn >= MAX_TOOL_CALLS_PER_TURN
         if pause_after_response:
             active_system_prompt += (
                 "\n\nThe operator interrupted an active AutoPwn run. Their latest message takes priority over the "
@@ -103,7 +157,7 @@ async def run_agent_turn(
                 "planning as chat."
             )
         request_messages = [{"role": "system", "content": active_system_prompt}, *history]
-        tools = tool_host.provider_tools(active_mode)
+        tools = [] if action_budget_exhausted else tool_host.provider_tools(active_mode)
         for retry_number in range(11):
             try:
                 if request_turn:
@@ -161,6 +215,27 @@ async def run_agent_turn(
             yield AgentEvent("usage", {"usage": turn.usage})
         history.append(turn.assistant_message)
         on_history()
+        if action_budget_exhausted:
+            if turn.tool_calls:
+                yield AgentEvent(
+                    "assistant_turn",
+                    {
+                        "text": turn.text.strip() or "I’ve reached the investigation limit for this message, so I’m pausing here.",
+                        "tool_calls": 0,
+                        "response_info": turn.response_info,
+                    },
+                )
+            else:
+                yield AgentEvent(
+                    "assistant_turn",
+                    {
+                        "text": turn.text,
+                        "tool_calls": 0,
+                        "response_info": turn.response_info,
+                    },
+                )
+            yield AgentEvent("done", {})
+            return
         if turn.tool_calls:
             yield AgentEvent(
                 "assistant_turn",
@@ -253,24 +328,48 @@ async def run_agent_turn(
             is_read_only = tool_host.is_read_only(invocation.name)
             result = ""
             is_error = False
-            try:
-                if interrupt_requested is not None and interrupt_requested():
-                    raise asyncio.CancelledError
-                active_mode = get_mode() if get_mode is not None else mode
-                needs_approval = (active_mode == "Guided" and tool_host.requires_guided_approval(invocation.name)) or (
-                    active_mode == "Recon"
-                    and not tool_host.recon_action_is_low_impact(
-                        invocation.name, invocation.arguments
-                    )
+            tool_calls_this_turn += 1
+            failed_key = _failed_call_key(invocation.name, invocation.arguments)
+            binary_grep_key = _binary_grep_key(invocation.name, invocation.arguments)
+            if tool_calls_this_turn > MAX_TOOL_CALLS_PER_TURN:
+                result = f"Tool call not run: per-message action limit reached ({MAX_TOOL_CALLS_PER_TURN})."
+                is_error = True
+            elif failed_key is not None and failed_key in failed_calls:
+                result = "Tool call not run: this identical command already failed during this message."
+                is_error = True
+            elif (
+                binary_grep_key is not None
+                and binary_grep_counts.get(binary_grep_key, 0) >= MAX_BINARY_GREP_SEARCHES_PER_ARTIFACT
+            ):
+                result = (
+                    "Tool call not run: printable-string grep limit reached for "
+                    f"{binary_grep_key.removeprefix('strings-grep:')} "
+                    f"({MAX_BINARY_GREP_SEARCHES_PER_ARTIFACT} searches this message)."
                 )
-                if needs_approval:
-                    allowed = await approve(invocation.name, invocation.arguments if isinstance(invocation.arguments, dict) else {})
-                    if not allowed:
-                        result, is_error = "The operator declined this action. Choose a lower-impact step or ask what to do differently.", True
+                is_error = True
+            else:
+                if binary_grep_key is not None:
+                    binary_grep_counts[binary_grep_key] = binary_grep_counts.get(binary_grep_key, 0) + 1
+                try:
+                    if interrupt_requested is not None and interrupt_requested():
+                        raise asyncio.CancelledError
+                    active_mode = get_mode() if get_mode is not None else mode
+                    needs_approval = (active_mode == "Guided" and tool_host.requires_guided_approval(invocation.name)) or (
+                        active_mode == "Recon"
+                        and not tool_host.recon_action_is_low_impact(
+                            invocation.name, invocation.arguments
+                        )
+                    )
+                    if needs_approval:
+                        allowed = await approve(invocation.name, invocation.arguments if isinstance(invocation.arguments, dict) else {})
+                        if not allowed:
+                            result, is_error = "The operator declined this action. Choose a lower-impact step or ask what to do differently.", True
+                        else:
+                            result, is_error, _ = await tool_host.call(invocation.name, invocation.arguments)
                     else:
                         result, is_error, _ = await tool_host.call(invocation.name, invocation.arguments)
-                else:
-                    result, is_error, _ = await tool_host.call(invocation.name, invocation.arguments)
+                    if is_error and failed_key is not None:
+                        failed_calls.add(failed_key)
             except asyncio.CancelledError:
                 result = "The operator interrupted this tool call. Do not retry it unless asked."
                 is_error = True
