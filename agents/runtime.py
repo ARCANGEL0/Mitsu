@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Awaitable, Callable
 
@@ -22,6 +23,41 @@ HistoryHandler = Callable[[], None]
 RequestTurn = Callable[
     [dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]], Awaitable[ProviderTurn]
 ]
+
+
+def _request_agent_turn_background(
+    profile: dict[str, Any],
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    on_event: Callable[[str, dict[str, Any]], None] | None = None,
+    cancellation: RequestCancellation | None = None,
+) -> asyncio.Future[ProviderTurn]:
+    loop = asyncio.get_running_loop()
+    result: asyncio.Future[ProviderTurn] = loop.create_future()
+
+    def finish(turn: ProviderTurn | None, error: Exception | None) -> None:
+        if result.done():
+            return
+        if error is not None:
+            result.set_exception(error)
+        elif turn is not None:
+            result.set_result(turn)
+
+    def run() -> None:
+        try:
+            turn = request_agent_turn(profile, messages, tools, on_event, cancellation)
+        except Exception as error:
+            turn = None
+            failure = error
+        else:
+            failure = None
+        try:
+            loop.call_soon_threadsafe(finish, turn, failure)
+        except RuntimeError:
+            pass
+
+    threading.Thread(target=run, name="mitsu-provider-request", daemon=True).start()
+    return result
 
 
 async def run_agent_turn(
@@ -83,15 +119,12 @@ async def run_agent_turn(
                         except RuntimeError:
                             pass
 
-                    request_task = asyncio.create_task(
-                        asyncio.to_thread(
-                            request_agent_turn,
-                            profile,
-                            request_messages,
-                            tools,
-                            report_progress,
-                            cancellation,
-                        )
+                    request_task = _request_agent_turn_background(
+                        profile,
+                        request_messages,
+                        tools,
+                        report_progress,
+                        cancellation,
                     )
                     try:
                         while not request_task.done():
@@ -336,7 +369,7 @@ async def _tool_progress_update(
         if request_turn is not None:
             turn = await request_turn(profile, messages, [])
         else:
-            turn = await asyncio.to_thread(request_agent_turn, profile, messages, [])
+            turn = await _request_agent_turn_background(profile, messages, [])
         text = turn.text.strip()
         if text:
             return text[:1200]
@@ -384,15 +417,11 @@ async def _has_unfinished_work(
             turn = await request_turn(profile, messages, [])
         else:
             cancellation = RequestCancellation()
-            request = asyncio.create_task(
-                asyncio.to_thread(
-                    request_agent_turn,
-                    profile,
-                    messages,
-                    [],
-                    None,
-                    cancellation,
-                )
+            request = _request_agent_turn_background(
+                profile,
+                messages,
+                [],
+                cancellation=cancellation,
             )
             try:
                 turn = await request
