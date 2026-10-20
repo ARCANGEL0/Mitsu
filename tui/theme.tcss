@@ -1054,6 +1054,7 @@ OptionList:focus > .option-list--option-highlighted {
 ProviderDialog,
 SessionRenameDialog,
 SessionWorkdirDialog,
+MessageActionDialog,
 MCPConfigDialog,
 AskUserDialog,
 ConversationSearchDialog,
@@ -1090,6 +1091,7 @@ DeleteSessionDialog {
 #mcp-dialog,
 #ask-user-dialog,
 #operator-dialog,
+#message-action-dialog,
 #sudo-password-dialog,
 #tool-approval-dialog,
 #conversation-search-dialog,
@@ -1230,7 +1232,8 @@ VulnSearchDialog {
 
 #provider-dialog-title,
 #general-config-title,
-#rename-dialog-title {
+#rename-dialog-title,
+#message-action-title {
     height: 1;
     margin-bottom: 1;
     color: #55e5e8;
@@ -1383,6 +1386,29 @@ ShowCommandDialog {
     margin-bottom: 1;
     border: round #403633;
     background: #111115;
+}
+
+#message-action-dialog {
+    width: 34;
+    max-width: 80%;
+    height: auto;
+    padding: 1 2;
+    border: round $primary;
+    background: $surface;
+}
+
+#message-action-options {
+    width: 100%;
+    height: auto;
+    max-height: 4;
+    background: $surface;
+}
+
+#message-action-options > .option-list--option-highlighted,
+#message-action-options:focus > .option-list--option-highlighted {
+    color: $primary;
+    background: transparent;
+    text-style: bold underline;
 }
 
 #ask-user-choices > .option-list--option-highlighted,

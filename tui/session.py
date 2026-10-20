@@ -1626,7 +1626,34 @@ class ToolResultCard(Static):
         self.action_toggle()
 
 
+class MessageActionDialog(ModalScreen[str | None]):
+    BINDINGS = [Binding("escape", "cancel", "Close", priority=True)]
+
+    def __init__(self, can_rewind: bool) -> None:
+        super().__init__()
+        self.actions = ["Copy", "Rewind"] if can_rewind else ["Copy"]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="message-action-dialog"):
+            yield Static("MESSAGE ACTION", id="message-action-title", markup=False)
+            yield OptionList(*self.actions, id="message-action-options", markup=False)
+
+    def on_mount(self) -> None:
+        self.query_one("#message-action-options", OptionList).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id != "message-action-options":
+            return
+        if 0 <= event.option_index < len(self.actions):
+            self.dismiss(self.actions[event.option_index].casefold())
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class ChatMessage(Static):
+    allow_select = False
+
     def __init__(self, message: str, content: Any, classes: str) -> None:
         self.message_text = message
         self._last_click_at = 0.0
@@ -1644,8 +1671,10 @@ class ChatMessage(Static):
         self._last_click_at = now
         if not double_click:
             return
-        self.app.copy_to_clipboard(self.message_text)
-        self.app.notify("Message copied to clipboard", title="Copied")
+        screen = self.screen
+        if hasattr(screen, "_show_message_actions"):
+            event.stop()
+            screen._show_message_actions(self)
 
 
 class ConversationSearchDialog(ModalScreen[str | None]):
@@ -3233,8 +3262,11 @@ class SessionScreen(Screen):
             {
                 "prompt": prompt,
                 "messages_before": messages_before,
+                "messages_after": len(self.session.get("messages", [])),
                 "chat_history_before": chat_history_before,
+                "chat_history_after": len(self.session.get("chat_history", [])),
                 "agent_history_before": agent_history_before,
+                "agent_history_after": len(self.agent_history),
                 "conversation_available": True,
                 "workspace_dir": str(workspace_root),
                 "files_available": changes is not None,
@@ -4737,8 +4769,11 @@ class SessionScreen(Screen):
         self.call_after_refresh(self._focus_prompt)
 
     def _history_for_new_protocol(self) -> list[dict]:
+        return self._history_for_messages(self.session.get("messages", []))
+
+    def _history_for_messages(self, messages: list) -> list[dict]:
         entries = []
-        for message in self.session.get("messages", []):
+        for message in messages:
             if not isinstance(message, dict):
                 continue
             role = message.get("role")
@@ -5192,12 +5227,237 @@ CURRENT MODE: {self.mode}
             entry = {"role": role, "text": message}
             if role == "tool-result":
                 entry["tool_failed"] = tool_failed
-            self.session.setdefault("messages", []).append(entry)
+            chat_history = self.session.setdefault("chat_history", [])
             if context_text is not None and role in {"user", "assistant"}:
-                self.session.setdefault("chat_history", []).append(
+                chat_history.append(
                     {"role": role, "content": context_text}
                 )
+            if role in {"user", "assistant"}:
+                entry["chat_history_count"] = len(chat_history)
+                entry["agent_history_count"] = len(self.agent_history) + (
+                    1 if role == "user" else 0
+                )
+            self.session.setdefault("messages", []).append(entry)
             self.sessions.save_session(self.session)
+
+    def _show_message_actions(self, message_widget: ChatMessage) -> None:
+        messages = self.session.get("messages", [])
+        try:
+            message_index = self._message_widgets.index(message_widget)
+        except ValueError:
+            message_index = None
+        if not isinstance(messages, list) or message_index is None or message_index >= len(messages):
+            message_index = None
+        can_rewind = (
+            message_index is not None
+            and not self._agent_running
+            and not self._command_running
+            and self._rewind_code_available(message_index)
+        )
+        self.app.push_screen(
+            MessageActionDialog(can_rewind),
+            lambda action: self._message_action_selected(
+                message_index,
+                message_widget.message_text,
+                action,
+            ),
+        )
+
+    def _message_action_selected(
+        self,
+        message_index: int | None,
+        message_text: str,
+        action: str | None,
+    ) -> None:
+        if action == "copy":
+            self.app.copy_to_clipboard(message_text)
+            self.app.notify("Message copied to clipboard", title="Copied")
+        elif action == "rewind" and message_index is not None:
+            self.run_worker(
+                self._rewind_to_message(message_index),
+                name=f"rewind-message-{message_index}",
+            )
+
+    def _rewind_point_for_message(self, message_index: int) -> int | None:
+        points = self.session.get("rewind_points", [])
+        messages = self.session.get("messages", [])
+        if not isinstance(points, list) or not isinstance(messages, list):
+            return None
+        selected_point = None
+        for point_index, point in enumerate(points):
+            if not isinstance(point, dict) or not point.get("conversation_available", True):
+                continue
+            start = point.get("messages_before")
+            if not isinstance(start, int) or isinstance(start, bool) or start > message_index:
+                continue
+            end = self._rewind_point_end(point_index, points, messages)
+            if start <= message_index < end:
+                selected_point = point_index
+        return selected_point
+
+    @staticmethod
+    def _rewind_point_end(point_index: int, points: list, messages: list) -> int:
+        point = points[point_index]
+        end = point.get("messages_after") if isinstance(point, dict) else None
+        if isinstance(end, int) and not isinstance(end, bool):
+            return end
+        start = point.get("messages_before", -1) if isinstance(point, dict) else -1
+        return next(
+            (
+                later.get("messages_before")
+                for later in points[point_index + 1 :]
+                if isinstance(later, dict)
+                and isinstance(later.get("messages_before"), int)
+                and not isinstance(later.get("messages_before"), bool)
+                and later["messages_before"] > start
+            ),
+            len(messages),
+        )
+
+    def _rewind_code_available(self, message_index: int) -> bool:
+        messages = self.session.get("messages", [])
+        points = self.session.get("rewind_points", [])
+        if (
+            not isinstance(messages, list)
+            or not isinstance(points, list)
+            or not 0 <= message_index < len(messages)
+            or not isinstance(messages[message_index], dict)
+        ):
+            return False
+        role = str(messages[message_index].get("role", ""))
+        point_index = self._rewind_point_for_message(message_index)
+        if role not in {"user", "assistant"} or point_index is None:
+            return False
+        if role == "assistant" and message_index != self._rewind_point_end(
+            point_index, points, messages
+        ) - 1:
+            return False
+        restore_from = point_index if role == "user" else point_index + 1
+        return all(
+            not item.get("file_changes_active", True)
+            or (
+                item.get("files_available", False)
+                and str(item.get("workspace_dir", "")) == str(self.workspace)
+            )
+            for item in points[restore_from:]
+            if isinstance(item, dict)
+        )
+
+    async def _rewind_to_message(self, message_index: int) -> None:
+        messages = self.session.get("messages", [])
+        points = self.session.get("rewind_points", [])
+        if self._agent_running or self._command_running:
+            self.app.notify("Stop the current action before rewinding.", title="Rewind paused")
+            return
+        if (
+            not isinstance(messages, list)
+            or not isinstance(points, list)
+            or not 0 <= message_index < len(messages)
+            or not isinstance(messages[message_index], dict)
+        ):
+            self._show_command_panel(
+                "Rewind unavailable",
+                "Mitsu couldn’t find that message anymore.",
+                [("Close", "close")],
+            )
+            return
+        target = messages[message_index]
+        role = str(target.get("role", ""))
+        point_index = self._rewind_point_for_message(message_index)
+        if role not in {"user", "assistant"} or point_index is None:
+            self._show_command_panel(
+                "Rewind unavailable",
+                "There isn’t a saved conversation and workspace point for this message yet.",
+                [("Close", "close")],
+            )
+            return
+
+        point = points[point_index]
+        restore_from = point_index if role == "user" else point_index + 1
+        undo_points = [item for item in points[restore_from:] if isinstance(item, dict)]
+        code_available = self._rewind_code_available(message_index)
+        if not code_available:
+            self._show_command_panel(
+                "Rewind unavailable",
+                "A complete workspace snapshot isn’t available for the changes after this message.",
+                [("Close", "close")],
+            )
+            return
+
+        self._show_command_panel("Rewinding", "Restoring this message and its workspace point…", [])
+        change_sets = [
+            item.get("file_changes", {})
+            for item in reversed(undo_points)
+            if item.get("file_changes_active", True)
+            and isinstance(item.get("file_changes"), dict)
+        ]
+        failed_paths = await asyncio.to_thread(apply_undo_changes, self.workspace, change_sets)
+        if failed_paths:
+            self._show_command_panel(
+                "Rewind incomplete",
+                f"Some workspace files could not be restored: {', '.join(failed_paths[:8])}",
+                [("Close", "close")],
+            )
+            return
+
+        chat_history = self.session.get("chat_history", [])
+        history_count = target.get("agent_history_count")
+        chat_count = target.get("chat_history_count")
+        if not isinstance(chat_count, int) or isinstance(chat_count, bool):
+            chat_count = sum(
+                isinstance(item, dict) and item.get("role") in {"user", "assistant"}
+                for item in messages[: message_index + 1]
+            )
+        if not isinstance(history_count, int) or isinstance(history_count, bool):
+            if role == "user":
+                history_before = point.get("agent_history_before", 0)
+                history_count = (
+                    max(0, history_before + 1)
+                    if isinstance(history_before, int) and not isinstance(history_before, bool)
+                    else None
+                )
+            else:
+                history_count = point.get("agent_history_after")
+                if not isinstance(history_count, int) or isinstance(history_count, bool):
+                    history_count = next(
+                        (
+                            later.get("agent_history_before")
+                            for later in points[point_index + 1 :]
+                            if isinstance(later, dict)
+                            and isinstance(later.get("agent_history_before"), int)
+                            and not isinstance(later.get("agent_history_before"), bool)
+                        ),
+                        None,
+                    )
+
+        if not isinstance(history_count, int) or isinstance(history_count, bool):
+            self.agent_history = self._history_for_messages(messages[: message_index + 1])
+            history_count = len(self.agent_history)
+
+        self.session["messages"] = messages[: message_index + 1]
+        if isinstance(chat_history, list):
+            self.session["chat_history"] = chat_history[: max(0, chat_count)]
+        self.agent_history[:] = self.agent_history[: max(0, history_count)]
+        self.session["agent_history"] = redact_history(copy.deepcopy(self.agent_history))
+        for item in undo_points:
+            if item.get("file_changes_active", True):
+                item["file_changes"] = {}
+                item["files_available"] = False
+                item["file_changes_active"] = False
+        for later in points[point_index + 1 :]:
+            if isinstance(later, dict):
+                later["conversation_available"] = False
+        point["messages_after"] = message_index + 1
+        point["chat_history_after"] = max(0, chat_count)
+        point["agent_history_after"] = max(0, history_count)
+        self.session["rewind_points"] = points
+        self.sessions.save_session(self.session)
+        await self._rebuild_conversation()
+        self._show_command_panel(
+            "Rewind complete",
+            "Conversation and workspace restored to this message. Everything after it was discarded.",
+            [("Close", "close")],
+        )
 
     def _set_companion(self, state: str, status: str, reset_after: float | None = None) -> None:
         self._companion_generation += 1
