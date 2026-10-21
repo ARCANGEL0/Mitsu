@@ -311,7 +311,7 @@ class PromptTextArea(TextArea):
         if not value.startswith("/") or any(character.isspace() for character in value):
             suggestions: list[tuple[str, str, bool]] = []
         else:
-            suggestions = [entry for entry in self.COMMANDS if entry[0].startswith(value)][:8]
+            suggestions = [entry for entry in self.COMMANDS if entry[0].startswith(value)]
         self.slash_suggestions = suggestions
         self.slash_suggestion_index = 0
         self.post_message(self.SlashSuggestionsChanged())
@@ -1629,33 +1629,53 @@ class ToolResultCard(Static):
         self.action_toggle()
 
 
-class MessageActionDialog(ModalScreen[str | None]):
+class MessageActionsMenu(Vertical):
     BINDINGS = [Binding("escape", "cancel", "Close", priority=True)]
 
-    def __init__(self, can_rewind: bool, can_stop: bool = False) -> None:
-        super().__init__()
-        self.actions = ["Copy"]
-        if can_stop:
-            self.actions.append("Stop")
-        if can_rewind:
-            self.actions.append("Rewind")
+    def __init__(
+        self,
+        message_text: str,
+        message_index: int | None,
+        screen: SessionScreen,
+        actions: list[str],
+    ) -> None:
+        super().__init__(id="message-actions-menu")
+        self._message_text = message_text
+        self._message_index = message_index
+        self._screen = screen
+        self._actions = actions
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="message-action-dialog"):
-            yield Static("MESSAGE ACTION", id="message-action-title", markup=False)
-            yield OptionList(*self.actions, id="message-action-options", markup=False)
+        yield OptionList(*self._actions, id="message-actions-options", compact=True)
 
     def on_mount(self) -> None:
-        self.query_one("#message-action-options", OptionList).focus()
+        self.query_one("#message-actions-options", OptionList).focus()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        if event.option_list.id != "message-action-options":
+        if event.option_list.id != "message-actions-options":
             return
-        if 0 <= event.option_index < len(self.actions):
-            self.dismiss(self.actions[event.option_index].casefold())
+        if not (0 <= event.option_index < len(self._actions)):
+            return
+        choice = self._actions[event.option_index]
+        self._remove()
+        if choice == "Copy":
+            self._screen.app.copy_to_clipboard(self._message_text)
+            self._screen.app.notify("Copied to clipboard", title="Copied")
+        elif choice == "Stop":
+            self._screen._stop_active_run()
+        elif choice == "Rewind" and self._message_index is not None:
+            self._screen.run_worker(
+                self._screen._rewind_to_message(self._message_index),
+                name=f"rewind-message-{self._message_index}",
+            )
+
+    def _remove(self) -> None:
+        if getattr(self._screen, "_message_actions_menu", None) is self:
+            self._screen._message_actions_menu = None
+        self.remove()
 
     def action_cancel(self) -> None:
-        self.dismiss(None)
+        self._remove()
 
 
 class ChatMessage(Static):
@@ -1663,7 +1683,6 @@ class ChatMessage(Static):
 
     def __init__(self, message: str, content: Any, classes: str) -> None:
         self.message_text = message
-        self._last_click_at = 0.0
         super().__init__(content, classes=classes, markup=False)
 
     def update_message(self, message: str, content: Any) -> None:
@@ -1671,8 +1690,6 @@ class ChatMessage(Static):
         self.update(content)
 
     def on_click(self, event: Click) -> None:
-        if event.button != 1:
-            return
         style = event.style
         value = style.meta.get("mitsu_copy") if style is not None else None
         if isinstance(value, str):
@@ -1683,15 +1700,12 @@ class ChatMessage(Static):
             return
         if not self.message_text.strip():
             return
-        now = time.monotonic()
-        double_click = event.chain >= 2 or now - self._last_click_at <= 0.5
-        self._last_click_at = now
-        if not double_click:
-            return
-        screen = self.screen
-        if hasattr(screen, "_show_message_actions"):
+        if event.button == 3:
             event.stop()
-            screen._show_message_actions(self)
+            screen = self.screen
+            if hasattr(screen, "_show_message_actions"):
+                screen._show_message_actions(self)
+            return
 
 
 class ConversationSearchDialog(ModalScreen[str | None]):
@@ -1933,6 +1947,7 @@ class SessionScreen(Screen):
         self.level = min(5, max(1, self.level))
         self.verbose = bool(session.get("verbose", False))
         self._message_widgets: list[Static] = []
+        self._message_actions_menu: MessageActionsMenu | None = None
         self._search_query = ""
         self._search_matches: list[int] = []
         self._search_cursor = -1
@@ -1962,6 +1977,8 @@ class SessionScreen(Screen):
             mode_dialog=self._request_mode_change,
             tool_result_handler=self._capture_scan_intel,
         )
+        self._closing_session = False
+        self._session_cleanup_task: asyncio.Task | None = None
         self._tool_connection_task: asyncio.Task | None = None
         self._tool_reconnect_task: asyncio.Task | None = None
         self._tool_host_ready = asyncio.Event()
@@ -2050,7 +2067,9 @@ class SessionScreen(Screen):
         with Vertical(id="composer"):
             yield Static("", id="thinking-status", markup=False)
             yield Static("", id="queue-status", markup=False)
-            yield Static("", id="slash-suggestions", markup=False)
+            suggestions = OptionList(id="slash-suggestions", compact=True)
+            suggestions.can_focus = False
+            yield suggestions
             yield Static("", id="file-suggestions", markup=False)
             with Vertical(id="command-panel"):
                 yield Static("", id="command-panel-title", markup=False)
@@ -2179,21 +2198,45 @@ class SessionScreen(Screen):
             mascot.set_modal_suspended(False)
 
     async def on_unmount(self) -> None:
+        await self.close_session()
+
+    async def close_session(self) -> None:
+        if self._session_cleanup_task is None:
+            self._closing_session = True
+            self._queued_prompts.clear()
+            self._save_pending_redirects()
+            self._session_cleanup_task = asyncio.create_task(self._cleanup_session())
+        await asyncio.shield(self._session_cleanup_task)
+
+    async def _cleanup_session(self) -> None:
         if self._thinking_timer:
             self._thinking_timer.stop()
             self._thinking_timer = None
-        if self._agent_task and not self._agent_task.done():
-            self._agent_task.cancel()
-            await asyncio.gather(self._agent_task, return_exceptions=True)
-        if self._tool_reconnect_task and not self._tool_reconnect_task.done():
-            self._tool_reconnect_task.cancel()
-            await asyncio.gather(self._tool_reconnect_task, return_exceptions=True)
-        if self._tool_connection_task and not self._tool_connection_task.done():
-            # MCP async contexts must be closed by the same task that entered them.
-            self._tool_host_shutdown.set()
+        self._agent_interruptible = False
+        for task in (self._agent_task, self._tool_reconnect_task):
+            if task is not None and not task.done():
+                task.cancel()
+                _, pending = await asyncio.wait([task], timeout=2)
+                if pending:
+                    task.cancel()
+                    await asyncio.wait(pending, timeout=1)
+        finish_interrupted_tools(self.agent_history)
+        self.session["agent_history"] = redact_history(copy.deepcopy(self.agent_history))
+        self.sessions.save_session(self.session)
+        self._tool_host_shutdown.set()
+        task = self._tool_connection_task
+        if task is not None and not task.done():
             if not self._tool_host_ready.is_set():
-                self._tool_connection_task.cancel()
-            await asyncio.gather(self._tool_connection_task, return_exceptions=True)
+                task.cancel()
+            _, pending = await asyncio.wait([task], timeout=3)
+            if pending:
+                task.cancel()
+                await asyncio.wait(pending, timeout=3)
+        for task in (self._agent_task, self._tool_reconnect_task, self._tool_connection_task):
+            if task is not None and task.done() and not task.cancelled():
+                error = task.exception()
+                if error is not None:
+                    self.log.error("Session cleanup: %s", error)
 
     async def _connect_tool_host(self) -> None:
         ready = self._tool_host_ready
@@ -2223,11 +2266,15 @@ class SessionScreen(Screen):
         finally:
             ready.set()
             try:
-                await host.close()
+                async with asyncio.timeout(2):
+                    await host.close()
             except Exception as error:
+                self.log.error("Tool cleanup issue: %s: %s", type(error).__name__, error)
                 self._set_activity(f"Tool cleanup issue: {type(error).__name__}: {error}")
 
     def _focus_prompt(self) -> None:
+        if self._closing_session:
+            return
         if self.is_mounted and self.app.screen is self:
             if self._command_panel_active:
                 panel_input = self.query_one("#command-panel-input", Input)
@@ -2306,25 +2353,24 @@ class SessionScreen(Screen):
         return support
 
     def _render_slash_suggestions(self, prompt: PromptTextArea) -> None:
-        panel = self.query_one("#slash-suggestions", Static)
+        panel = self.query_one("#slash-suggestions", OptionList)
         if not prompt.slash_suggestions:
             panel.display = False
+            panel.clear_options()
+            self._update_chat_follow_hint()
             return
-        palette = THEMES.get(self.theme_id, THEMES["ember"])
-        accent = palette["accent"]
-        renderable = Text()
-        for index, (command, description, _takes_argument) in enumerate(prompt.slash_suggestions):
-            selected = index == prompt.slash_suggestion_index
-            dark_bg = palette["ui"]["background"]
-            marker_style = f"bold {dark_bg} on {accent}" if selected else f"bold {accent}"
-            command_style = f"bold {dark_bg} on {accent}" if selected else palette["code"]["function"]
-            detail_style = f"{dark_bg} on {accent}" if selected else palette["ui"]["muted"]
-            renderable.append("› " if selected else "  ", style=marker_style)
-            renderable.append(command, style=command_style)
-            renderable.append(f"  {description}\n", style=detail_style)
-        renderable.append("↑/↓ move   Tab complete   Enter run", style=palette["ui"]["muted"])
-        panel.update(renderable)
+        entries = [
+            Text.assemble((command, "bold"), f"  {description}")
+            for command, description, _takes_argument in prompt.slash_suggestions
+        ]
+        if [option.prompt for option in panel.options] != entries:
+            panel.set_options(entries)
         panel.display = True
+        panel.highlighted = prompt.slash_suggestion_index
+        panel.call_after_refresh(panel.scroll_to_highlight)
+        self.query_one("#shortcut-hint", Static).update(
+            f"↑/↓ choose    Tab complete    Enter run    {prompt.slash_suggestion_index + 1}/{len(entries)}"
+        )
 
     async def on_prompt_text_area_submitted(self, event: PromptTextArea.Submitted) -> None:
         prompt_input = self.query_one("#prompt-input", PromptTextArea)
@@ -2403,6 +2449,8 @@ class SessionScreen(Screen):
             await self._dispatch_pending_redirects()
 
     async def _dispatch_pending_redirects(self) -> None:
+        if self._closing_session:
+            return
         if not self._pending_redirects:
             return
         redirects = self._pending_redirects
@@ -2438,6 +2486,8 @@ class SessionScreen(Screen):
         image_paths: list[Path] | None = None,
         preappended_user_messages: int = 0,
     ) -> None:
+        if self._closing_session:
+            return
         self._dispatching_prompt = True
         try:
             if prompt.startswith("/"):
@@ -2558,7 +2608,7 @@ class SessionScreen(Screen):
             )
 
     def _update_queue_status(self) -> None:
-        if not self.is_mounted:
+        if not self.is_mounted or self._closing_session:
             return
         status = self.query_one("#queue-status", Static)
         if not self._queued_prompts:
@@ -2591,6 +2641,8 @@ class SessionScreen(Screen):
         content: str,
         actions: list[tuple[str, str]] | None = None,
     ) -> None:
+        if self._closing_session:
+            return
         self._command_panel_active = True
         self._command_panel_stage = None
         panel = self.query_one("#command-panel", Vertical)
@@ -2600,7 +2652,7 @@ class SessionScreen(Screen):
         self.query_one("#command-panel-content", Static).update(content)
         self.query_one("#command-panel-scroll", VerticalScroll).scroll_home(animate=False)
         self.query_one("#prompt-line", Horizontal).display = False
-        self.query_one("#slash-suggestions", Static).display = False
+        self.query_one("#slash-suggestions", OptionList).display = False
         self.query_one("#shortcut-hint", Static).display = False
         panel_input = self.query_one("#command-panel-input", Input)
         panel_input.value = ""
@@ -2620,7 +2672,7 @@ class SessionScreen(Screen):
             options.focus()
 
     def _close_command_panel(self) -> None:
-        if not self._command_panel_active:
+        if self._closing_session or not self._command_panel_active:
             return
         self._command_panel_active = False
         self._command_panel_stage = None
@@ -2654,6 +2706,12 @@ class SessionScreen(Screen):
         self._show_command_panel("Session approvals", "\n".join(lines), actions)
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id == "slash-suggestions":
+            event.stop()
+            prompt = self.query_one("#prompt-input", PromptTextArea)
+            prompt.slash_suggestion_index = event.option_index
+            prompt.action_complete_slash_command()
+            return
         if event.option_list.id != "command-panel-options":
             return
         index = event.option_index
@@ -2961,7 +3019,8 @@ class SessionScreen(Screen):
 
     def _schedule_next_queued_prompt(self) -> None:
         if (
-            not self._queued_prompts
+            self._closing_session
+            or not self._queued_prompts
             or self._agent_running
             or self._command_running
             or self._dispatching_prompt
@@ -3195,8 +3254,11 @@ class SessionScreen(Screen):
                         self._set_companion("success", "Mitsu is Ready to Pwn!", reset_after=1.8)
         except asyncio.CancelledError:
             was_cancelled = True
-            await self._remove_stream_preview()
-            if self._pending_redirects:
+            if not self._closing_session:
+                await self._remove_stream_preview()
+            if self._closing_session:
+                preserve_history("The session was closed. Resume only when the operator sends another request.")
+            elif self._pending_redirects:
                 preserve_history()
             else:
                 preserve_history(
@@ -3251,7 +3313,7 @@ class SessionScreen(Screen):
             self._stop_thinking()
             if self._pending_redirects and not (self.is_mounted and self.app.screen is self):
                 self._save_pending_redirects()
-            if self.is_mounted:
+            if self.is_mounted and not self._closing_session:
                 prompt_input.focus()
                 self._update_queue_status()
                 if self.app.screen is self and self._pending_redirects:
@@ -3268,7 +3330,7 @@ class SessionScreen(Screen):
         workspace_root: Path,
         workspace_before: dict[str, bytes] | None,
     ) -> None:
-        workspace_after = await asyncio.to_thread(capture_workspace, workspace_root)
+        workspace_after = None if self._closing_session else await asyncio.to_thread(capture_workspace, workspace_root)
         changes = diff_workspace(workspace_before, workspace_after)
         points = self.session.get("rewind_points", [])
         if not isinstance(points, list):
@@ -3311,6 +3373,8 @@ class SessionScreen(Screen):
         self.sessions.save_session(self.session)
 
     def _start_thinking(self, prompt: str = "", system_prompt: str = "") -> None:
+        if self._closing_session:
+            return
         self._thinking_started = time.monotonic()
         self._thinking_frame = 0
         self._thinking_task_key = ""
@@ -3338,14 +3402,14 @@ class SessionScreen(Screen):
             self._thinking_timer.stop()
             self._thinking_timer = None
         self._thinking_started = None
-        if self.is_mounted:
+        if self.is_mounted and not self._closing_session:
             self.query_one("#thinking-status", Static).display = False
             for message_widget in self._message_widgets:
                 if isinstance(message_widget, ToolCallCard) and message_widget.running:
                     message_widget.finish("stopped")
 
     def _animate_thinking(self) -> None:
-        if not self.is_mounted or not self._agent_running or self._thinking_started is None:
+        if self._closing_session or not self.is_mounted or not self._agent_running or self._thinking_started is None:
             return
         now = time.monotonic()
         elapsed = max(0, int(time.monotonic() - self._thinking_started))
@@ -3494,7 +3558,7 @@ class SessionScreen(Screen):
         self._thinking_phrase_changed_at = time.monotonic()
 
     async def _show_stream_delta(self, text: str) -> None:
-        if not text:
+        if self._closing_session or not text:
             return
         conversation = self.query_one("#conversation", ConversationScroll)
         follow_output = self._following_chat
@@ -3525,13 +3589,15 @@ class SessionScreen(Screen):
             self._agent_task = None
             self._agent_running = False
             self._stop_thinking()
-            if self.is_mounted:
+            if self.is_mounted and not self._closing_session:
                 prompt = self.query_one("#prompt-input", PromptTextArea)
                 prompt.focus()
                 self._update_queue_status()
                 self._schedule_next_queued_prompt()
 
     async def _remove_stream_preview(self) -> None:
+        if self._closing_session:
+            return
         preview = self._stream_preview
         self._stream_preview = None
         self._stream_text = ""
@@ -3623,6 +3689,8 @@ class SessionScreen(Screen):
         )
 
     async def _approve_tool(self, name: str, arguments: dict) -> bool:
+        if self._closing_session:
+            return False
         if self.mode == "Recon":
             detail = self._format_tool_call(name, arguments)
             purpose = str(arguments.get("purpose", "")).strip()
@@ -4848,7 +4916,7 @@ class SessionScreen(Screen):
         shutdown.set()
         if old_task and not old_task.done():
             await asyncio.shield(old_task)
-        if not self.is_mounted:
+        if not self.is_mounted or self._closing_session:
             return
         self._tool_host = AgentToolHost(
             self.workspace,
@@ -5279,14 +5347,28 @@ CURRENT MODE: {self.mode}
             and self._rewind_code_available(message_index)
         )
         can_stop = self._agent_running and self._agent_task is not None and not self._agent_task.done()
-        self.app.push_screen(
-            MessageActionDialog(can_rewind, can_stop),
-            lambda action: self._message_action_selected(
-                message_index,
-                message_widget.message_text,
-                action,
-            ),
-        )
+        actions = ["Copy"]
+        if can_stop:
+            actions.append("Stop")
+        if can_rewind:
+            actions.append("Rewind")
+        self._remove_message_actions_menu()
+        conversation = self.query_one("#conversation", ConversationScroll)
+        menu = MessageActionsMenu(message_widget.message_text, message_index, self, actions)
+        conversation.mount(menu, after=message_widget)
+        conversation.scroll_to_widget(menu, animate=False)
+        self._message_actions_menu = menu
+
+
+    def _remove_message_actions_menu(self) -> None:
+        menu = getattr(self, "_message_actions_menu", None)
+        if menu is None:
+            return
+        self._message_actions_menu = None
+        try:
+            menu.remove()
+        except Exception:
+            pass
 
     def _message_action_selected(
         self,
@@ -5522,7 +5604,8 @@ CURRENT MODE: {self.mode}
 
     def _set_activity(self, activity: str) -> None:
         self._last_activity = activity
-        self.query_one("#activity-summary", Static).update(activity)
+        if self.is_mounted and not self._closing_session:
+            self.query_one("#activity-summary", Static).update(activity)
 
     def _tool_activity(self, name: str, arguments: object = None, failed: bool | None = None) -> str:
         normalized_name = name.casefold()
@@ -5991,9 +6074,6 @@ CURRENT MODE: {self.mode}
         return f"[{status}] {title}{suffix}"
 
     async def action_back_to_menu(self) -> None:
-        if self._agent_task and not self._agent_task.done():
-            self._agent_task.cancel()
-            await asyncio.gather(self._agent_task, return_exceptions=True)
         await self.app.open_menu()
 
     @staticmethod

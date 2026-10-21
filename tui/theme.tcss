@@ -1054,7 +1054,6 @@ OptionList:focus > .option-list--option-highlighted {
 ProviderDialog,
 SessionRenameDialog,
 SessionWorkdirDialog,
-MessageActionDialog,
 MCPConfigDialog,
 AskUserDialog,
 ConversationSearchDialog,
@@ -1239,6 +1238,25 @@ VulnSearchDialog {
     color: #55e5e8;
     text-style: bold;
     text-align: center;
+}
+
+#message-actions-menu {
+    width: auto;
+    max-width: 52;
+    height: auto;
+    padding: 0 1;
+    margin: 0 1;
+    border: round #55e5e8;
+    background: #111115;
+}
+
+#message-actions-options {
+    width: auto;
+    height: auto;
+    max-height: 8;
+    border: none;
+    background: #111115;
+    padding: 0;
 }
 
 #mcp-dialog-title {
@@ -2668,6 +2686,12 @@ SudoPasswordDialog {
     padding: 0 1;
     border: round $secondary;
     background: $surface;
+}
+
+#slash-suggestions > .option-list--option-highlighted {
+    color: $background;
+    background: $primary;
+    text-style: bold;
 }
 
 .theme-moss #slash-suggestions,

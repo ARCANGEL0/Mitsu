@@ -32,6 +32,7 @@ class MitsuApp(App):
         self._ui_started = False
         self._show_bye_banner = False
         self._shutdown_signals: list[signal.Signals] = []
+        self._quit_task: asyncio.Task | None = None
         self.credentials = CredentialStore()
         self.preferences = PreferencesStore()
         self.sessions = SessionStore()
@@ -68,7 +69,19 @@ class MitsuApp(App):
 
     def quit_mitsu(self) -> None:
         self._show_bye_banner = True
-        self.exit()
+        if self._quit_task is None:
+            self._quit_task = asyncio.create_task(self._quit_after_cleanup())
+
+    async def _quit_after_cleanup(self) -> None:
+        try:
+            await self._close_sessions()
+        finally:
+            self.exit()
+
+    async def _close_sessions(self) -> None:
+        for screen in reversed(self.screen_stack):
+            if isinstance(screen, SessionScreen):
+                await screen.close_session()
 
     async def action_quit(self) -> None:
         self.quit_mitsu()
@@ -84,7 +97,7 @@ class MitsuApp(App):
             if signum is None:
                 continue
             try:
-                loop.add_signal_handler(signum, self.exit)
+                loop.add_signal_handler(signum, self.quit_mitsu)
             except (NotImplementedError, RuntimeError, ValueError):
                 continue
             self._shutdown_signals.append(signum)
@@ -113,11 +126,13 @@ class MitsuApp(App):
         await self.switch_screen(self.main_menu_screen())
 
     async def open_setup(self, configuration_mode: str | None = None) -> None:
+        await self._close_sessions()
         await self.switch_screen(
             OnboardingScreen(self.credentials, self.preferences, configuration_mode=configuration_mode)
         )
 
     async def open_menu(self) -> None:
+        await self._close_sessions()
         await self.switch_screen(self.main_menu_screen())
 
     async def open_session(self, session_id: str | None = None) -> None:
@@ -162,6 +177,7 @@ class MitsuApp(App):
             self.sessions,
             theme_id=theme_id if theme_id in THEMES else "ember",
         )
+        await self._close_sessions()
         await self.switch_screen(screen)
         screen.call_after_refresh(screen._focus_prompt)
 
@@ -179,7 +195,9 @@ def main() -> None:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         lock_file.close()
-        print("Mitsu is already running for this user.", file=sys.stderr)
+        owner = lock_path.read_text().strip()
+        detail = f" (PID {owner})" if owner.isdecimal() else ""
+        print(f"Mitsu is already running for this user{detail}.", file=sys.stderr)
         return
     lock_file.seek(0)
     lock_file.truncate()
