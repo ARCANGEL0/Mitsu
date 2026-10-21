@@ -9,6 +9,7 @@ import re
 import shlex
 import time
 from datetime import date, datetime, timezone
+from contextlib import aclosing
 from pathlib import Path
 import tempfile
 from typing import Any, Callable
@@ -19,6 +20,7 @@ from pygments.util import ClassNotFound
 from rich.console import Group
 from rich.markdown import Markdown
 from rich.style import Style
+from rich.styled import Styled
 from rich.syntax import Syntax, SyntaxTheme
 from rich.text import Text
 from textual.app import ComposeResult
@@ -32,7 +34,8 @@ from textual.widgets import Button, Input, OptionList, SelectionList, Static, Te
 
 from mitsu import __version__
 from mitsu.armory import CATEGORY_BY_ID, TOOLS, TOOLS_BY_CATEGORY, TOOL_BY_ID
-from mitsu.agents import history_from_legacy, run_agent_turn
+from mitsu.agents import finish_interrupted_tools, history_from_legacy, run_agent_turn
+from mitsu.tui.chat_rendering import COPY_TAG, CopyableMarkdown, render_copy_tag
 from mitsu.pets import COMPANIONS, companion_by_id
 from mitsu.config import PROVIDER_BY_ID, THEMES, CredentialStore, SessionStore
 from mitsu.search.vulnerabilities import search_vulnerabilities, vulnerability_queries
@@ -1629,9 +1632,13 @@ class ToolResultCard(Static):
 class MessageActionDialog(ModalScreen[str | None]):
     BINDINGS = [Binding("escape", "cancel", "Close", priority=True)]
 
-    def __init__(self, can_rewind: bool) -> None:
+    def __init__(self, can_rewind: bool, can_stop: bool = False) -> None:
         super().__init__()
-        self.actions = ["Copy", "Rewind"] if can_rewind else ["Copy"]
+        self.actions = ["Copy"]
+        if can_stop:
+            self.actions.append("Stop")
+        if can_rewind:
+            self.actions.append("Rewind")
 
     def compose(self) -> ComposeResult:
         with Vertical(id="message-action-dialog"):
@@ -1664,7 +1671,17 @@ class ChatMessage(Static):
         self.update(content)
 
     def on_click(self, event: Click) -> None:
-        if event.button != 1 or not self.message_text.strip():
+        if event.button != 1:
+            return
+        style = event.style
+        value = style.meta.get("mitsu_copy") if style is not None else None
+        if isinstance(value, str):
+            if value:
+                self.app.copy_to_clipboard(value)
+                self.app.notify("Copied to clipboard", title="Copied")
+            event.stop()
+            return
+        if not self.message_text.strip():
             return
         now = time.monotonic()
         double_click = event.chain >= 2 or now - self._last_click_at <= 0.5
@@ -2356,8 +2373,8 @@ class SessionScreen(Screen):
                 self.call_after_refresh(self._focus_prompt)
                 return
             prompt_input.image_attachments.clear()
-        if self.mode == "AutoPwn" and self._agent_running:
-            await self._redirect_autopwn(prompt, image_paths)
+        if self._agent_running:
+            await self._redirect_active_run(prompt, image_paths)
             self.call_after_refresh(self._focus_prompt)
             return
         if self._agent_running or self._command_running or self._dispatching_prompt or self._queued_prompts:
@@ -2371,9 +2388,10 @@ class SessionScreen(Screen):
         if self.app.screen is self and not self._agent_running:
             self.call_after_refresh(self._focus_prompt)
 
-    async def _redirect_autopwn(self, prompt: str, image_paths: list[Path]) -> None:
+    async def _redirect_active_run(self, prompt: str, image_paths: list[Path]) -> None:
         should_interrupt = not self._pending_redirects
         self._pending_redirects.append((prompt, image_paths))
+        self._queued_prompts.clear()
         self._set_activity("Following your redirect…")
         self._set_companion("thinking", "Following your redirect")
         task = self._agent_task
@@ -2692,7 +2710,7 @@ class SessionScreen(Screen):
             return
         self.query_one("#command-panel-content", Static).update(
             f"{level} · {LEVEL_NAMES[level]} — {LEVEL_DESCRIPTIONS[level]}\n"
-            "Approval behavior is set separately by Recon, Guided, or AutoPwn mode."
+            "Each mode has its own investigation flow as well as its own tool approval behavior."
         )
 
     def _session_export_text(self) -> str:
@@ -3032,15 +3050,12 @@ class SessionScreen(Screen):
             self.session["agent_history"] = redact_history(copy.deepcopy(self.agent_history))
             self.sessions.save_session(self.session)
 
-        def restore_history(note: str) -> None:
-            self.agent_history[:] = history_checkpoint
-            self.agent_history.append({"role": "user", "content": user_content})
-            self.agent_history.append({"role": "assistant", "content": note})
-            save_history()
-
-        def preserve_interrupted_history() -> None:
+        def preserve_history(note: str = "") -> None:
+            finish_interrupted_tools(self.agent_history)
             if len(self.agent_history) == len(history_checkpoint):
                 self.agent_history.append({"role": "user", "content": user_content})
+            if note:
+                self.agent_history.append({"role": "assistant", "content": note})
             save_history()
 
         was_cancelled = False
@@ -3054,7 +3069,7 @@ class SessionScreen(Screen):
                     await self._tool_reconnect_task
                 await self._tool_host_ready.wait()
             self._set_activity(f"Sending your message to {provider_name}…")
-            async for event in run_agent_turn(
+            events = run_agent_turn(
                 self.provider,
                 system_prompt,
                 self.agent_history,
@@ -3068,123 +3083,123 @@ class SessionScreen(Screen):
                 image_paths=[str(path) for path in image_paths],
                 pause_after_response=pause_after_response,
                 interrupt_requested=lambda: bool(self._pending_redirects),
-            ):
-                if event.kind == "assistant_turn":
-                    text = str(event.data.get("text", "")).strip()
-                    await self._remove_stream_preview()
-                    self._current_request_characters = 0
-                    if text:
-                        await self._append_message(text, "assistant", context_text=text)
-                    elif not event.data.get("tool_calls"):
-                        response_info = event.data.get("response_info", {})
-                        finish_reason = (
-                            str(response_info.get("finish_reason", ""))
-                            if isinstance(response_info, dict)
-                            else ""
-                        )
-                        if isinstance(response_info, dict) and response_info.get("reasoning_only"):
-                            message = (
-                                "The provider sent internal reasoning but no reply or tool call. "
-                                "That private reasoning was not shown. Try again or select a model "
-                                "with working tool-call support."
+                operator_messages=[
+                    str(entry.get("text", ""))
+                    for entry in self.session.get("messages", [])
+                    if isinstance(entry, dict) and entry.get("role") == "user"
+                ],
+                get_session_intel=lambda: self.intel,
+            )
+            async with aclosing(events):
+                async for event in events:
+                    if event.kind == "assistant_turn":
+                        text = str(event.data.get("text", "")).strip()
+                        await self._remove_stream_preview()
+                        self._current_request_characters = 0
+                        if text:
+                            await self._append_message(text, "assistant", context_text=text)
+                        elif not event.data.get("tool_calls"):
+                            response_info = event.data.get("response_info", {})
+                            finish_reason = (
+                                str(response_info.get("finish_reason", ""))
+                                if isinstance(response_info, dict)
+                                else ""
                             )
-                        elif finish_reason == "length":
-                            message = "The provider stopped before returning a reply or tool call (output limit reached). Try again."
-                        elif finish_reason:
-                            message = f"The provider finished without a reply or tool call (finish reason: {finish_reason}). Try again or choose another model."
+                            if isinstance(response_info, dict) and response_info.get("reasoning_only"):
+                                message = (
+                                    "The provider sent internal reasoning but no reply or tool call. "
+                                    "That private reasoning was not shown. Try again or select a model "
+                                    "with working tool-call support."
+                                )
+                            elif finish_reason == "length":
+                                message = "The provider stopped before returning a reply or tool call (output limit reached). Try again."
+                            elif finish_reason:
+                                message = f"The provider finished without a reply or tool call (finish reason: {finish_reason}). Try again or choose another model."
+                            else:
+                                message = (
+                                    "The provider returned no reply or tool call. Try again or choose "
+                                    "another model. Mitsu kept the conversation history valid."
+                                )
+                            self._set_activity("The provider returned an empty response.")
+                            await self._append_message(
+                                message,
+                                "error",
+                            )
+                    elif event.kind == "assistant_progress":
+                        text = str(event.data.get("text", "")).strip()
+                        if text:
+                            await self._append_message(text, "assistant", context_text=text)
+                    elif event.kind == "delta":
+                        await self._show_stream_delta(str(event.data.get("text", "")))
+                    elif event.kind == "usage":
+                        self._record_usage(event.data.get("usage", {}))
+                    elif event.kind == "api_retry":
+                        await self._remove_stream_preview()
+                        self._stream_characters = max(
+                            0, self._stream_characters - self._current_request_characters
+                        )
+                        self._current_request_characters = 0
+                        delay = max(1, int(event.data.get("delay", 3)))
+                        self._retry_state = {
+                            "attempt": int(event.data.get("attempt", 1)),
+                            "maximum": int(event.data.get("max_attempts", 10)),
+                            "deadline": time.monotonic() + delay,
+                        }
+                        self._animate_thinking()
+                    elif event.kind == "api_retrying":
+                        self._retry_state = None
+                        self._animate_thinking()
+                    elif event.kind == "tool_started":
+                        name = str(event.data.get("name", "tool"))
+                        arguments = event.data.get("arguments", {})
+                        self._running_tool_arguments[name] = arguments
+                        self._set_thinking_task(tool_name=name, arguments=arguments)
+                        self._set_activity(self._tool_activity(name, arguments))
+                        self._set_companion("running", "Running a tool")
+                        await self._append_message(self._format_tool_call(name, arguments), "tool")
+                    elif event.kind == "tool_finished":
+                        name = str(event.data.get("name", "tool"))
+                        arguments = self._running_tool_arguments.pop(name, {})
+                        result = str(event.data.get("result", ""))
+                        failed = ToolResultCard.is_failure(result, bool(event.data.get("is_error")))
+                        for message_widget in reversed(self._message_widgets):
+                            if isinstance(message_widget, ToolCallCard) and message_widget.running:
+                                message_widget.finish("failed" if failed else "finished")
+                                break
+                        self._current_input_estimate = max(
+                            1,
+                            len(
+                                json.dumps(
+                                    [system_prompt, *self.agent_history],
+                                    ensure_ascii=False,
+                                    default=str,
+                                )
+                            )
+                            // 4,
+                        )
+                        self._set_activity(self._tool_activity(name, arguments, failed=failed))
+                        await self._append_message(result, "tool-result", tool_failed=failed)
+                        if failed:
+                            self._set_companion("failed", "Tool failed", reset_after=1.5)
+                        elif name.endswith(("record_exploit", "remove_exploit")):
+                            self._set_companion("success", "Intel updated!", reset_after=1.5)
                         else:
-                            message = (
-                                "The provider returned no reply or tool call. Try again or choose "
-                                "another model. Mitsu kept the conversation history valid."
-                            )
-                        self._set_activity("The provider returned an empty response.")
-                        await self._append_message(
-                            message,
-                            "error",
-                        )
-                elif event.kind == "assistant_progress":
-                    text = str(event.data.get("text", "")).strip()
-                    if text:
-                        await self._append_message(text, "assistant", context_text=text)
-                elif event.kind == "completion_check":
-                    self._set_activity("Mitsu is checking whether there’s another step…")
-                    self._set_companion("thinking", "Checking the next step")
-                elif event.kind == "assistant_suppressed":
-                    await self._remove_stream_preview()
-                    self._current_request_characters = 0
-                    self._set_activity("Mitsu is preparing a quick question…")
-                    self._set_companion("thinking", "Preparing a question")
-                elif event.kind == "delta":
-                    await self._show_stream_delta(str(event.data.get("text", "")))
-                elif event.kind == "usage":
-                    self._record_usage(event.data.get("usage", {}))
-                elif event.kind == "api_retry":
-                    await self._remove_stream_preview()
-                    self._stream_characters = max(
-                        0, self._stream_characters - self._current_request_characters
-                    )
-                    self._current_request_characters = 0
-                    delay = max(1, int(event.data.get("delay", 3)))
-                    self._retry_state = {
-                        "attempt": int(event.data.get("attempt", 1)),
-                        "maximum": int(event.data.get("max_attempts", 10)),
-                        "deadline": time.monotonic() + delay,
-                    }
-                    self._animate_thinking()
-                elif event.kind == "api_retrying":
-                    self._retry_state = None
-                    self._animate_thinking()
-                elif event.kind == "tool_started":
-                    name = str(event.data.get("name", "tool"))
-                    arguments = event.data.get("arguments", {})
-                    self._running_tool_arguments[name] = arguments
-                    self._set_thinking_task(tool_name=name, arguments=arguments)
-                    self._set_activity(self._tool_activity(name, arguments))
-                    self._set_companion("running", "Running a tool")
-                    await self._append_message(self._format_tool_call(name, arguments), "tool")
-                elif event.kind == "tool_finished":
-                    name = str(event.data.get("name", "tool"))
-                    arguments = self._running_tool_arguments.pop(name, {})
-                    result = str(event.data.get("result", ""))
-                    failed = ToolResultCard.is_failure(result, bool(event.data.get("is_error")))
-                    for message_widget in reversed(self._message_widgets):
-                        if isinstance(message_widget, ToolCallCard) and message_widget.running:
-                            message_widget.finish("failed" if failed else "finished")
-                            break
-                    self._current_input_estimate = max(
-                        1,
-                        len(
-                            json.dumps(
-                                [system_prompt, *self.agent_history],
-                                ensure_ascii=False,
-                                default=str,
-                            )
-                        )
-                        // 4,
-                    )
-                    self._set_activity(self._tool_activity(name, arguments, failed=failed))
-                    await self._append_message(result, "tool-result", tool_failed=failed)
-                    if failed:
-                        self._set_companion("failed", "Tool failed", reset_after=1.5)
-                    elif name.endswith(("record_exploit", "remove_exploit")):
-                        self._set_companion("success", "Intel updated!", reset_after=1.5)
-                    else:
-                        self._set_companion("thinking", "Reviewing results")
-                    self._animate_thinking()
-                elif event.kind == "limit":
-                    message = str(event.data.get("message", "Tool loop stopped."))
-                    self._set_activity(message)
-                    await self._append_message(message, "system")
-                elif event.kind == "done":
-                    self._set_activity("Mitsu is Ready to Pwn!")
-                    self._set_companion("success", "Mitsu is Ready to Pwn!", reset_after=1.8)
+                            self._set_companion("thinking", "Reviewing results")
+                        self._animate_thinking()
+                    elif event.kind == "limit":
+                        message = str(event.data.get("message", "Tool loop stopped."))
+                        self._set_activity(message)
+                        await self._append_message(message, "system")
+                    elif event.kind == "done":
+                        self._set_activity("Mitsu is Ready to Pwn!")
+                        self._set_companion("success", "Mitsu is Ready to Pwn!", reset_after=1.8)
         except asyncio.CancelledError:
             was_cancelled = True
             await self._remove_stream_preview()
             if self._pending_redirects:
-                preserve_interrupted_history()
+                preserve_history()
             else:
-                restore_history(
+                preserve_history(
                     "This operator request was interrupted before completion. Keep it in context; resume only if the operator asks to continue."
                 )
                 self._set_activity("Stopped by operator.")
@@ -3193,9 +3208,9 @@ class SessionScreen(Screen):
         except ProviderRequestError as error:
             await self._remove_stream_preview()
             if self._pending_redirects:
-                preserve_interrupted_history()
+                preserve_history()
             else:
-                restore_history(
+                preserve_history(
                     "The provider failed before this request finished. Keep the request in context; resume only if the operator asks to continue."
                 )
                 self._set_activity("The provider returned an error.")
@@ -3206,9 +3221,9 @@ class SessionScreen(Screen):
         except Exception as error:
             await self._remove_stream_preview()
             if self._pending_redirects:
-                preserve_interrupted_history()
+                preserve_history()
             else:
-                restore_history(
+                preserve_history(
                     "Mitsu stopped before this request finished. Keep the request in context; resume only if the operator asks to continue."
                 )
                 self._set_activity("The agent stopped after an internal error.")
@@ -3565,7 +3580,7 @@ class SessionScreen(Screen):
                         "prompt": "How should I continue?",
                         "type": "choice",
                         "options": [
-                            "Switch to Guided · review each active step",
+                            "Switch to Guided · choose each next path",
                             "Switch to AutoPwn · continue autonomously in scope",
                             "No · keep it passive",
                         ],
@@ -4207,7 +4222,7 @@ class SessionScreen(Screen):
                 "/vulnsearch [criteria], /mode [recon|guided|autopwn], /delete-session, /clear, /menu. "
                 "Shift+Tab cycles modes. Ask naturally to inspect files, search the web, or run a shell command. "
                 "Ctrl+F opens transcript search; press it again for the next match. Esc exits search mode. "
-                "Recon favors passive and low-impact checks; Guided reviews shell and external MCP tools; AutoPwn runs autonomously within scope."
+            "Recon stays passive; Guided pauses for your direction after focused investigation steps; AutoPwn chooses evidence-led next steps autonomously within scope."
             )
             return
         if command == "/mcp":
@@ -5038,8 +5053,15 @@ class SessionScreen(Screen):
         if self._chat_history_mode:
             self._resume_chat_follow()
             return
-        if self._agent_task and not self._agent_task.done():
-            self._agent_task.cancel()
+        self._stop_active_run()
+
+    def _stop_active_run(self) -> None:
+        self._queued_prompts.clear()
+        self._pending_redirects.clear()
+        task = self._agent_task
+        if task and not task.done() and not task.cancelling():
+            self._agent_interruptible = False
+            task.cancel()
 
     def action_scroll_chat_up(self) -> None:
         if self._chat_history_mode:
@@ -5091,7 +5113,7 @@ AUTHORIZATION AND SCOPE
 MITSU'S VOICE
 - Keep an unmistakably warm, cutesy, playful voice, with a fitting kaomoji in ordinary replies. Be technically clear without sounding like a generic assistant or a formal report.
 - Speak directly as Mitsu, using first person naturally. Never narrate private reasoning or draft notes, refer to yourself as an AI or assistant, or describe the operator in third person with lines like "the user wants". Turn conclusions into a brief, natural reply or useful status update.
-- The operator's latest correction overrides older plans, suggestions, and Intel leads. If they say to stop, ignore, or focus elsewhere, drop that path immediately and don't bring it back unless they ask or new independent evidence makes it relevant.
+- The operator's latest correction overrides older plans, suggestions, and Intel leads. If they reject a path, leave it rejected until they explicitly reopen it. Use their replacement direction and the confirmed results already available.
 
 SESSION INTEL
 - {title_guidance}
@@ -5149,14 +5171,15 @@ CUSTOM CLI MCP TOOLS
 LIVE PROGRESS
 - Before a meaningful batch of tool calls, write one or two user-visible sentences about the clue, why the next check fits, and what it can confirm. After a significant result, explain what changed and update Intel before moving on; do not let the conversation become only command cards and exit statuses.
 - Do not announce a future check and end the turn without calling the tool. Make the call in the same response; if a missing detail, approval, or safety boundary blocks it, state that clearly and ask the operator what is needed.
+- A response without tool calls ends this turn. Save useful Intel before the final summary. Once the requested outcome is reached, give the result and stop; do not invent follow-up tasks to keep the investigation running.
 - Use `mitsu__web_search` for public web research. When the operator supplies a URL and asks Mitsu to inspect or research it, pass that URL to `mitsu__web_search` to read the page; do not use shell `curl` or `wget` for ordinary browsing. Use shell networking only when the requested check specifically needs command-line behavior, headers, or protocol-level details.
 - Keep the tone lively when evidence warrants it, but separate a promising lead from a confirmed result. When evidence confirms a vulnerability, state the proof plainly and save it to Findings and Exploits with its source.
 - These are concise status updates, not private chain-of-thought. Never reveal hidden internal reasoning or dress an unverified guess up as a discovery. Avoid narrating every command when the tool cards already show it.
 
 TOOL LOOP AND MODES
-- Use the available native tools instead of merely telling the operator to run their own tools. After each tool result, inspect its exit status and evidence before deciding the next useful call. Retry or adjust a call whenever it helps test the current lead; the runtime does not suppress repeats or limit retries. Keep working through evidence-based checks until the investigation is complete or the operator needs to decide something. Never stop just because a call failed or because a fixed number of model turns or tool calls elapsed.
+- Use available native tools instead of merely telling the operator to run them. Inspect each result before choosing a next check, and run it only when it tests a distinct, evidence-backed question. Record what a failure rules out; do not repeat an unchanged attempt or keep probing a path the operator rejected.
 - Recon is passive and interactive. Use public-source lookups, DNS, and local read-only inspection; do not directly probe or request pages from the target. If the next useful step would touch the target, make the reason clear and let the mode prompt offer Guided, AutoPwn, or staying in Recon. Never treat Recon as permission to scan or modify files.
-- Guided is the operator-review mode. Before every shell command and every external MCP tool, show the exact action and wait for the TUI choice: run once, always allow the displayed shell prefix or MCP tool for this session, or deny and choose another approach. Built-in read-only tools may run without approval. Respect denial.
+- Guided lets the operator direct the investigation one focused evidence-gathering step at a time. Before each shell command, RedTeam Armory tool, or external MCP tool, show the exact action and wait for the TUI choice: run once, always allow the displayed shell prefix or MCP tool for this session, or deny. After a useful step, save relevant Intel and open a Mitsu-designed `mitsu__user_dialog` for the next path. Built-in read-only tools may run without approval. Respect denial.
 - AutoPwn is autonomous within the explicitly authorized scope. Do not ask for per-command approval; show live tool activity and continue after recoverable tool failures with evidence-based alternatives. Installation consent and sudo-password prompts are still required. Use proportionate service discovery and vulnerability scanners when useful. Never escape scope, bypass OS authentication, cause denial of service, persist on a host, destroy data, or access unrelated users’ data.
 - Use `ask_user` only when a missing detail blocks progress, not to repeat an authorization question the operator already answered.
 
@@ -5167,6 +5190,7 @@ PERSONALITY AND OUTPUT
 - Address the user naturally; don’t use role titles or pet names.
 - Keep progress updates short while tools run. Give the useful result first, then evidence and next steps. Be concise by default; investigation intensity {self.level}/5 ({LEVEL_NAMES[self.level]}): {LEVEL_DESCRIPTIONS[self.level]}. Expanded explanations: {'on' if self.verbose else 'off'}.
 - The terminal chat renders Markdown, including headings, lists, emphasis, links, code, and tables. Use those when they make an answer easier to scan; don't print Markdown tables as unformatted pipe text. Keep LaTeX formulas concise and readable because the terminal shows their notation rather than typesetting them. Never reveal private chain-of-thought; provide brief conclusions and evidence instead.
+- Fenced code blocks can be clicked to copy their contents. Use <copytag>value</copytag> for short values the operator may want to copy inline; keep explanatory prose outside the tags.
 - If the operator provides output or files, analyze those directly rather than restarting the workflow. Clearly label unverified leads and never claim an action succeeded without its tool result.
 
 CURRENT MODE: {self.mode}
@@ -5176,8 +5200,8 @@ CURRENT MODE: {self.mode}
     def _mode_prompt_instruction(self) -> str:
         mode_instructions = {
             "Recon": "Work in passive, operator-led mode. Use public sources, DNS, and local read-only inspection only; do not send requests or probes to the target. When the requested next step needs target interaction, call `mitsu__request_mode` to open the mode-choice dialog and wait for the selection. Never ask the operator to choose a mode in plain chat. The dialog applies Guided or AutoPwn immediately; if they keep Recon or cancel, continue with passive work or explain the limit.",
-            "Guided": "Work interactively. Before each shell command, RedTeam Armory tool, and external MCP tool, pause for the TUI approval choice. The operator can approve once, trust the shown command prefix/tool for this session, or deny. Never continue a denied action by changing its wording. For an approved action that needs sudo, run it and let the masked TUI password prompt handle the credential; don’t avoid the step just because it needs sudo.",
-            "AutoPwn": "Work autonomously within the explicitly authorized scope and keep investigating after recoverable errors. Installation and sudo prompts still need operator approval. When a useful authorized command needs sudo, run it through the shell tool and let the masked TUI password prompt handle the credential; don’t silently skip the step. Keep the operator informed through concise progress updates; use active tools when evidence supports them, and never perform destructive, disruptive, persistent, or unrelated actions.",
+            "Guided": "Work interactively and let the operator direct investigation flow, not only approve tools. Before each shell command, RedTeam Armory tool, and external MCP tool, pause for the TUI approval choice. Take one focused evidence-gathering step at a time; save useful Intel, then use `mitsu__user_dialog` to summarize what changed and ask which evidence-based path to take next. Build the dialog yourself from the actual results, include a useful free-text Other choice when appropriate, and wait for the answer before starting another investigation branch. Do not open a dialog for routine Intel bookkeeping alone. Never continue a denied action by changing its wording. For an approved action that needs sudo, run it and let the masked TUI password prompt handle the credential.",
+            "AutoPwn": "Work autonomously within the explicitly authorized scope. Choose the next focused check from evidence, abandon paths that fail or that the operator rejects, and do not repeat checks without a new hypothesis. Keep investigating after recoverable errors, but do not broaden the task just to keep working. Use `mitsu__user_dialog` when the operator must choose between materially different paths or provide missing information; otherwise continue through useful milestones without asking after every tool batch. Installation and sudo prompts still need operator approval. Run useful authorized sudo commands through the shell tool and let the masked TUI password prompt handle the credential. Never perform destructive, disruptive, persistent, or unrelated actions.",
         }
         return mode_instructions[self.mode]
 
@@ -5254,8 +5278,9 @@ CURRENT MODE: {self.mode}
             and not self._command_running
             and self._rewind_code_available(message_index)
         )
+        can_stop = self._agent_running and self._agent_task is not None and not self._agent_task.done()
         self.app.push_screen(
-            MessageActionDialog(can_rewind),
+            MessageActionDialog(can_rewind, can_stop),
             lambda action: self._message_action_selected(
                 message_index,
                 message_widget.message_text,
@@ -5272,6 +5297,8 @@ CURRENT MODE: {self.mode}
         if action == "copy":
             self.app.copy_to_clipboard(message_text)
             self.app.notify("Message copied to clipboard", title="Copied")
+        elif action == "stop":
+            self._stop_active_run()
         elif action == "rewind" and message_index is not None:
             self.run_worker(
                 self._rewind_to_message(message_index),
@@ -6011,7 +6038,7 @@ CURRENT MODE: {self.mode}
         code_blocks = list(re.finditer(r"```([^\n`]*)\n?(.*?)```", message, re.DOTALL))
         heading = Text(label + "\n", style=f"bold {label_style}") if label else None
         if not code_blocks:
-            body = Markdown(_terminal_math(message), hyperlinks=True)
+            body = CopyableMarkdown(_terminal_math(COPY_TAG.sub(render_copy_tag, message)), hyperlinks=True)
             return body if heading is None else Group(heading, body)
         renderables = [heading] if heading is not None else []
         previous_end = 0
@@ -6019,23 +6046,22 @@ CURRENT MODE: {self.mode}
         for match in code_blocks:
             prose = message[previous_end:match.start()]
             if prose:
-                renderables.append(Markdown(_terminal_math(prose), hyperlinks=True))
+                renderables.append(CopyableMarkdown(_terminal_math(COPY_TAG.sub(render_copy_tag, prose)), hyperlinks=True))
             language = match.group(1).strip().split(maxsplit=1)[0:1]
-            code = match.group(2).rstrip("\n")
+            code = COPY_TAG.sub(lambda tag: tag.group(1) if tag.group(1) is not None else tag.group(2), match.group(2)).rstrip("\n")
             try:
-                renderables.append(
-                    Syntax(
-                        code,
-                        language[0] if language else "text",
-                        theme=syntax_theme,
-                        word_wrap=True,
-                        padding=(0, 1),
-                    )
+                code_renderable = Syntax(
+                    code,
+                    language[0] if language else "text",
+                    theme=syntax_theme,
+                    word_wrap=True,
+                    padding=(0, 1),
                 )
             except ClassNotFound:
-                renderables.append(Text(code))
+                code_renderable = Text(code)
+            renderables.append(Styled(code_renderable, Style(meta={"mitsu_copy": code})))
             previous_end = match.end()
         trailing = message[previous_end:]
         if trailing:
-            renderables.append(Markdown(_terminal_math(trailing), hyperlinks=True))
+            renderables.append(CopyableMarkdown(_terminal_math(COPY_TAG.sub(render_copy_tag, trailing)), hyperlinks=True))
         return Group(*renderables)
