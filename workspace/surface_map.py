@@ -283,27 +283,51 @@ def build_surface_graph(
 
 
 def _basic_html(graph: dict[str, Any]) -> str:
+    safe_graph = json.dumps(graph, ensure_ascii=False, separators=(",", ":"), default=str)
+    safe_graph = safe_graph.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
     title = html.escape(str(graph["title"]))
-    nodes = []
-    for node in graph["nodes"]:
-        details = "".join(
-            f"<li><strong>{html.escape(item['label'])}:</strong> {html.escape(item['value'])}</li>"
-            for item in node["details"]
-        )
-        nodes.append(
-            f"<article><h3>{html.escape(node['label'])}</h3>"
-            f"<p>{html.escape(node['category'])} · {html.escape(node['kind'])}</p><ul>{details}</ul></article>"
-        )
-    links = "".join(
-        f"<li>{html.escape(edge['source'])} → {html.escape(edge['target'])}: {html.escape(edge['label'])}</li>"
-        for edge in graph["edges"]
-    )
-    return f"""<!doctype html>
+    # Keep the styles and data here so the map works offline.
+    template = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title} · Mitsu Attack Surface</title>
-<style>body{{max-width:1100px;margin:40px auto;padding:0 20px;background:#101923;color:#e8f0f7;font:15px/1.5 system-ui}}h1,h2{{color:#80deea}}article{{margin:12px 0;padding:14px;background:#182737;border:1px solid #344b60;border-radius:10px}}article p{{color:#9eafc0}}li{{overflow-wrap:anywhere}}.nodes{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}}</style>
-</head><body><h1>✦ Mitsu · {title}</h1><p>Attack surface map · {len(graph['nodes'])} nodes · {len(graph['edges'])} relationships</p>
-<h2>Nodes</h2><section class="nodes">{''.join(nodes)}</section><h2>Relationships</h2><ul>{links}</ul></body></html>"""
+<title>__TITLE__ · Mitsu Attack Surface</title>
+<style>
+:root{color-scheme:dark;--bg:#091019;--panel:#101b27;--panel-2:#142333;--line:#263b50;--ink:#e8f0f7;--muted:#9eafc0;--cyan:#80deea;--violet:#ab97ff;--pink:#ed8cab;--green:#82d6b2;--gold:#e7c77a}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 20% 0,#142b3e,var(--bg) 55%);color:var(--ink);font:14px/1.45 system-ui,sans-serif}
+header{display:flex;justify-content:space-between;align-items:center;gap:20px;padding:20px 26px;border-bottom:1px solid var(--line);background:#0b131de8}
+header small{color:var(--cyan);letter-spacing:.13em;text-transform:uppercase}h1{margin:4px 0 0;font-size:clamp(22px,3vw,32px)}.brand{color:var(--muted);font-size:12px}
+.meta{display:flex;gap:8px;flex-wrap:wrap;padding:12px 20px;border-bottom:1px solid var(--line)}.pill{padding:6px 10px;border:1px solid var(--line);border-radius:999px;color:var(--muted);background:var(--panel)}
+.layout{display:grid;grid-template-columns:minmax(0,1fr) 330px;min-height:calc(100vh - 170px)}.canvas-wrap{min-width:0;min-height:65vh;overflow:hidden;background-color:#0b141e;background-image:radial-gradient(#294055 1px,transparent 1px);background-size:22px 22px
+svg{display:block;width:100%;height:100%;min-height:65vh}.edge{fill:none;stroke:#47647c;stroke-width:1.6;opacity:.72}.edge-label{fill:#94a9bb;font-size:11px;text-anchor:middle;pointer-events:none}.map-node{cursor:pointer}.map-node rect{fill:#132332;stroke:#52718d;stroke-width:1.5;rx:12}.map-node text{pointer-events:none}.map-node .node-title{fill:var(--ink);font-size:13px;font-weight:650}.map-node .node-sub{fill:var(--muted);font-size:10px}.map-node:hover rect,.map-node.active rect{stroke:var(--cyan);stroke-width:3;filter:drop-shadow(0 0 7px #80deea66)}
+.map-node[data-category=service] rect{stroke:#65aed0}.map-node[data-category=finding] rect{stroke:var(--gold)}.map-node[data-category=exploit] rect{stroke:var(--pink)}.map-node[data-category=observation] rect{stroke:var(--violet)}.map-node[data-category=account] rect{stroke:var(--green)}.map-node[data-category=person] rect{stroke:#d98ad7}
+aside{padding:18px;border-left:1px solid var(--line);background:#0d1722}.aside-title{color:var(--cyan);font-size:11px;font-weight:750;letter-spacing:.12em;text-transform:uppercase}.empty{margin-top:14px;color:var(--muted)}.detail-title{margin:8px 0 2px;font-size:19px;overflow-wrap:anywhere}.detail-sub{color:var(--muted);font-size:12px}.field{padding:12px 0;border-bottom:1px solid #213243}.field strong{display:block;margin-bottom:4px;color:#b9d6e5;font-size:11px;letter-spacing:.05em;text-transform:uppercase}.field p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink)}
+.legend{display:flex;gap:14px;flex-wrap:wrap;padding:12px 20px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}.legend span:before{display:inline-block;width:9px;height:9px;margin-right:6px;border:2px solid currentColor;border-radius:3px;content:""}.legend .asset{color:var(--cyan)}.legend .finding{color:var(--gold)}.legend .exploit{color:var(--pink)}.legend .observation{color:var(--violet)}.legend .account{color:var(--green)}footer{padding:12px;text-align:center;color:#718397;font-size:11px}
+@media(max-width:850px){.layout{grid-template-columns:1fr}.canvas-wrap{min-height:55vh}svg{min-height:55vh}aside{border-left:0;border-top:1px solid var(--line)}}
+</style></head><body>
+<header><div><small>✦ Mitsu · Session Intel</small><h1>__TITLE__</h1></div><div class="brand">ATTACK SURFACE MAP</div></header>
+<div class="meta" id="meta"></div>
+<div class="layout"><section class="canvas-wrap" id="canvas"><svg id="map" role="img" aria-label="Interactive graph of session attack surface"></svg></section>
+<aside><div class="aside-title">Node details</div><div class="empty" id="empty">Select a node to view its recorded details, evidence, and connections.</div><div id="detail" hidden></div></aside></div>
+<div class="legend" id="legend"></div><footer>Built from this session’s Intel and cited transcript notes · Mitsu</footer>
+<script>
+const graph=__GRAPH__;
+const labels={asset:"Targets & network",service:"Services & technologies",finding:"Findings",exploit:"Vulnerabilities & exploits",observation:"Observations",account:"Accounts & credentials",person:"People"};
+const order=Object.keys(labels),svg=document.querySelector("#map"),canvas=document.querySelector("#canvas"),ns="http://www.w3.org/2000/svg";
+const meta=document.querySelector("#meta"),legend=document.querySelector("#legend"),positions=new Map(),byId=new Map(graph.nodes.map(node=>[node.id,node]));
+for(const [label,value] of [["Mode",graph.mode||"—"],["Created",graph.created_at||"—"],["Updated",graph.updated_at||"—"],["Nodes",String(graph.nodes.length)],["Links",String(graph.edges.length)]]){const pill=document.createElement("span");pill.className="pill";pill.textContent=label+": "+value;meta.append(pill)}
+for(const key of order){if(!graph.counts[key])continue;const item=document.createElement("span");item.className=key;item.textContent=labels[key]+" · "+graph.counts[key];legend.append(item)}
+const columns=order.map(key=>[key,graph.nodes.filter(node=>node.category===key)]).filter(([,nodes])=>nodes.length);
+const width=Math.max(1050,columns.length*270+80),height=Math.max(720,...columns.map(([,nodes])=>nodes.length*104+120));
+svg.setAttribute("viewBox",`0 0 ${width} ${height}`);svg.setAttribute("width",width);svg.setAttribute("height",height);
+const defs=document.createElementNS(ns,"defs"),marker=document.createElementNS(ns,"marker");marker.setAttribute("id","arrow");marker.setAttribute("markerWidth","8");marker.setAttribute("markerHeight","8");marker.setAttribute("refX","7");marker.setAttribute("refY","4");marker.setAttribute("orient","auto");marker.setAttribute("markerUnits","strokeWidth");const arrow=document.createElementNS(ns,"path");arrow.setAttribute("d","M0,0 L8,4 L0,8 z");arrow.setAttribute("fill","#7891a8");marker.append(arrow);defs.append(marker);svg.append(defs);
+const world=document.createElementNS(ns,"g");world.setAttribute("id","world");svg.append(world);
+for(const [column,[category,nodes]] of columns.entries()){const x=55+column*270;for(const [index,node] of nodes.entries())positions.set(node.id,{x,y:72+index*104,category})}
+for(const edge of graph.edges){const from=positions.get(edge.source),to=positions.get(edge.target);if(!from||!to)continue;const startX=from.x+208,startY=from.y+30,endX=to.x,endY=to.y+30,midX=(startX+endX)/2,path=document.createElementNS(ns,"path");path.setAttribute("class","edge");path.setAttribute("d",`M ${startX} ${startY} C ${midX} ${startY}, ${midX} ${endY}, ${endX} ${endY}`);path.setAttribute("marker-end","url(#arrow)");path.setAttribute("aria-label",edge.label);world.append(path);if(edge.label){const text=document.createElementNS(ns,"text");text.setAttribute("class","edge-label");text.setAttribute("x",midX);text.setAttribute("y",(startY+endY)/2-5);text.textContent=edge.label;world.append(text)}}
+function showNode(node,element){document.querySelectorAll(".map-node.active").forEach(item=>item.classList.remove("active"));element.classList.add("active");document.querySelector("#empty").hidden=true;const panel=document.querySelector("#detail");panel.hidden=false;panel.replaceChildren();const title=document.createElement("div");title.className="detail-title";title.textContent=node.label;panel.append(title);const subtitle=document.createElement("div");subtitle.className="detail-sub";subtitle.textContent=[labels[node.category],node.kind,node.timestamp].filter(Boolean).join(" · ");panel.append(subtitle);for(const field of node.details){const row=document.createElement("div");row.className="field";const name=document.createElement("strong");name.textContent=field.label;const value=document.createElement("p");value.textContent=field.value;row.append(name,value);panel.append(row)}const links=graph.edges.filter(edge=>edge.source===node.id||edge.target===node.id);if(links.length){const row=document.createElement("div");row.className="field";const name=document.createElement("strong");name.textContent="Connections";row.append(name);for(const edge of links){const related=byId.get(edge.source===node.id?edge.target:edge.source);const value=document.createElement("p");value.textContent=`${edge.label} · ${related?.label||"Unknown node"}${edge.evidence?"\\n"+edge.evidence:""}`;row.append(value)}panel.append(row)}}
+for(const node of graph.nodes){const pos=positions.get(node.id),group=document.createElementNS(ns,"g");group.setAttribute("class","map-node");group.setAttribute("data-category",node.category);group.setAttribute("transform",`translate(${pos.x} ${pos.y})`);group.setAttribute("tabindex","0");group.setAttribute("role","button");group.setAttribute("aria-label",`${node.label}, ${labels[node.category]}`);const title=document.createElementNS(ns,"title");title.textContent=node.label;const rect=document.createElementNS(ns,"rect");rect.setAttribute("width","208");rect.setAttribute("height","62");const name=document.createElementNS(ns,"text");name.setAttribute("class","node-title");name.setAttribute("x","12");name.setAttribute("y","25");name.textContent=node.label.length>27?node.label.slice(0,26)+"…":node.label;const sub=document.createElementNS(ns,"text");sub.setAttribute("class","node-sub");sub.setAttribute("x","12");sub.setAttribute("y","46");sub.textContent=[node.kind,node.timestamp].filter(Boolean).join(" · ").slice(0,38);group.append(title,rect,name,sub);group.addEventListener("click",()=>showNode(node,group));group.addEventListener("keydown",event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();showNode(node,group)}});world.append(group)}
+
+</script></body></html>"""
+    return template.replace("__TITLE__", title).replace("__GRAPH__", safe_graph)
+
 
 def create_surface_map(
     session: dict[str, Any],
