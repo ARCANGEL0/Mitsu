@@ -1,20 +1,40 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "mitsu"
 version = "1.4.21"
-description = "A terminal-native coding and security companion"
+description = "A chibi red-team framework client for guided and autonomous pentesting"
+readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "ARCANGEL0" }]
+keywords = ["penetration-testing", "red-team", "MCP", "security", "agentic-framework"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Information Technology",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Security",
+]
 dependencies = [
   "Pillow>=10.0.0",
   "mcp>=2.3,<3",
+  "pydantic>=2.0",
   "rich>=13.7.0",
   "textual>=1.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ARCANGEL0/Mitsu"
+Repository = "https://github.com/ARCANGEL0/Mitsu"
+Issues = "https://github.com/ARCANGEL0/Mitsu/issues"
 
 [project.scripts]
 mitsu = "mitsu.__main__:main"

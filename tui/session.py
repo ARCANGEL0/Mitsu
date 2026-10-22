@@ -2268,8 +2268,7 @@ class SessionScreen(Screen):
         finally:
             ready.set()
             try:
-                async with asyncio.timeout(2):
-                    await host.close()
+                await asyncio.wait_for(host.close(), timeout=2)
             except Exception as error:
                 self.log.error("Tool cleanup issue: %s: %s", type(error).__name__, error)
                 self._set_activity(f"Tool cleanup issue: {type(error).__name__}: {error}")
