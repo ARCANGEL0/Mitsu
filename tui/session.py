@@ -51,6 +51,7 @@ from mitsu.workspace.intel import (
     upsert_manhunt,
     upsert_observation,
 )
+from mitsu.workspace.surface_map import create_surface_map
 from mitsu.providers import ProviderRequestError, check_image_input_support, check_reasoning_support
 from mitsu.tui.images import (
     IMAGE_TOKEN,
@@ -195,7 +196,7 @@ class PromptTextArea(TextArea):
         ("/level", "Change aggressiveness level for workflow", False),
         ("/export", "copy or save this session history", False),
         ("/rewind", "rewind to an earlier conversation point", False),
-        ("/map", "show the attack surface map", False),
+        ("/map", "generate an interactive map from session Intel", False),
         ("/menu", "return to the command center", False),
         ("/pet", "change Mitsu’s companion", False),
         ("/nmap", "run an authorized scan", True),
@@ -1976,6 +1977,7 @@ class SessionScreen(Screen):
             show_command=self._show_command,
             mode_dialog=self._request_mode_change,
             tool_result_handler=self._capture_scan_intel,
+            surface_map_handler=self._generate_surface_map,
         )
         self._closing_session = False
         self._session_cleanup_task: asyncio.Task | None = None
@@ -3691,6 +3693,9 @@ class SessionScreen(Screen):
     async def _approve_tool(self, name: str, arguments: dict) -> bool:
         if self._closing_session:
             return False
+        # Generate the map from this session's saved Intel.
+        if name == "mitsu__surface_map":
+            return True
         if self.mode == "Recon":
             detail = self._format_tool_call(name, arguments)
             purpose = str(arguments.get("purpose", "")).strip()
@@ -4144,6 +4149,8 @@ class SessionScreen(Screen):
         if name.endswith("__show_cmd") and isinstance(arguments, dict):
             message = redact_command(str(arguments.get("message", ""))).strip()
             return "Command handoff\n" + message
+        if name.endswith("__surface_map"):
+            return "Building an attack surface map from this session’s Intel"
         if name.startswith("mitsu__armory_") and isinstance(arguments, dict):
             tool_id = name.removeprefix("mitsu__armory_").replace("_", "-")
             tool = TOOL_BY_ID.get(tool_id)
@@ -4628,27 +4635,34 @@ class SessionScreen(Screen):
         await self._append_message("\n".join(lines))
 
     async def _map_command(self) -> None:
-        lines = [
-            "ATTACK SURFACE MAP",
-            "└─ Session: " + str(self.session.get("title", "Untitled session")),
-            "   ├─ Scope",
-        ]
-        if not self.targets:
-            lines.append("   │  └─ No targets recorded")
-        else:
-            lines.extend(f"   │  {'└─' if index == len(self.targets) - 1 else '├─'} {target}" for index, target in enumerate(self.targets))
-        lines.append("   └─ Recorded intel")
-        for label, entries in (
-            ("Findings", self.findings),
-            ("Exploit references", self.exploits),
-            ("IPs", self.ips),
-            ("Harvested data", self.harvested_data),
-        ):
-            lines.append(f"      ├─ {label}")
-            lines.extend(f"      │  └─ {item}" for item in entries) if entries else lines.append("      │  └─ None recorded")
-        lines.append("\nOnly stored session data is shown; relationships are not inferred or validated.")
-        self._set_activity("Rendered the session attack surface map.")
-        await self._append_message("\n".join(lines))
+        self._set_activity("Building an attack surface map from session Intel…")
+        try:
+            result = await self._generate_surface_map()
+        except (OSError, ValueError) as error:
+            await self._fail(f"Could not create the attack surface map: {error}", "Map generation failed")
+            return
+        self._set_activity("Attack surface map is ready.")
+        map_uri = Path(result["path"]).resolve().as_uri()
+        await self._append_message(
+            "Attack surface map ready! (✧ω✧)\n\n"
+            f"**{result['node_count']} nodes · {result['edge_count']} recorded relationships**\n\n"
+            f"[Open the interactive map]({map_uri})\n\n"
+            "It uses saved Intel and leaves unsupported relationships unconnected."
+        )
+
+    async def _generate_surface_map(
+        self,
+        extra_nodes: list[dict[str, Any]] | None = None,
+        connections: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        session_snapshot = copy.deepcopy(self.session)
+        return await asyncio.to_thread(
+            create_surface_map,
+            session_snapshot,
+            self.sessions.path,
+            extra_nodes,
+            connections,
+        )
 
     async def _vulnsearch_command(self, query: str) -> None:
         label = query or "saved Intel"
@@ -4928,6 +4942,7 @@ class SessionScreen(Screen):
             show_command=self._show_command,
             mode_dialog=self._request_mode_change,
             tool_result_handler=self._capture_scan_intel,
+            surface_map_handler=self._generate_surface_map,
         )
         self._tool_host_ready = asyncio.Event()
         self._tool_host_shutdown = asyncio.Event()
@@ -5193,6 +5208,7 @@ SESSION INTEL
 {intel_snapshot}
 </session-intel>
 - Treat Intel as the investigation's working map, not optional note-taking. At the start of every target assessment, fetch its summary, then read the target-relevant asset, observation, finding, and exploit pages; follow `next_offset` until those records are covered before relying on earlier work. Before finishing, fetch the summary again and make sure every material fact from this run has been saved.
+- When asked to draw or generate an attack-surface graph, use `mitsu__surface_map` so the session artifact is built from saved Intel. Transcript-only nodes and links need verbatim supporting evidence and remain marked unverified.
 - Once Intel contains a product, version, or CVE, use `mitsu__vulnsearch` to check Vulnx, configured web engines, and local SearchSploit against those clues. It can also search saved Intel with no criteria; inspect the references and affected-version details before treating a lead as applicable.
 - At the start of an assessment, save the operator's explicitly requested primary target with `mitsu__intel_upsert_asset`, using source `operator request`, scope `in_scope`, verification `discovered`, and `primary=true`. Authorization does not by itself validate that the host is reachable.
 - Use `mitsu__intel_upsert_asset` to record evidence-backed targets, domains, hostnames, IPs, URLs, services, endpoints, technologies, and relationships. Include the source and the exact observation; use attributes for details such as ports, protocols, banners, and versions. Repeated observations update the same asset and retain their provenance.
@@ -5651,6 +5667,11 @@ CURRENT MODE: {self.mode}
                 "Mitsu is searching through an artifact…",
                 "Mitsu finished searching the artifact.",
                 "Mitsu couldn’t search the artifact.",
+            ),
+            "surface_map": (
+                "Mitsu is mapping session Intel…",
+                "Mitsu finished the attack surface map.",
+                "Mitsu couldn’t build the attack surface map.",
             ),
             "vulnsearch": (
                 "Mitsu is looking up vulnerability leads…",

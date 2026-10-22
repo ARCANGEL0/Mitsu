@@ -55,6 +55,10 @@ SudoPasswordHandler = Callable[[str], Awaitable[str | None]]
 ShowCommandHandler = Callable[[str, str], Awaitable[bool]]
 ModeDialogHandler = Callable[[str], Awaitable[str]]
 ToolResultHandler = Callable[[str, dict[str, Any], str], Awaitable[str]]
+SurfaceMapHandler = Callable[
+    [list[dict[str, Any]] | None, list[dict[str, Any]] | None],
+    Awaitable[dict[str, Any]],
+]
 
 
 def _is_low_impact_recon_command(command: str) -> bool:
@@ -220,6 +224,7 @@ class AgentToolHost:
         show_command: ShowCommandHandler | None = None,
         mode_dialog: ModeDialogHandler | None = None,
         tool_result_handler: ToolResultHandler | None = None,
+        surface_map_handler: SurfaceMapHandler | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self.ask_user = ask_user
@@ -230,6 +235,7 @@ class AgentToolHost:
         self.show_command = show_command
         self.mode_dialog = mode_dialog
         self.tool_result_handler = tool_result_handler
+        self.surface_map_handler = surface_map_handler
         self.install_approvals: dict[str, float] = {}
         self.server = MCPServer("Mitsu built-in tools")
         self._stack = AsyncExitStack()
@@ -317,6 +323,23 @@ class AgentToolHost:
                 )
             except (OSError, ValueError) as error:
                 raise ToolHostError(f"Could not inspect artifact: {error}") from error
+
+        @self.server.tool(annotations=ToolAnnotations(read_only_hint=False, open_world_hint=False))
+        async def surface_map(
+            nodes: list[dict[str, Any]] | None = None,
+            connections: list[dict[str, Any]] | None = None,
+        ) -> str:
+            "Generate or refresh this session's interactive attack surface map from saved Intel and conversation context. Use when asked for a graph or map. Optional nodes need a label, category (asset, service, finding, exploit, observation, account, or person), and verbatim evidence from the session transcript. Optional connections need source and target node IDs or unique labels, a relationship label, and verbatim evidence from Intel or the transcript. Unsupported items are ignored and transcript-only nodes are marked unverified."
+            if self.surface_map_handler is None:
+                raise ToolHostError("The session map generator is unavailable.")
+            result = await self.surface_map_handler(nodes, connections)
+            return (
+                f"[Open the attack surface map]({Path(result['path']).resolve().as_uri()})\n"
+                f"Saved at: {result['path']}\n"
+                f"Nodes: {result['node_count']} · Relationships: {result['edge_count']}\n"
+                f"Transcript-only notes marked unverified: {result['transcript_node_count']}\n"
+                "The map uses saved Intel; unlinked records remain separate rather than being guessed together."
+            )
 
         @self.server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
         async def web_search(query: str, max_results: int = 5) -> str:

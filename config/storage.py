@@ -212,6 +212,11 @@ class SessionStore:
             attachments.unlink(missing_ok=True)
         elif attachments.is_dir():
             shutil.rmtree(attachments, ignore_errors=True)
+        artifacts = self.path / session_id
+        if artifacts.is_symlink():
+            artifacts.unlink(missing_ok=True)
+        elif artifacts.is_dir():
+            shutil.rmtree(artifacts, ignore_errors=True)
         return True
 
     def create_session(self, provider: dict[str, Any]) -> dict[str, Any]:
