@@ -1062,6 +1062,11 @@ SessionThemeDialog {
     background: #000000 48%;
 }
 
+UpdateConfirmationDialog {
+    align: center middle;
+    background: #000000 48%;
+}
+
 ToolApprovalDialog {
     align: center bottom;
     background: transparent;
@@ -1094,7 +1099,8 @@ DeleteSessionDialog {
 #sudo-password-dialog,
 #tool-approval-dialog,
 #conversation-search-dialog,
-#pet-dialog {
+#pet-dialog,
+#update-confirmation-dialog {
     width: 76;
     max-width: 90%;
     height: auto;
@@ -1102,6 +1108,42 @@ DeleteSessionDialog {
     padding: 1 2;
     border: round #55e5e8;
     background: #111115;
+}
+
+#update-confirmation-dialog {
+    width: 68;
+    max-width: 90%;
+    padding: 1 2;
+    border: round $primary;
+    background: $surface;
+}
+
+#update-confirmation-title {
+    height: 2;
+    color: $primary;
+    text-style: bold;
+    text-align: center;
+}
+
+#update-confirmation-detail {
+    height: auto;
+    margin: 1 0;
+}
+
+#update-confirmation-actions {
+    width: 100%;
+    height: 3;
+    align: center middle;
+}
+
+#update-confirmation-actions Button {
+    margin: 0 1;
+}
+
+#update-confirmation-hint {
+    height: 1;
+    color: $text-muted;
+    text-align: center;
 }
 
 VulnSearchDialog {

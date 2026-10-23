@@ -31,6 +31,7 @@ class MitsuApp(App):
         super().__init__()
         self._ui_started = False
         self._show_bye_banner = False
+        self._restart_after_update = False
         self._shutdown_signals: list[signal.Signals] = []
         self._quit_task: asyncio.Task | None = None
         self.credentials = CredentialStore()
@@ -71,6 +72,10 @@ class MitsuApp(App):
         self._show_bye_banner = True
         if self._quit_task is None:
             self._quit_task = asyncio.create_task(self._quit_after_cleanup())
+
+    def request_update_restart(self) -> None:
+        self._restart_after_update = True
+        self.exit()
 
     async def _quit_after_cleanup(self) -> None:
         try:
@@ -228,3 +233,5 @@ def main() -> None:
                 )
     finally:
         lock_file.close()
+    if app._restart_after_update:
+        os.execv(sys.executable, [sys.executable, "-m", "mitsu", *sys.argv[1:]])

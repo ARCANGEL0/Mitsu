@@ -72,5 +72,5 @@ packages = [
 "mitsu.workspace" = "workspace"
 
 [tool.setuptools.package-data]
-mitsu = ["assets/pets/*.webp"]
+mitsu = ["assets/pets/*.webp", "version.txt"]
 "mitsu.tui" = ["theme.tcss"]

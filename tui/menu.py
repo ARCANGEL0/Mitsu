@@ -38,8 +38,14 @@ from mitsu.services.redteam_armory import (
 from mitsu.tools.armory_mcp import resolve_executable
 from mitsu.tui.session import DeleteSessionDialog, MCPConfigDialog
 from mitsu.tui.branding import MOON_YELLOW
-from mitsu.tui.dialogs import SearchEngineDialog
-from mitsu.tui.updates import compare_versions, fetch_latest_version
+from mitsu.tui.dialogs import SearchEngineDialog, UpdateConfirmationDialog
+from mitsu.tui.updates import (
+    UpdateCheck,
+    UpdateError,
+    apply_update,
+    check_for_updates,
+    detect_installation,
+)
 from mitsu.tui.widgets import CityScene, MitsuCompanion, MoonScene
 
 
@@ -132,6 +138,7 @@ class MainMenuScreen(Screen):
         self.custom_tool_form_step = 0
         self.custom_tool_edit_index: int | None = None
         self.update_status = f"Installed version: v{__version__}\nLatest version: not checked"
+        self.update_check: UpdateCheck | None = None
         self.inline_flow: str | None = None
         self.input_stage: str | None = None
         self.pending_profile: dict | None = None
@@ -324,7 +331,7 @@ class MainMenuScreen(Screen):
                 self.app.exit()
                 return
             if self.left_index == 2:
-                await self._check_for_updates()
+                await self._update_mitsu()
                 return
             self.active_panel = "right"
             self._render_left_list()
@@ -332,7 +339,7 @@ class MainMenuScreen(Screen):
             self.query_one("#menu-right-list", MenuList).focus()
             return
         if self.panel_kind == "update":
-            await self._check_for_updates()
+            await self._update_mitsu()
             return
         if self.panel_kind == "quit":
             self.app.exit()
@@ -491,7 +498,7 @@ class MainMenuScreen(Screen):
             self.query_one("#menu-right-title", Static).update("PET COMPANION")
             self._render_right_list()
         elif action == "check_updates":
-            await self._check_for_updates()
+            await self._update_mitsu()
         elif action == "select_provider":
             await self._choose_provider(item["provider_id"])
         elif action == "select_model":
@@ -1369,6 +1376,10 @@ class MainMenuScreen(Screen):
         self.query_one("#menu-footer", Static).update(
             "↑ / ↓ move    Enter select / open    Del remove session    ← / Esc command center    Tab switch panel    Q quit"
         )
+        if self.left_index == 2:
+            self.query_one("#menu-footer", Static).update(
+                "Enter check for updates    Esc command center    Q quit"
+            )
         self.panel_kind = kind
         self.right_index = 0
         title = {
@@ -1515,23 +1526,58 @@ class MainMenuScreen(Screen):
 
     async def _check_for_updates(self) -> None:
         detail = self.query_one("#menu-right-detail", Static)
-        self.update_status = f"Checking GitHub for a version newer than v{__version__}…"
+        self.update_check = None
+        self.update_status = f"Checking {__version__} installation for updates…"
         detail.update(self.update_status)
         try:
-            latest = await asyncio.to_thread(fetch_latest_version)
-        except (OSError, ValueError) as error:
-            self.update_status = f"Could not check GitHub: {error}"
+            result = await asyncio.to_thread(
+                lambda: check_for_updates(detect_installation(__version__))
+            )
+        except (OSError, ValueError, UpdateError) as error:
+            self.update_status = f"Could not check for updates: {error}"
         else:
-            if latest is None:
-                self.update_status = "The upstream repository does not have a version.txt yet."
-            elif compare_versions(latest, __version__) > 0:
-                self.update_status = f"Mitsu v{latest} is available. Installed version: v{__version__}."
-            elif compare_versions(latest, __version__) < 0:
-                self.update_status = f"GitHub reports v{latest}; this checkout is v{__version__}."
+            self.update_check = result
+            source = result.installation.source_name
+            if result.available:
+                version = f"v{result.latest_version}" if result.latest_version else "a newer Git revision"
+                self.update_status = (
+                    f"{result.detail}\nInstalled: v{result.installation.current_version} · {source}\n"
+                    f"Press Enter to review and update to {version}."
+                )
             else:
-                self.update_status = f"You’re up to date: v{__version__}."
+                self.update_status = f"{result.detail}\nInstall source: {source}"
         if self.panel_kind == "update":
             detail.update(self.update_status)
+
+    async def _update_mitsu(self) -> None:
+        await self._check_for_updates()
+        result = self.update_check
+        if result is None or not result.available:
+            return
+        loop = asyncio.get_running_loop()
+        confirmed: asyncio.Future[bool] = loop.create_future()
+        self.app.push_screen(
+            UpdateConfirmationDialog(
+                result.installation.source_name,
+                result.installation.current_version,
+                result.latest_version,
+            ),
+            confirmed.set_result,
+        )
+        if not await confirmed:
+            return
+        detail = self.query_one("#menu-right-detail", Static)
+        self.update_status = f"Updating from {result.installation.source_name}…"
+        detail.update(self.update_status)
+        try:
+            await asyncio.to_thread(apply_update, result.installation)
+        except UpdateError as error:
+            self.update_status = f"Update failed: {error}"
+            detail.update(self.update_status)
+            return
+        self.update_status = "Update installed. Restarting Mitsu…"
+        detail.update(self.update_status)
+        self.app.request_update_restart()
 
     def _begin_provider_selection(self) -> None:
         self.inline_flow = "provider"
