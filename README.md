@@ -7,12 +7,12 @@
 
 **A little personality. A serious toolkit. A full engagement, one evidence-led step at a time.**
 
-[![Stars](https://img.shields.io/github/stars/ARCANGEL0/Mitsu?style=flat-square&color=1B3045)](https://github.com/ARCANGEL0/Mitsu) [![Watchers](https://img.shields.io/github/watchers/ARCANGEL0/Mitsu?style=flat-square&color=1B3045)](https://github.com/ARCANGEL0/Mitsu) [![Forks](https://img.shields.io/github/forks/ARCANGEL0/Mitsu?style=flat-square&color=1B3045)](https://github.com/ARCANGEL0/Mitsu/fork)<br>
-[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/) [![License: MIT](https://img.shields.io/badge/License-MIT-42B8C7?style=flat-square)](https://opensource.org/license/mit) [![Version](https://img.shields.io/badge/version-1.4.21-7564A8?style=flat-square)](https://github.com/ARCANGEL0/Mitsu/blob/main/version.txt)<br>
-[![Issues](https://img.shields.io/github/issues/ARCANGEL0/Mitsu?style=flat-square&color=263B52)](https://github.com/ARCANGEL0/Mitsu/issues) [![Pull Requests](https://img.shields.io/github/issues-pr/ARCANGEL0/Mitsu?style=flat-square&color=263B52)](https://github.com/ARCANGEL0/Mitsu/pulls) [![Contributors](https://img.shields.io/github/contributors/ARCANGEL0/Mitsu?style=flat-square&color=263B52)](https://github.com/ARCANGEL0/Mitsu/graphs/contributors) [![Last Commit](https://img.shields.io/github/last-commit/ARCANGEL0/Mitsu?style=flat-square&color=263B52)](https://github.com/ARCANGEL0/Mitsu/commits)
+[![Stars](https://img.shields.io/github/stars/ARCANGEL0/Mitsu?style=for-the-badge&logo=github&logoColor=8AE8FF&labelColor=10182C&color=315C99)](https://github.com/ARCANGEL0/Mitsu) [![Watchers](https://img.shields.io/github/watchers/ARCANGEL0/Mitsu?style=for-the-badge&logo=github&logoColor=8AE8FF&labelColor=10182C&color=2585A5)](https://github.com/ARCANGEL0/Mitsu) [![Forks](https://img.shields.io/github/forks/ARCANGEL0/Mitsu?style=for-the-badge&logo=github&logoColor=8AE8FF&labelColor=10182C&color=7152A3)](https://github.com/ARCANGEL0/Mitsu/fork)<br>
+[![Python](https://img.shields.io/badge/Python-3.10%2B-28618B?style=for-the-badge&logo=python&logoColor=8AE8FF&labelColor=10182C)](https://www.python.org/) [![License: MIT](https://img.shields.io/badge/license-MIT-258C7A?style=for-the-badge&logo=opensourceinitiative&logoColor=8AE8FF&labelColor=10182C)](https://opensource.org/license/mit) [![Version](https://img.shields.io/pypi/v/mitsu?style=for-the-badge&logo=pypi&logoColor=8AE8FF&label=PyPI&labelColor=10182C&color=4A63B8)](https://pypi.org/project/mitsu/)<br>
+[![Issues](https://img.shields.io/github/issues/ARCANGEL0/Mitsu?style=for-the-badge&logo=github&logoColor=FF8BE9&labelColor=10182C&color=9D4D79)](https://github.com/ARCANGEL0/Mitsu/issues) [![Pull Requests](https://img.shields.io/github/issues-pr/ARCANGEL0/Mitsu?style=for-the-badge&logo=github&logoColor=8AE8FF&label=PRs&labelColor=10182C&color=315C99)](https://github.com/ARCANGEL0/Mitsu/pulls) [![Contributors](https://img.shields.io/github/contributors/ARCANGEL0/Mitsu?style=for-the-badge&logo=github&logoColor=8AFFB7&labelColor=10182C&color=237D68)](https://github.com/ARCANGEL0/Mitsu/graphs/contributors) [![Last Commit](https://img.shields.io/github/last-commit/ARCANGEL0/Mitsu?style=for-the-badge&logo=git&logoColor=C6A6FF&label=updated&labelColor=10182C&color=6852A0)](https://github.com/ARCANGEL0/Mitsu/commits)
 
- ![Views](https://cnt.arcangelo.net?v=mitsu)
- 
+![Mitsu views](https://cnt.arcangelo.net?v=mitsu)
+
 </div>
 
 ---
