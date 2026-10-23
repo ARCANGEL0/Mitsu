@@ -1,11 +1,11 @@
 <div align="center" id="top">
 
-<img src="docs/assets/icon.svg" alt="Mitsu" width="190">
+<img src="assets/example/icon.svg" alt="Mitsu" width="190">
 
 # ✦ M I T S U ✦
 ### Your chibi red-team companion
 
-**A little personality. A serious toolkit. A full engagement, one evidence-led step at a time.**
+**An agentic pentest framework that can take an engagement from recon through post-exploitation on her own.**
 
 [![Stars](https://img.shields.io/github/stars/ARCANGEL0/Mitsu?style=for-the-badge&logo=github&logoColor=8AE8FF&labelColor=10182C&color=315C99)](https://github.com/ARCANGEL0/Mitsu) [![Watchers](https://img.shields.io/github/watchers/ARCANGEL0/Mitsu?style=for-the-badge&logo=github&logoColor=8AE8FF&labelColor=10182C&color=2585A5)](https://github.com/ARCANGEL0/Mitsu) [![Forks](https://img.shields.io/github/forks/ARCANGEL0/Mitsu?style=for-the-badge&logo=github&logoColor=8AE8FF&labelColor=10182C&color=7152A3)](https://github.com/ARCANGEL0/Mitsu/fork)<br>
 [![Python](https://img.shields.io/badge/Python-3.10%2B-28618B?style=for-the-badge&logo=python&logoColor=8AE8FF&labelColor=10182C)](https://www.python.org/) [![License: MIT](https://img.shields.io/badge/license-MIT-258C7A?style=for-the-badge&logo=opensourceinitiative&logoColor=8AE8FF&labelColor=10182C)](https://opensource.org/license/mit) [![Version](https://img.shields.io/pypi/v/mitsu?style=for-the-badge&logo=pypi&logoColor=8AE8FF&label=PyPI&labelColor=10182C&color=4A63B8)](https://pypi.org/project/mitsu/)<br>
@@ -41,11 +41,9 @@
 
 ## What is Mitsu?
 
-Mitsu is your chibi red-team companion for authorized penetration tests, built to help carry an engagement from the first look at the attack surface through service enumeration, vulnerability research, validation, and access-path assessment. Her MCP server connects the model to Mitsu’s 165-tool Red Team Armory, custom command wrappers, and external MCP servers, so she can turn a plan into focused tool work and use the returned evidence to choose what to check next. When a requested utility is missing, she can offer to install it and wait for your approval.
+Mitsu is an agentic framework client for authorized penetration-testing workflows. Given an in-scope target and objective, she can carry out reconnaissance, enumerate hosts and services, research vulnerabilities and exploits, validate findings, and continue into post-exploitation. Her MCP server connects the selected model to 165+ Red Team Armory tools, external MCP servers, and custom command wrappers.
 
-The engagement’s Intel grows alongside the work: targets, IPs, domains, ports and services, vulnerability leads, confirmed findings, accounts, evidence, and observations all stay organized in session context. That gives Mitsu a record of what is known, what has been tried, and where a lead stopped fitting, rather than treating each turn as a fresh start. Sessions keep their own history and workspace, and the recorded results can feed summaries and attack-surface maps.
-
-Pick the role you want her to take. **Recon** keeps work passive and operator-led; **Guided** pauses for your choices and lets you steer the next phase; **AutoPwn** can follow evidence-backed paths through an in-scope assessment with fewer interruptions. Mitsu supports multiple model providers, and you can change the provider, working directory, tools, scope, and autonomy to fit each engagement. She brings the chibi energy; you give her the sword to attack.
+Each session keeps its own Intel, including targets, IPs, domains, services, vulnerabilities, findings, accounts, evidence, and observations. Mitsu adds to it as the engagement progresses and uses what she learns to choose what to check next. You can also turn the session Intel into an interactive attack-surface map or an assessment report, with your chibi companion along for the work.
 
 ## At a glance
 
@@ -111,22 +109,22 @@ Mitsu runs the selected model in a tool loop: it receives the session history an
 <details>
 <summary>Open the screenshot gallery</summary>
 
-<p align="center"><img src="docs/assets/welcome.png" alt="Mitsu welcome screen" width="960"></p>
+<p align="center"><img src="assets/example/welcome.png" alt="Mitsu welcome screen" width="960"></p>
 <p align="center"><em>Starting Mitsu and setting up a session.</em></p>
 
-<p align="center"><img src="docs/assets/session.png" alt="Mitsu working in a live session" width="960"></p>
+<p align="center"><img src="assets/example/session.png" alt="Mitsu working in a live session" width="960"></p>
 <p align="center"><em>A session in progress, with tool activity and the Intel panel in view.</em></p>
 
-<p align="center"><img src="docs/assets/intel.png" alt="Mitsu chat and session Intel" width="960"></p>
+<p align="center"><img src="assets/example/intel.png" alt="Mitsu chat and session Intel" width="960"></p>
 <p align="center"><em>Chat, command results, and engagement Intel together.</em></p>
 
-<p align="center"><img src="docs/assets/decrypt.png" alt="Mitsu reviewing command output during an investigation" width="960"></p>
+<p align="center"><img src="assets/example/decrypt.png" alt="Mitsu reviewing command output during an investigation" width="960"></p>
 <p align="center"><em>Reviewing tool output and following up on evidence.</em></p>
 
-<p align="center"><img src="docs/assets/approval.png" alt="Mitsu asking permission to install a missing tool" width="960"></p>
+<p align="center"><img src="assets/example/approval.png" alt="Mitsu asking permission to install a missing tool" width="960"></p>
 <p align="center"><em>When a needed utility is missing, Mitsu can ask before installing it.</em></p>
 
-<p align="center"><img src="docs/assets/summary.png" alt="Mitsu assessment summary with captured findings" width="960"></p>
+<p align="center"><img src="assets/example/summary.png" alt="Mitsu assessment summary with captured findings" width="960"></p>
 <p align="center"><em>An assessment summary with the collected results and evidence.</em></p>
 
 </details>
