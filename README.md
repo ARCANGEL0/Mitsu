@@ -11,8 +11,8 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/) [![License: MIT](https://img.shields.io/badge/License-MIT-42B8C7?style=flat-square)](https://opensource.org/license/mit) [![Version](https://img.shields.io/badge/version-1.4.21-7564A8?style=flat-square)](https://github.com/ARCANGEL0/Mitsu/blob/main/version.txt)<br>
 [![Issues](https://img.shields.io/github/issues/ARCANGEL0/Mitsu?style=flat-square&color=263B52)](https://github.com/ARCANGEL0/Mitsu/issues) [![Pull Requests](https://img.shields.io/github/issues-pr/ARCANGEL0/Mitsu?style=flat-square&color=263B52)](https://github.com/ARCANGEL0/Mitsu/pulls) [![Contributors](https://img.shields.io/github/contributors/ARCANGEL0/Mitsu?style=flat-square&color=263B52)](https://github.com/ARCANGEL0/Mitsu/graphs/contributors) [![Last Commit](https://img.shields.io/github/last-commit/ARCANGEL0/Mitsu?style=flat-square&color=263B52)](https://github.com/ARCANGEL0/Mitsu/commits)
 
-<p align="center"><img src="https://cnt.arcangelo.net?v=mitsu" width="300" height="88" alt="Mitsu views"></p>
-
+ ![Views](https://cnt.arcangelo.net?v=mitsu)
+ 
 </div>
 
 ---
