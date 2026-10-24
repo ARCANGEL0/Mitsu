@@ -4,10 +4,13 @@ import asyncio
 import fcntl
 import os
 import signal
+import shutil
 import sys
 from pathlib import Path
 
+from rich.align import Align
 from rich.console import Console
+from rich.panel import Panel
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.theme import Theme
@@ -138,7 +141,10 @@ class MitsuApp(App):
 
     async def open_menu(self) -> None:
         await self._close_sessions()
-        await self.switch_screen(self.main_menu_screen())
+        screen = self.main_menu_screen()
+        await self.switch_screen(screen)
+        screen._restore_focus()
+        screen.call_after_refresh(screen._restore_focus)
 
     async def open_session(self, session_id: str | None = None) -> None:
         profile = self.credentials.active()
@@ -214,23 +220,21 @@ def main() -> None:
             app.run(mouse=True)
         finally:
             if app._ui_started and app._show_bye_banner and sys.stdout.isatty():
-                Console().print(
-                    Text(
-                        "╭━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╮\n"
-                        "┃                                          ┃\n"
-                        "┃      █   █ █████ █████  ████ █   █       ┃\n"
-                        "┃      ██ ██   █     █   █     █   █       ┃\n"
-                        "┃      █ █ █   █     █    ███  █   █       ┃\n"
-                        "┃      █   █   █     █       █ █   █       ┃\n"
-                        "┃      █   █ █████   █   ████   ███        ┃\n"
-                        "┃                                          ┃\n"
-                        "┃              SESSION SAVED!              ┃\n"
-                        "┃          BYE-BYEE, SEE YA SOON~!          ┃\n"
-                        "┃                                          ┃\n"
-                        "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯",
-                        style="bold #f08ab6",
-                    )
+                console = Console()
+                console.clear()
+                width, height = shutil.get_terminal_size(fallback=(80, 24))
+                banner = Text("✦  M I T S U  ✦", style="bold #55d7df", justify="center")
+                banner.append("\n\nSESSION SAVED!", style="bold #f08ab6")
+                banner.append("\nBYE-BYEE, SEE YA SOON~!", style="#e7e2dc")
+                panel = Panel(
+                    Align.center(banner),
+                    width=min(54, max(20, width - 4)),
+                    padding=(1, 3),
+                    border_style="#55d7df",
+                    style="on #101a24",
                 )
+                console.print("\n" * max(1, (height - 9) // 2), end="")
+                console.print(Align.center(panel, width=width))
     finally:
         lock_file.close()
     if app._restart_after_update:

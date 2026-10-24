@@ -87,6 +87,7 @@ class MainMenuScreen(Screen):
         Binding("tab", "toggle_panel", "Switch panel"),
         Binding("escape", "back_to_command_center", "Back", priority=True),
         Binding("q", "quit_app", "Quit"),
+        Binding("ctrl+q", "quit_app", "Quit", priority=True),
     ]
 
     LEFT_ITEMS = ("SESSIONS", "CONFIGURATION", "UPDATE MITSU", "QUIT")
@@ -201,7 +202,7 @@ class MainMenuScreen(Screen):
         self.query_one(MitsuCompanion).set_state("running_right")
         self._render_left_list()
         self._show_left_selection()
-        self.query_one("#menu-left-list", MenuList).focus()
+        self.call_after_refresh(self._restore_focus)
 
     def on_screen_suspend(self, _event: ScreenSuspend) -> None:
         for mascot in self.query(MitsuCompanion):
@@ -210,6 +211,22 @@ class MainMenuScreen(Screen):
     def on_screen_resume(self, _event: ScreenResume) -> None:
         for mascot in self.query(MitsuCompanion):
             mascot.set_modal_suspended(False)
+        self.call_after_refresh(self._restore_focus)
+
+    def _restore_focus(self) -> None:
+        if not self.is_mounted:
+            return
+        if self.input_stage:
+            field_id = "#menu-secret-input" if self.input_stage == "api_key" else "#menu-text-input"
+        elif self.panel_kind == "mcp_editor":
+            field_id = "#menu-mcp-editor"
+        elif self.panel_kind == "mcp_custom_tool_form":
+            field_id = "#menu-custom-tool-input"
+        elif self.active_panel == "right":
+            field_id = "#menu-right-list"
+        else:
+            field_id = "#menu-left-list"
+        self.query_one(field_id).focus()
 
     def on_resize(self, _event: Resize) -> None:
         if self.is_mounted and self.right_items and self.panel_kind not in {"mcp_editor", "mcp_custom_tool_form"}:
