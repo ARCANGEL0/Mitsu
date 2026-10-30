@@ -18,7 +18,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.events import Key, Resize, ScreenResume, ScreenSuspend
 from textual.screen import Screen
-from textual.widgets import Input, Static, TextArea
+from textual.widgets import Input, Static
 
 from mitsu import __version__
 from mitsu.armory import CATEGORIES as ARMORY_CATEGORIES
@@ -33,6 +33,7 @@ from mitsu.services.redteam_armory import (
     forget_managed_install,
     inspect_tool,
     open_install_terminal,
+    open_text_editor_terminal,
     record_managed_install,
 )
 from mitsu.tools.armory_mcp import resolve_executable
@@ -82,11 +83,11 @@ class MainMenuScreen(Screen):
         Binding("ctrl+left", "focus_left", "Command center"),
         Binding("ctrl+right", "focus_right", "Open panel"),
         Binding("enter", "select_current", "Select"),
-        Binding("ctrl+s", "save_mcp_configuration", "Save MCP configuration", priority=True),
         Binding("delete", "delete_selected_session", "Delete selected session", priority=True),
         Binding("tab", "toggle_panel", "Switch panel"),
         Binding("escape", "back_to_command_center", "Back", priority=True),
         Binding("q", "quit_app", "Quit"),
+        Binding("shift+q", "quit_app", "Quit", priority=True, key_display="Q"),
         Binding("ctrl+q", "quit_app", "Quit", priority=True),
     ]
 
@@ -183,14 +184,13 @@ class MainMenuScreen(Screen):
                     yield Static("", id="menu-right-detail", markup=False)
                     yield Input(placeholder="", password=True, id="menu-secret-input")
                     yield Input(placeholder="", id="menu-text-input")
-                    yield TextArea("", id="menu-mcp-editor", language="json", show_line_numbers=True)
                     with Vertical(id="menu-custom-tool-form"):
                         yield Static("ADD A CLI TOOL", id="menu-custom-tool-form-title", markup=False)
                         yield Static("", id="menu-custom-tool-step", markup=False)
                         yield Input(placeholder="", id="menu-custom-tool-input")
                         yield Static("Enter next    Shift+Tab previous    Esc cancel", id="menu-custom-tool-nav-hint", markup=False)
             yield Static(
-                "↑ / ↓ move    Enter select / open    Del remove session    ← / Esc command center    Tab switch panel    Q quit",
+                "↑ / ↓ move    Enter select / open    Del remove session    ← / Esc command center    Tab switch panel",
                 id="menu-footer",
                 markup=False,
             )
@@ -218,8 +218,6 @@ class MainMenuScreen(Screen):
             return
         if self.input_stage:
             field_id = "#menu-secret-input" if self.input_stage == "api_key" else "#menu-text-input"
-        elif self.panel_kind == "mcp_editor":
-            field_id = "#menu-mcp-editor"
         elif self.panel_kind == "mcp_custom_tool_form":
             field_id = "#menu-custom-tool-input"
         elif self.active_panel == "right":
@@ -229,10 +227,10 @@ class MainMenuScreen(Screen):
         self.query_one(field_id).focus()
 
     def on_resize(self, _event: Resize) -> None:
-        if self.is_mounted and self.right_items and self.panel_kind not in {"mcp_editor", "mcp_custom_tool_form"}:
+        if self.is_mounted and self.right_items and self.panel_kind != "mcp_custom_tool_form":
             self.call_after_refresh(self._render_right_list)
 
-    def on_key(self, event: Key) -> None:
+    async def on_key(self, event: Key) -> None:
         if (
             event.key == "space"
             and self.active_panel == "right"
@@ -250,7 +248,7 @@ class MainMenuScreen(Screen):
             and self.panel_kind in {"mcp_categories", "mcp_armory_categories", "mcp_tools", "mcp_custom_tools"}
         ):
             event.stop()
-            self.action_edit_mcp_configuration()
+            await self.action_edit_mcp_configuration()
         elif event.key == "shift+tab" and self.panel_kind == "mcp_custom_tool_form":
             event.stop()
             self._previous_custom_tool_field()
@@ -364,6 +362,9 @@ class MainMenuScreen(Screen):
         await self._select_right_item()
 
     def action_delete_selected_session(self) -> None:
+        if self.active_panel == "right" and self.panel_kind == "mcp_custom_tools":
+            self._delete_selected_cli_tool()
+            return
         if self.active_panel != "right" or self.panel_kind != "sessions" or not self.right_items:
             return
         item = self.right_items[self.right_index]
@@ -379,6 +380,28 @@ class MainMenuScreen(Screen):
                 self._delete_selected_session(session_id, title, selected_index)
 
         self.app.push_screen(dialog, dismissed)
+
+    def _delete_selected_cli_tool(self) -> None:
+        if not self.right_items:
+            return
+        item = self.right_items[self.right_index]
+        if item.get("action") != "mcp_custom_choose":
+            return
+        tool_index = int(item["tool_index"])
+        tools = self.mcp_config.get("custom_tools", [])
+        if not 0 <= tool_index < len(tools):
+            return
+        previous = list(tools)
+        del tools[tool_index]
+        self.mcp_config["custom_tools"] = tools
+        if not self._write_mcp_configuration():
+            self.mcp_config["custom_tools"] = previous
+            return
+        selected_index = self.right_index
+        self._show_custom_tool_list()
+        self.right_index = min(selected_index, len(self.right_items) - 1)
+        self._render_right_list()
+        self.query_one("#menu-right-list", MenuList).focus()
 
     def _delete_selected_session(self, session_id: str, title: str, selected_index: int) -> None:
         try:
@@ -419,18 +442,14 @@ class MainMenuScreen(Screen):
         elif action == "mcp_tool":
             self._toggle_mcp_tool(item["tool_id"])
 
-    def action_edit_mcp_configuration(self) -> None:
+    async def action_edit_mcp_configuration(self) -> None:
         if self.active_panel == "right" and self.panel_kind in {
             "mcp_categories", "mcp_armory_categories", "mcp_tools", "mcp_custom_tools"
         }:
-            self._open_mcp_editor()
-
-    async def action_save_mcp_configuration(self) -> None:
-        if self.panel_kind == "mcp_editor":
-            self._save_mcp_editor()
+            await self._open_mcp_editor(return_to_tools=self.panel_kind == "mcp_custom_tools")
 
     async def _select_right_item(self) -> None:
-        if not self.right_items or self.panel_kind == "armory_running":
+        if not self.right_items or self.panel_kind in {"armory_running", "mcp_external_editor"}:
             return
         item = self.right_items[self.right_index]
         action = item["action"]
@@ -456,10 +475,14 @@ class MainMenuScreen(Screen):
             self._show_custom_tool_list()
         elif action == "mcp_custom_add":
             self._begin_custom_tool_form()
-        elif action == "mcp_custom_edit":
+        elif action == "mcp_custom_manual":
+            await self._open_mcp_editor(return_to_tools=True)
+        elif action == "mcp_custom_choose":
+            self._show_custom_tool_choices(int(item["tool_index"]))
+        elif action == "mcp_custom_guided":
             self._begin_custom_tool_form(int(item["tool_index"]))
         elif action == "mcp_external_servers":
-            self._open_mcp_editor()
+            await self._open_mcp_editor()
         elif action == "search_engines":
             self.app.push_screen(
                 SearchEngineDialog(self.credentials),
@@ -640,9 +663,8 @@ class MainMenuScreen(Screen):
         self.right_index = 0
         self.query_one("#menu-right-title", Static).update("CONFIGURE MCP SERVER")
         self.query_one("#menu-footer", Static).update(
-            "↑ / ↓ move    Enter open    Space toggle Armory    E advanced JSON    Esc back    Q quit"
+            "↑ / ↓ move    Enter open    Space toggle Armory    E advanced JSON    Esc back"
         )
-        self._set_mcp_editor_visible(False)
         self._set_custom_tool_form_visible(False)
         self._render_right_list()
         detail = self.query_one("#menu-right-detail", Static)
@@ -670,9 +692,8 @@ class MainMenuScreen(Screen):
         self.right_index = 0
         self.query_one("#menu-right-title", Static).update("REDTEAM ARMORY MCP TOOLS")
         self.query_one("#menu-footer", Static).update(
-            "↑ / ↓ move    Enter inspect    Space toggle category    E advanced JSON    Esc server overview    Q quit"
+            "↑ / ↓ move    Enter inspect    Space toggle category    E advanced JSON    Esc server overview"
         )
-        self._set_mcp_editor_visible(False)
         self._set_custom_tool_form_visible(False)
         self._render_right_list()
         self.query_one("#menu-right-list", MenuList).focus()
@@ -685,7 +706,7 @@ class MainMenuScreen(Screen):
         category = next(item for item in ARMORY_CATEGORIES if item.id == category_id)
         self.query_one("#menu-right-title", Static).update(category.name.upper())
         self.query_one("#menu-footer", Static).update(
-            "↑ / ↓ move    Space enable / disable    E advanced JSON    Esc server overview    Q quit"
+            "↑ / ↓ move    Space enable / disable    E advanced JSON    Esc server overview"
         )
         self._refresh_mcp_tools(TOOLS_BY_CATEGORY[category_id][0].id)
         self.query_one("#menu-right-list", MenuList).focus()
@@ -799,30 +820,56 @@ class MainMenuScreen(Screen):
         self.panel_kind = "mcp_custom_tools"
         custom_tools = self.mcp_config.get("custom_tools", [])
         self.right_items = [{
-            "label": "+ Add a CLI tool",
+            "label": "Guided setup",
             "action": "mcp_custom_add",
             "detail": (
                 "Add an installed command-line program to Mitsu’s built-in MCP server. "
                 "A short guided setup collects the command and tells the model how to use it."
             ),
+        }, {
+            "label": "Manual setup",
+            "action": "mcp_custom_manual",
+            "detail": "Open mcp_servers.json in the default terminal and editor to configure CLI tools.",
         }]
         for index, tool in enumerate(custom_tools):
             self.right_items.append({
                 "label": f"{tool['name']}  ·  {tool['command']}",
-                "action": "mcp_custom_edit",
+                "action": "mcp_custom_choose",
                 "tool_index": str(index),
                 "detail": (
                     f"MCP tool: mitsu__custom_{tool['id'].replace('-', '_')}\n"
-                    f"{tool['description']}\n\nEnter to edit this tool."
+                    f"{tool['description']}\n\nEnter to choose a setup method."
                 ),
             })
         self.right_index = 0
         self.query_one("#menu-right-title", Static).update("CUSTOM CLI TOOLS")
         self.query_one("#menu-footer", Static).update(
-            "↑ / ↓ move    Enter add / edit    E advanced JSON    Esc server overview    Q quit"
+            "↑ / ↓ move    Enter choose / edit    Del - delete CLI tool    E advanced JSON    Esc server overview"
         )
-        self._set_mcp_editor_visible(False)
         self._set_custom_tool_form_visible(False)
+        self._render_right_list()
+        self.query_one("#menu-right-list", MenuList).focus()
+
+    def _show_custom_tool_choices(self, tool_index: int) -> None:
+        tool = self.mcp_config.get("custom_tools", [])[tool_index]
+        self.panel_kind = "mcp_custom_setup_choice"
+        self.right_index = 0
+        self.right_items = [
+            {
+                "label": "Guided setup",
+                "action": "mcp_custom_guided",
+                "tool_index": str(tool_index),
+            },
+            {
+                "label": "Manual setup",
+                "action": "mcp_custom_manual",
+                "detail": "Open mcp_servers.json in the default terminal and editor to configure CLI tools.",
+            },
+        ]
+        self.query_one("#menu-right-title", Static).update(f"SETUP {tool['name'].upper()}")
+        self.query_one("#menu-footer", Static).update(
+            "↑ / ↓ move    Enter select    Esc back"
+        )
         self._render_right_list()
         self.query_one("#menu-right-list", MenuList).focus()
 
@@ -856,9 +903,8 @@ class MainMenuScreen(Screen):
         self.query_one("#menu-custom-tool-form-title", Static).update(title)
         self.query_one("#menu-right-title", Static).update("CUSTOM CLI TOOL SETUP")
         self.query_one("#menu-footer", Static).update(
-            "Enter next / save    Shift+Tab previous    Esc cancel    Q quit"
+            "Enter next / save    Shift+Tab previous    Esc cancel"
         )
-        self._set_mcp_editor_visible(False)
         self._set_custom_tool_form_visible(True)
         self._render_custom_tool_form_step()
 
@@ -1004,9 +1050,8 @@ class MainMenuScreen(Screen):
         form.display = visible
         if visible:
             self.query_one("#menu-right-list", MenuList).display = False
-            self.query_one("#menu-mcp-editor", TextArea).display = False
             self.query_one("#menu-right-detail", Static).display = True
-        elif self.panel_kind != "mcp_editor":
+        else:
             self.query_one("#menu-right-list", MenuList).display = True
 
     def _write_mcp_configuration(self) -> bool:
@@ -1040,108 +1085,50 @@ class MainMenuScreen(Screen):
             return False
         return True
 
-    def _open_mcp_editor(self) -> None:
-        if self.mcp_load_error:
-            try:
-                editor_text = self.mcp_path.read_text(encoding="utf-8")
-            except OSError as error:
-                editor_text = json.dumps(self.mcp_config, ensure_ascii=False, indent=2) + "\n"
-                self.mcp_load_error = f"Could not read existing MCP settings: {error}"
-        else:
-            editor_text = json.dumps(self.mcp_config, ensure_ascii=False, indent=2) + "\n"
-        editor = self.query_one("#menu-mcp-editor", TextArea)
-        editor.load_text(editor_text)
-        self.panel_kind = "mcp_editor"
+    async def _open_mcp_editor(self, return_to_tools: bool = False) -> None:
+        if not self.mcp_path.exists() and not self._write_mcp_configuration():
+            return
+        self.panel_kind = "mcp_external_editor"
         self.query_one("#menu-right-title", Static).update("ADVANCED MCP CONFIGURATION")
-        self.query_one("#menu-footer", Static).update(
-            "Ctrl+S save    Esc server overview    Q quit"
-        )
-        self.query_one("#menu-right-list", MenuList).display = False
         self.query_one("#menu-model-search", Input).display = False
         self._set_custom_tool_form_visible(False)
-        self.query_one("#menu-right-detail", Static).update(
-            'Use "custom_tools" to teach Mitsu an installed CLI: provide a unique id, executable, purpose, '
-            'usage notes/examples, and named parameters with descriptions and optional CLI flags. Mitsu exposes each '
-            'entry as its own documented MCP tool (mitsu__custom_<id>) and runs that executable directly without a shell. '
-            'For example, copy the tool’s documented command into "args" and map "target" to "--target" with a '
-            'description explaining which authorized target value to pass. Use "servers" for programs that already '
-            'speak MCP. "armory.tools" only selects catalog tools. '
-            'Ctrl+S validates and saves; changes apply to new sessions.'
-        )
-        self._set_mcp_editor_visible(True)
-        editor.focus()
-
-    def _save_mcp_editor(self) -> None:
-        editor = self.query_one("#menu-mcp-editor", TextArea)
+        self.query_one("#menu-right-list", MenuList).display = False
+        self.query_one("#menu-right-detail", Static).display = True
+        detail = self.query_one("#menu-right-detail", Static)
         try:
-            value = json.loads(editor.text)
-        except json.JSONDecodeError as error:
-            self.query_one("#menu-right-detail", Static).update(
-                f"Invalid JSON: {error.msg} at line {error.lineno}. Fix it, then press Ctrl+S."
+            process, terminal, editor = await asyncio.to_thread(
+                open_text_editor_terminal, self.mcp_path
             )
-            return
-        if not MCPConfigDialog._valid_config(value):
-            self.query_one("#menu-right-detail", Static).update(
-                'Use an object with a "servers" list and optional "custom_tools" list. Custom CLI entries need an id, name, '
-                'command, description, and documented parameters. Native servers need a name and command or http(s) URL.'
-            )
-            return
-        value = dict(value)
-        armory = dict(value.get("armory") or {"enabled": True})
-        selection = armory.get("tools", ["*"])
-        if isinstance(selection, dict):
-            selected_tool_ids = {
-                tool_id for tool_id, enabled in selection.items() if enabled is True
-            }
-        else:
-            identifiers = set(selection)
-            if "*" in identifiers:
-                selected_tool_ids = {tool.id for tool in TOOLS}
+            detail.update(f"Editing {self.mcp_path} in {terminal} with {editor}. Close the editor to reload MCP settings.")
+            await asyncio.to_thread(process.wait)
+        except (OSError, ArmoryError) as error:
+            if return_to_tools:
+                self._show_custom_tool_list()
             else:
-                selected_tool_ids = identifiers & set(TOOL_BY_ID)
-                for category_id in identifiers:
-                    selected_tool_ids.update(
-                        tool.id for tool in TOOLS_BY_CATEGORY.get(category_id, ())
-                    )
-        armory["tools"] = {
-            tool.id: tool.id in selected_tool_ids
-            for tool in TOOLS
-        }
-        value["armory"] = armory
-        previous = self.mcp_config
-        previous_error = self.mcp_load_error
-        self.mcp_config = value
-        # A valid editor save is also the repair path for an unreadable or malformed file.
-        self.mcp_load_error = None
-        if not self._write_mcp_configuration():
-            self.mcp_config = previous
-            self.mcp_load_error = previous_error
+                self._show_mcp_categories()
+            self.query_one("#menu-right-detail", Static).update(str(error))
             return
-        self.mcp_selected_tool_ids = selected_tool_ids
-        self._show_mcp_categories()
-        self.query_one("#menu-right-detail", Static).update(
-            "MCP configuration saved. Custom CLI tools, servers, and Armory selections apply to new sessions."
-        )
+        if not self.is_mounted:
+            return
+        self._read_mcp_configuration()
+        error = self.mcp_load_error
+        if return_to_tools and not error:
+            self._show_custom_tool_list()
+        else:
+            self._show_mcp_categories()
+            if error:
+                self.query_one("#menu-right-detail", Static).update(error)
         self.query_one("#menu-right-list", MenuList).focus()
 
-    def _set_mcp_editor_visible(self, visible: bool) -> None:
-        editor = self.query_one("#menu-mcp-editor", TextArea)
-        editor.display = visible
-        if visible:
-            self.query_one("#menu-custom-tool-form", Vertical).display = False
-        self.query_one("#menu-right-list", MenuList).display = not visible
-        self.query_one("#menu-right-detail", Static).display = True
-
     def _mcp_back(self) -> None:
-        if self.panel_kind == "mcp_editor":
-            self._set_mcp_editor_visible(False)
-            self._show_mcp_categories()
-            self.query_one("#menu-right-list", MenuList).focus()
-        elif self.panel_kind == "mcp_custom_tool_form":
+        if self.panel_kind == "mcp_custom_tool_form":
             self._show_custom_tool_list()
             self.query_one("#menu-right-list", MenuList).focus()
         elif self.panel_kind == "mcp_custom_tools":
             self._show_mcp_categories()
+            self.query_one("#menu-right-list", MenuList).focus()
+        elif self.panel_kind == "mcp_custom_setup_choice":
+            self._show_custom_tool_list()
             self.query_one("#menu-right-list", MenuList).focus()
         elif self.panel_kind == "mcp_tools":
             self._show_mcp_armory_categories()
@@ -1391,11 +1378,11 @@ class MainMenuScreen(Screen):
         model_search.value = ""
         kind = ("sessions", "configuration", "update", "quit")[self.left_index]
         self.query_one("#menu-footer", Static).update(
-            "↑ / ↓ move    Enter select / open    Del remove session    ← / Esc command center    Tab switch panel    Q quit"
+            "↑ / ↓ move    Enter select / open    Del remove session    ← / Esc command center    Tab switch panel"
         )
         if self.left_index == 2:
             self.query_one("#menu-footer", Static).update(
-                "Enter check for updates    Esc command center    Q quit"
+                "Enter check for updates    Esc command center"
             )
         self.panel_kind = kind
         self.right_index = 0

@@ -617,3 +617,32 @@ def open_install_terminal(
     except OSError as error:
         raise ArmoryError(f"Could not open {terminal_id}: {error}") from error
     return process, method_id
+
+
+def open_text_editor_terminal(path: Path) -> tuple[subprocess.Popen, str, str]:
+    configured = os.environ.get("EDITOR")
+    editor = shlex.split(configured) if configured else []
+    if not editor:
+        editor = next(([name] for name in ("nano", "micro", "nvim", "vim", "vi") if shutil.which(name)), [])
+    if not editor:
+        raise ArmoryError("Install nano, vim, or vi, or set EDITOR to your preferred terminal editor.")
+    editor_path = shutil.which(editor[0])
+    if not editor_path:
+        raise ArmoryError(f"The configured editor {editor[0]} was not found on PATH.")
+    editor[0] = editor_path
+    terminal = _find_terminal()
+    if terminal is None:
+        raise ArmoryError("No supported terminal emulator was found to open the MCP settings.")
+    terminal_id, terminal_path = terminal
+    command = shlex.join([*editor, str(path)])
+    try:
+        process = subprocess.Popen(
+            _terminal_command(terminal_id, terminal_path, command),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as error:
+        raise ArmoryError(f"Could not open {terminal_id}: {error}") from error
+    return process, terminal_id, Path(editor_path).name
