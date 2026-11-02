@@ -3,362 +3,314 @@
 from __future__ import annotations
 
 import html
-import hashlib
-import ipaddress
 import json
+import base64
 from pathlib import Path
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 
-_CATEGORY_ORDER = ("asset", "service", "finding", "exploit", "observation", "account", "person")
-_ASSET_CATEGORIES = {
-    "target": "asset",
-    "domain": "asset",
-    "hostname": "asset",
-    "nameserver": "asset",
-    "ip": "asset",
-    "url": "asset",
-    "service": "service",
-    "endpoint": "service",
-    "technology": "service",
-    "other": "asset",
+_types = {
+    "target": "target", "domain": "domain", "hostname": "host",
+    "nameserver": "nameserver", "ip": "ip", "url": "domain",
+    "service": "service", "endpoint": "service", "technology": "service",
+    "email": "email", "person": "person", "account": "account", "other": "target",
+}
+_groups = {
+    "target": "Targets & network", "domain": "Targets & network", "host": "Targets & network",
+    "nameserver": "Targets & network", "ip": "Targets & network",
+    "service": "Services & technologies", "email": "People", "person": "People", "account": "Accounts & credentials",
 }
 
-
+_colors = {
+    "target": "#70d8e8", "ip": "#83aaff", "domain": "#b59aff", "host": "#5ec8ff",
+    "nameserver": "#4fdfc2", "service": "#f0bd68", "email": "#ff91c8",
+    "person": "#ff718f", "account": "#85d9ad",
+}
 def _text(value: Any, limit: int = 1_000) -> str:
     if isinstance(value, (dict, list)):
         value = json.dumps(value, ensure_ascii=False, default=str)
     return str(value or "").strip()[:limit]
 
 
-def _record_id(section: str, record: dict[str, Any], index: int) -> str:
-    identity = _text(record.get("id"), 120)
-    if identity:
-        return f"{section}:{identity}"
-    label = _text(record.get("value") or record.get("title") or record.get("name"), 200)
-    return f"{section}:{index}:{label.casefold()}"
+def _id(section: str, record: dict[str, Any], index: int) -> str:
+    return _text(record.get("id"), 120) or f"{section}:{index}:{_text(record.get('value') or record.get('name'), 160).casefold()}"
 
 
-def _collect_text(value: Any) -> list[str]:
+def _evidence_summary(value: Any) -> str:
+    # Evidence can be a JSON string, so unpack it before showing it.
     if isinstance(value, str):
-        return [value]
-    if isinstance(value, dict):
-        return [text for item in value.values() for text in _collect_text(item)]
-    if isinstance(value, list):
-        return [text for item in value for text in _collect_text(item)]
-    return []
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            decoded = value
+        if isinstance(decoded, (dict, list)):
+            value = decoded
+    entries = value if isinstance(value, list) else [value]
+    summaries = []
+    for entry in entries:
+        if isinstance(entry, dict):
+            source = _text(entry.get("source"), 120)
+            detail = _text(entry.get("details"), 1_200)
+            confidence = _text(entry.get("confidence"), 40)
+            recorded = _text(entry.get("recorded_at"), 80)
+            if recorded:
+                recorded = recorded.replace("T", " ").replace("+00:00", " UTC").split(".", 1)[0]
+            summary = f"{source}: {detail}" if source and detail else detail or source
+            if confidence:
+                summary += f" ({confidence} confidence)"
+            if recorded:
+                summary += f" · {recorded}"
+        else:
+            summary = _text(entry, 1_200)
+        if summary:
+            summaries.append(summary)
+    return "\n".join(summaries)
 
 
-def _node_details(record: dict[str, Any], category: str) -> list[dict[str, str]]:
-    fields = {
-        "asset": ("type", "scope", "verification", "confidence", "parent", "attributes"),
-        "service": ("type", "scope", "verification", "confidence", "parent", "attributes"),
-        "finding": ("severity", "status", "confidence", "asset", "summary", "recommendation"),
-        "exploit": ("status", "confidence", "asset", "summary", "source"),
-        "observation": ("category", "status", "confidence", "asset", "details", "worked", "failed", "next_step"),
-        "account": ("type", "secret_type", "secret", "access", "status", "confidence", "target", "details"),
-        "person": ("detail_type", "relationship", "status", "confidence", "details", "source"),
-    }.get(category, ())
-    details = [
-        {"label": key.replace("_", " ").title(), "value": _text(record.get(key), 1_600)}
-        for key in fields
-        if record.get(key) not in (None, "", [], {})
-    ]
-    evidence = record.get("evidence", [])
-    if isinstance(evidence, list):
-        for item in evidence[:12]:
-            if not isinstance(item, dict):
-                continue
-            source = _text(item.get("source"), 200)
-            details_text = _text(item.get("details"), 1_600)
-            recorded_at = _text(item.get("recorded_at"), 80)
-            value = " · ".join(part for part in (source, recorded_at, details_text) if part)
-            if value:
-                details.append({"label": "Evidence", "value": value})
-    return details
+def _fields(record: dict[str, Any], skip: set[str] | None = None, section: str = "Asset") -> list[dict[str, str]]:
+    skip = skip or set()
+    out = []
+
+    def add(label: str, value: Any) -> None:
+        label = label.replace("_", " ").title()
+        if value in (None, "", [], {}):
+            return
+        if isinstance(value, dict):
+            if label == "Evidence":
+                source = _text(value.get("source"), 160)
+                detail = _text(value.get("details"), 1_200)
+                recorded = _text(value.get("recorded_at"), 80)
+                confidence = _text(value.get("confidence"), 40)
+                evidence_label = "Evidence" + (f" · {source}" if source else "")
+                evidence_value = detail or ", ".join(f"{k}: {_text(v, 250)}" for k, v in value.items() if v not in (None, "", [], {}))
+                if recorded:
+                    evidence_value += f" · {recorded}"
+                if confidence:
+                    evidence_value += f" · {confidence} confidence"
+                if evidence_value:
+                    out.append({"section": section, "label": evidence_label, "value": evidence_value})
+                return
+            for key, item in value.items():
+                add(f"{label} · {key}", item)
+            return
+        if isinstance(value, list):
+            for item in value:
+                add(label, item)
+            return
+        out.append({"section": section, "label": label, "value": _text(value, 1_600)})
+
+    for key, value in record.items():
+        if key in skip or value in (None, "", [], {}):
+            continue
+        add(key, value)
+    return out
 
 
-def build_surface_graph(
-    session: dict[str, Any],
-    extra_nodes: list[dict[str, Any]] | None = None,
-    connections: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
+def build_surface_graph(session: dict[str, Any], connections: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     intel = session.get("intel") if isinstance(session.get("intel"), dict) else {}
     nodes: list[dict[str, Any]] = []
-    assets: list[tuple[dict[str, Any], str]] = []
-    record_nodes: list[tuple[str, dict[str, Any], str]] = []
-    by_reference: dict[str, list[str]] = {}
-
-    sections = (
-        ("assets", "asset"),
-        ("findings", "finding"),
-        ("exploits", "exploit"),
-        ("observations", "observation"),
-        ("accounts", "account"),
-        ("manhunt", "person"),
-    )
-    for section, category in sections:
-        records = intel.get(section, [])
-        if not isinstance(records, list):
+    refs: dict[str, list[str]] = {}
+    canonical: dict[tuple[str, str], str] = {}
+    parent_links: list[tuple[str, str, str]] = []
+    for section in ("assets", "manhunt"):
+        rows = intel.get(section, [])
+        if not isinstance(rows, list):
             continue
-        for index, record in enumerate(records):
+        for index, record in enumerate(rows):
             if not isinstance(record, dict):
                 continue
-            node_id = _record_id(section, record, index)
-            record_type = _text(record.get("type"), 80).casefold()
-            node_category = _ASSET_CATEGORIES.get(record_type, category) if section == "assets" else category
-            if section == "assets":
-                label = _text(record.get("value"), 500) or "Unnamed asset"
-                assets.append((record, node_id))
-                for value in (record.get("id"), record.get("value")):
-                    normalized = _text(value, 1_000).casefold()
-                    if normalized:
-                        by_reference.setdefault(normalized, []).append(node_id)
-            elif section == "accounts":
-                label = _text(record.get("name"), 500) or "Account"
-            elif section == "manhunt":
-                name = _text(record.get("person"), 250) or "Person"
-                value = _text(record.get("value"), 250)
-                label = f"{name} · {value}" if value else name
+            kind = _text(record.get("type") or ("person" if section == "manhunt" else "asset"), 60).casefold()
+            category = _types.get(kind, "target" if section == "assets" else None)
+            if section == "manhunt":
+                category = "email" if "@" in _text(record.get("value"), 250) else "person"
+            if not category:
+                continue
+            label = _text(record.get("value") or record.get("name") or record.get("person"), 400)
+            if not label:
+                continue
+            if category == "target":
+                # Targets can be domains or IPs; keep their real type in the graph.
+                if "@" in label:
+                    category = "email"
+                elif re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", label):
+                    category = "ip"
+                elif re.fullmatch(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", label, re.I):
+                    category = "domain"
+            key = (category, label.casefold())
+            node_id = canonical.get(key)
+            node_fields = _fields(record, {"value", "name", "person", "id", "type", "primary", "evidence"})
+            node_fields.extend(_fields({"evidence": record.get("evidence")}, section="Evidence"))
+            if node_id:
+                node = next(item for item in nodes if item["id"] == node_id)
+                existing = {(field["label"], field["value"]) for field in node["details"]}
+                node["details"].extend(field for field in node_fields if (field["label"], field["value"]) not in existing)
+                node["primary"] = node["primary"] or record.get("primary") is True or kind == "target"
             else:
-                label = _text(record.get("title"), 500) or section.title()
-            node = {
-                "id": node_id,
-                "label": label,
-                "category": node_category,
-                "kind": record_type or section.rstrip("s"),
-                "timestamp": _text(record.get("first_seen") or record.get("updated_at"), 80),
-                "details": _node_details(record, node_category),
-            }
-            nodes.append(node)
-            record_nodes.append((section, record, node_id))
-            for value in (record.get("title"), record.get("name"), record.get("person")):
-                normalized = _text(value, 1_000).casefold()
-                if normalized:
-                    by_reference.setdefault(normalized, []).append(node_id)
+                node_id = _id(section, record, index)
+                display_kind = category if kind == "target" and category != "target" else kind
+                display_label = label
+                if category == "service" and label.casefold().startswith(("http://", "https://")):
+                    parsed_url = urlsplit(label)
+                    display_label = parsed_url.path.rstrip("/") or parsed_url.netloc
+                node = {"id": node_id, "label": label, "kind": display_kind, "category": category,
+                        "display_label": display_label,
+                        "primary": record.get("primary") is True or kind == "target",
+                        "os": "windows" if re.search(r"\b(windows|win10|win11)\b", _text(record, 2_000), re.I) else "linux" if re.search(r"\b(linux|ubuntu|debian|kali|fedora|centos)\b", _text(record, 2_000), re.I) else "",
+                        "details": node_fields, "group": _groups[category]}
+                nodes.append(node)
+                canonical[key] = node_id
+            for value in (record.get("id"), record.get("value"), record.get("name"), record.get("person")):
+                key = _text(value, 1_000).casefold()
+                if key:
+                    matches = refs.setdefault(key, [])
+                    if node_id not in matches:
+                        matches.append(node_id)
+            parent = _text(record.get("parent"), 1_000)
+            if parent:
+                parent_links.append((node_id, parent, _evidence_summary(record.get("evidence"))))
 
-    messages = session.get("messages", [])
-    transcript = messages if isinstance(messages, list) else []
-    evidence_text = "\n".join(_collect_text((intel, transcript))).casefold()
-    known_labels = {node["label"].casefold() for node in nodes}
-    allowed_categories = set(_CATEGORY_ORDER)
-    for item in (extra_nodes or [])[:300]:
-        if not isinstance(item, dict):
+    by_id = {node["id"]: node for node in nodes}
+    details_seen = {node["id"]: set() for node in nodes}
+    for section in ("findings", "exploits", "observations", "accounts", "manhunt"):
+        rows = intel.get(section, [])
+        if not isinstance(rows, list):
             continue
-        label = _text(item.get("label"), 500)
-        category = _text(item.get("category"), 40).casefold()
-        evidence = _text(item.get("evidence"), 1_000)
-        if not label or category not in allowed_categories or label.casefold() in known_labels:
-            continue
-        if len(evidence) < 5 or evidence.casefold() not in evidence_text:
-            continue
-        # Chat-only notes stay unverified until Intel has them.
-        node_id = "transcript:" + hashlib.sha256(f"{category}\0{label}".encode()).hexdigest()[:20]
-        nodes.append({
-            "id": node_id,
-            "label": label,
-            "category": category,
-            "kind": _text(item.get("kind"), 80) or "session note",
-            "timestamp": "",
-            "details": [
-                {"label": "Status", "value": "Unverified · captured from session conversation"},
-                {"label": "Transcript evidence", "value": evidence},
-            ],
-        })
-        known_labels.add(label.casefold())
+        for record in rows:
+            if not isinstance(record, dict):
+                continue
+            ref = _text(record.get("asset") or record.get("target") or record.get("email") or record.get("person"), 1_000).casefold()
+            matches = refs.get(ref, [])
+            if len(matches) != 1:
+                continue
+            node_id = matches[0]
+            title = _text(record.get("title") or record.get("name") or record.get("person") or section.title(), 240)
+            signature = f"{section}:{title}:{_text(record.get('id'), 100)}"
+            if signature in details_seen[node_id]:
+                continue
+            details_seen[node_id].add(signature)
+            group = section[:-1].title() if section.endswith("s") else section.title()
+            entries = _fields(record, {"id", "asset", "target", "email", "person", "title", "evidence", "details", "summary", "worked", "failed"}, group)
+            heading = _text(record.get("details") or record.get("summary") or record.get("worked") or record.get("failed"), 1_200)
+            by_id[node_id]["details"].extend(entries)
+            if heading:
+                by_id[node_id]["details"].append({"section": group, "label": title, "value": heading})
+            by_id[node_id]["details"].extend(_fields({"evidence": record.get("evidence")}, section="Evidence"))
 
+    valid = {node["id"] for node in nodes}
     edges: list[dict[str, str]] = []
-    edge_keys: set[tuple[str, str, str]] = set()
-    valid_ids = {node["id"] for node in nodes}
-    by_label: dict[str, list[str]] = {}
-    for node in nodes:
-        by_label.setdefault(node["label"].casefold(), []).append(node["id"])
+    seen: set[tuple[str, str, str]] = set()
 
-    def add_edge(source: str, target: str, label: str, evidence: str = "") -> None:
-        if not source or not target or source == target or source not in valid_ids or target not in valid_ids:
+    def add(source: str, target: str, label: str, evidence: str) -> None:
+        if source not in valid or target not in valid or source == target or not evidence:
             return
         key = (source, target, label.casefold())
-        if key in edge_keys:
-            return
-        edge_keys.add(key)
-        edges.append({"source": source, "target": target, "label": label[:100], "evidence": evidence[:500]})
+        if key not in seen:
+            seen.add(key)
+            edges.append({"source": source, "target": target, "label": label[:80], "evidence": evidence[:500]})
 
-    # If there are multiple asset matches, skip the link.
-    for asset, node_id in assets:
-        parent = _text(asset.get("parent"), 1_000).casefold()
-        candidates = by_reference.get(parent, [])
-        parent_matches = [candidate for candidate in candidates if candidate != node_id]
-        parent_id = parent_matches[0] if len(parent_matches) == 1 else ""
+    evidence_pool = json.dumps(intel, ensure_ascii=False, default=str).casefold()
+    # The saved parent field is the link between these two nodes.
+    for child_id, parent_label, evidence in parent_links:
+        parent_ids = refs.get(parent_label.casefold(), [])
+        parent_id = next((item for item in parent_ids if item != child_id and by_id[item].get("primary")), None)
+        if parent_id is None:
+            parent_id = next((item for item in parent_ids if item != child_id), None)
         if parent_id:
-            parent_record = next((item for item, ident in assets if ident == parent_id), {})
-            parent_type = _text(parent_record.get("type"), 80).casefold()
-            child_type = _text(asset.get("type"), 80).casefold()
-            if parent_type in {"domain", "target"} and child_type == "hostname":
-                label = "has hostname"
-            elif parent_type in {"domain", "hostname"} and child_type == "ip":
-                label = "resolves to"
-            elif parent_type in {"ip", "hostname", "target"} and child_type == "service":
-                label = "exposes"
-            elif parent_type == "service" and child_type == "technology":
-                label = "runs"
-            elif parent_type in {"domain", "target"}:
-                label = "contains"
-            else:
-                label = "related to"
-            add_edge(parent_id, node_id, label, f"Intel parent: {_text(asset.get('parent'), 250)}")
-
-    relation_labels = {
-        "findings": "has finding",
-        "exploits": "has vulnerability reference",
-        "observations": "has observation",
-        "accounts": "has account",
-        "manhunt": "has person detail",
-    }
-    for section, record, node_id in record_nodes:
-        if section == "assets":
+            add(parent_id, child_id, "parent of", evidence or f"Recorded parent asset: {parent_label}")
+    for item in (connections or [])[:300]:
+        if not isinstance(item, dict):
             continue
-        reference = _text(record.get("asset") or record.get("target"), 1_000).casefold()
-        asset_matches = by_reference.get(reference, [])
-        if len(asset_matches) == 1:
-            add_edge(asset_matches[0], node_id, relation_labels.get(section, "related to"), reference)
-
-    for network_record, network_id in assets:
-        network_value = _text(network_record.get("value"), 200)
-        if _text(network_record.get("type"), 80).casefold() != "target" or "/" not in network_value:
+        source, target = _text(item.get("source"), 160), _text(item.get("target"), 160)
+        if source not in valid or target not in valid:
             continue
-        try:
-            network = ipaddress.ip_network(network_value, strict=False)
-        except ValueError:
+        evidence = _text(item.get("evidence"), 500)
+        if len(evidence) < 5 or evidence.casefold() not in evidence_pool:
             continue
-        for ip_record, ip_id in assets:
-            if _text(ip_record.get("type"), 80).casefold() != "ip":
-                continue
-            try:
-                address = ipaddress.ip_address(_text(ip_record.get("value"), 200))
-            except ValueError:
-                continue
-            if address.version == network.version and address in network:
-                add_edge(network_id, ip_id, "contains address", f"{address} is within {network}")
+        add(source, target, _text(item.get("label"), 80) or "related to", _evidence_summary(evidence))
 
-    if connections:
-        for connection in connections[:300]:
-            if not isinstance(connection, dict):
-                continue
-            source = _text(connection.get("source"), 160)
-            target = _text(connection.get("target"), 160)
-            label = _text(connection.get("label"), 100) or "related to"
-            evidence = _text(connection.get("evidence"), 500)
-            source_id = source if source in valid_ids else next(iter(by_label.get(source.casefold(), [])), "")
-            target_id = target if target in valid_ids else next(iter(by_label.get(target.casefold(), [])), "")
-            source_matches = by_label.get(source.casefold(), [])
-            target_matches = by_label.get(target.casefold(), [])
-            if (
-                source_id
-                and target_id
-                and (source in valid_ids or len(source_matches) == 1)
-                and (target in valid_ids or len(target_matches) == 1)
-                and len(evidence) >= 5
-                and evidence.casefold() in evidence_text
-            ):
-                add_edge(source_id, target_id, label, evidence)
-
-    nodes.sort(key=lambda item: (_CATEGORY_ORDER.index(item["category"]) if item["category"] in _CATEGORY_ORDER else len(_CATEGORY_ORDER), item["label"].casefold(), item["id"]))
-    for node in nodes:
-        node["details"] = node["details"][:40]
-    created_at = _text(session.get("created_at"), 80)
-    updated_at = _text(session.get("updated_at"), 80)
-    return {
-        "title": _text(session.get("title"), 160) or "Untitled session",
-        "session_id": _text(session.get("id"), 64),
-        "mode": _text(session.get("mode"), 40),
-        "created_at": created_at,
-        "updated_at": updated_at,
-        "targets": [_text(target, 500) for target in session.get("targets", []) if _text(target, 500)] if isinstance(session.get("targets"), list) else [],
-        "nodes": nodes,
-        "edges": edges,
-        "transcript_node_count": sum(node["id"].startswith("transcript:") for node in nodes),
-        "counts": {category: sum(node["category"] == category for node in nodes) for category in _CATEGORY_ORDER},
-    }
+    nodes.sort(key=lambda node: (node["group"], node["label"].casefold(), node["id"]))
+    categories = sorted({node["category"] for node in nodes})
+    return {"title": _text(session.get("title"), 160) or "Untitled session", "mode": _text(session.get("mode"), 40),
+        "created_at": _text(session.get("created_at"), 80), "updated_at": _text(session.get("updated_at"), 80),
+            "nodes": nodes, "edges": edges, "categories": categories,
+            "counts": {category: sum(node["category"] == category for node in nodes) for category in categories}}
 
 
 def _basic_html(graph: dict[str, Any]) -> str:
-    safe_graph = json.dumps(graph, ensure_ascii=False, separators=(",", ":"), default=str)
-    safe_graph = safe_graph.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    data = json.dumps(graph, ensure_ascii=False, separators=(",", ":"), default=str)
+    data = data.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
     title = html.escape(str(graph["title"]))
-    # Keep the styles and data here so the map works offline.
-    template = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>__TITLE__ · Mitsu Attack Surface</title>
+    logo_path = Path(__file__).resolve().parents[1] / "assets" / "example" / "icon.svg"
+    logo = "data:image/svg+xml;base64," + base64.b64encode(logo_path.read_bytes()).decode("ascii")
+    page = r'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>__TITLE__ · Mitsu</title>
 <style>
-:root{color-scheme:dark;--bg:#091019;--panel:#101b27;--panel-2:#142333;--line:#263b50;--ink:#e8f0f7;--muted:#9eafc0;--cyan:#80deea;--violet:#ab97ff;--pink:#ed8cab;--green:#82d6b2;--gold:#e7c77a}
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 20% 0,#142b3e,var(--bg) 55%);color:var(--ink);font:14px/1.45 system-ui,sans-serif}
-header{display:flex;justify-content:space-between;align-items:center;gap:20px;padding:20px 26px;border-bottom:1px solid var(--line);background:#0b131de8}
-header small{color:var(--cyan);letter-spacing:.13em;text-transform:uppercase}h1{margin:4px 0 0;font-size:clamp(22px,3vw,32px)}.brand{color:var(--muted);font-size:12px}
-.meta{display:flex;gap:8px;flex-wrap:wrap;padding:12px 20px;border-bottom:1px solid var(--line)}.pill{padding:6px 10px;border:1px solid var(--line);border-radius:999px;color:var(--muted);background:var(--panel)}
-.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:12px 16px;border-bottom:1px solid var(--line);background:#0d1722}.toolbar input{min-width:220px;flex:1}.toolbar input,.toolbar button{height:36px;padding:0 11px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--ink);font:inherit}.toolbar button{cursor:pointer}.toolbar button:hover{border-color:var(--cyan);color:var(--cyan)}.filters{display:flex;gap:6px;flex-wrap:wrap}.filter{padding:6px 9px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:11px;cursor:pointer}.filter input{width:auto;min-width:0;height:auto;margin:0 5px 0 0;accent-color:var(--cyan)}
-.layout{display:grid;grid-template-columns:minmax(0,1fr) 330px;min-height:calc(100vh - 205px)}.canvas-wrap{min-width:0;min-height:65vh;overflow:hidden;background-color:#0b141e;background-image:radial-gradient(#294055 1px,transparent 1px);background-size:22px 22px;cursor:grab}.canvas-wrap.dragging{cursor:grabbing}
-svg{display:block;width:100%;height:100%;min-height:65vh;touch-action:none}.edge{fill:none;stroke:#47647c;stroke-width:1.6;opacity:.72}.edge-label{fill:#94a9bb;font-size:11px;text-anchor:middle;pointer-events:none}.map-node{cursor:pointer}.map-node[hidden],.edge[hidden],.edge-label[hidden]{display:none}.map-node rect{fill:#132332;stroke:#52718d;stroke-width:1.5;rx:12}.map-node text{pointer-events:none}.map-node .node-title{fill:var(--ink);font-size:13px;font-weight:650}.map-node .node-sub{fill:var(--muted);font-size:10px}.map-node:hover rect,.map-node.active rect{stroke:var(--cyan);stroke-width:3;filter:drop-shadow(0 0 7px #80deea66)}.map-node.search-match rect{stroke:#fff;stroke-width:3;filter:drop-shadow(0 0 8px #fff8)}.map-node.search-muted{opacity:.2}
-.map-node[data-category=service] rect{stroke:#65aed0}.map-node[data-category=finding] rect{stroke:var(--gold)}.map-node[data-category=exploit] rect{stroke:var(--pink)}.map-node[data-category=observation] rect{stroke:var(--violet)}.map-node[data-category=account] rect{stroke:var(--green)}.map-node[data-category=person] rect{stroke:#d98ad7}
-aside{padding:18px;border-left:1px solid var(--line);background:#0d1722}.aside-title{color:var(--cyan);font-size:11px;font-weight:750;letter-spacing:.12em;text-transform:uppercase}.empty{margin-top:14px;color:var(--muted)}.detail-title{margin:8px 0 2px;font-size:19px;overflow-wrap:anywhere}.detail-sub{color:var(--muted);font-size:12px}.field{padding:12px 0;border-bottom:1px solid #213243}.field strong{display:block;margin-bottom:4px;color:#b9d6e5;font-size:11px;letter-spacing:.05em;text-transform:uppercase}.field p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink)}
-.legend{display:flex;gap:14px;flex-wrap:wrap;padding:12px 20px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}.legend span:before{display:inline-block;width:9px;height:9px;margin-right:6px;border:2px solid currentColor;border-radius:3px;content:""}.legend .asset{color:var(--cyan)}.legend .finding{color:var(--gold)}.legend .exploit{color:var(--pink)}.legend .observation{color:var(--violet)}.legend .account{color:var(--green)}footer{padding:12px;text-align:center;color:#718397;font-size:11px}
-@media(max-width:850px){.layout{grid-template-columns:1fr}.canvas-wrap{min-height:55vh}svg{min-height:55vh}aside{border-left:0;border-top:1px solid var(--line)}}
-</style></head><body>
-<header><div><small>✦ Mitsu · Session Intel</small><h1>__TITLE__</h1></div><div class="brand">ATTACK SURFACE MAP</div></header>
-<div class="meta" id="meta"></div>
-<div class="toolbar"><input id="search" type="search" placeholder="Find a node…" aria-label="Find a node"><div class="filters" id="filters"></div><button id="zoom-out" type="button" aria-label="Zoom out">−</button><button id="zoom-in" type="button" aria-label="Zoom in">+</button><button id="reset-view" type="button">Reset view</button></div>
-<div class="layout"><section class="canvas-wrap" id="canvas"><svg id="map" role="img" aria-label="Interactive graph of session attack surface"></svg></section>
-<aside><div class="aside-title">Node details</div><div class="empty" id="empty">Select a node to view its recorded details, evidence, and connections.</div><div id="detail" hidden></div></aside></div>
-<div class="legend" id="legend"></div><footer>Built from this session’s Intel and cited transcript notes · Mitsu</footer>
+:root{color-scheme:dark;--bg:#09121c;--panel:#0e1a26;--line:#20394b;--ink:#e4eef5;--muted:#91a6b7;--cyan:#70d8e8}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,sans-serif;height:100vh;display:grid;grid-template-rows:72px 1fr 38px;overflow:hidden}header{display:flex;align-items:center;justify-content:space-between;padding:0 24px;border-bottom:1px solid var(--line);background:#0b1620}header small{color:var(--cyan);letter-spacing:.14em;text-transform:uppercase;font-size:11px}h1{font-size:20px;margin:3px 0 0}.brand{color:var(--muted);font-size:11px;letter-spacing:.08em}main{min-height:0;display:grid;grid-template-columns:230px minmax(0,1fr) 330px}.tree,.info{min-width:0;background:var(--panel);overflow:auto}.tree{border-right:1px solid var(--line);padding:16px 12px}.info{border-left:1px solid var(--line);padding:18px}.tree-title,.info-title{font-size:11px;font-weight:750;color:var(--cyan);letter-spacing:.13em;text-transform:uppercase;padding:0 8px 13px}.branch{margin:4px 0 14px}.branch-name{font-size:12px;color:var(--muted);padding:7px 8px;border-bottom:1px solid #1c3040}.leaf{display:block;width:100%;text-align:left;border:0;background:transparent;color:var(--ink);padding:7px 8px 7px 16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;border-radius:5px}.leaf:hover,.leaf.active{background:#192c3c;color:#fff}.leaf i{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--c);margin-right:8px}.stage{display:grid;grid-template-rows:54px minmax(0,1fr);min-width:0;min-height:0}.tools{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line)}input,button{height:34px;color:var(--ink);background:#101e2b;border:1px solid #294355;border-radius:7px;padding:0 10px;font:inherit}input{flex:1;min-width:100px}button{cursor:pointer}button:hover{border-color:var(--cyan)}#canvas{min-height:0;overflow:hidden;touch-action:none;cursor:grab;background-color:#0a141e;background-image:radial-gradient(#263b4c 1px,transparent 1px);background-size:22px 22px}#canvas.grab{cursor:grabbing}svg{width:100%;height:100%;display:block;touch-action:none}.edge{stroke:#526a7c;stroke-width:1.4;opacity:.72}.edge.active{stroke:#e6f4fa;stroke-width:2.5;opacity:1}.node{cursor:grab;outline:none}.node:focus{outline:none}.node circle{fill:#0f1d29;stroke:var(--c);stroke-width:2.5;transition:fill .16s,stroke-width .16s,filter .16s}.node.primary circle{stroke-width:4;filter:drop-shadow(0 0 7px color-mix(in srgb,var(--c),transparent 35%))}.node:hover circle,.node.active circle,.node:focus-visible circle{fill:color-mix(in srgb,var(--c),#0f1d29 78%);stroke-width:3.5;filter:drop-shadow(0 0 14px color-mix(in srgb,var(--c),transparent 15%))}.node text{fill:var(--ink);font-size:13px;paint-order:stroke;stroke:#0a141e;stroke-width:3px;stroke-linejoin:round;pointer-events:none}.node[hidden],.edge[hidden]{display:none}.empty{color:var(--muted);line-height:1.7}.detail-name{font-size:21px;overflow-wrap:anywhere;margin:3px 0}.detail-kind{color:var(--muted);font-size:12px;margin-bottom:14px}.field{padding:12px 0;border-bottom:1px solid var(--line)}.field strong{display:block;font-size:10px;letter-spacing:.08em;color:#a9c9d8;margin-bottom:4px}.field p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}.counts{display:flex;gap:6px;flex-wrap:wrap;padding:0 8px 12px}.count{font-size:10px;color:var(--muted);border:1px solid var(--line);padding:3px 6px;border-radius:20px}footer{display:flex;align-items:center;justify-content:center;border-top:1px solid var(--line);color:var(--muted);font-size:11px;letter-spacing:.04em;background:#0b1620}@media(max-width:900px){main{grid-template-columns:185px minmax(0,1fr)}.info{position:absolute;right:0;top:72px;bottom:38px;width:min(330px,85vw);box-shadow:-12px 0 35px #0008}body{grid-template-rows:72px 1fr 38px}}@media(max-width:600px){main{grid-template-columns:140px minmax(0,1fr)}.tree{padding:12px 6px}.tools{gap:4px;padding:6px}button{padding:0 7px}}
+<style>.lane-title{fill:#9aafbe;font-size:15px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}.lane-divider{stroke:#263542;stroke-width:1;stroke-dasharray:3 8;opacity:.7}.detail-summary{color:#c3d5e0;line-height:1.65;margin:10px 0 18px}.detail-section{margin:18px 0 22px}.detail-section h3{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--cyan);margin:0 0 4px;padding-bottom:7px;border-bottom:1px solid var(--line)}.detail-section .field{padding:10px 2px}.detail-section .field strong{font-size:10px;color:#93aebe;letter-spacing:.04em;text-transform:none}.detail-section .field p{font-size:13px;line-height:1.55;color:var(--ink)}.node .node-mark{stroke:none;paint-order:normal;font-size:13px;dominant-baseline:central;text-anchor:middle}:root{--bg:#0c131a;--panel:#111a22;--line:#263744;--ink:#e8edf2;--muted:#94a3af}body{background:#0c131a}header,footer{background:#111a22;border-color:#263744}header{padding:0 28px}.mast{display:flex;align-items:center;gap:14px}.mast img{width:42px;height:42px;object-fit:contain}main{background:#0c131a}.tree,.info{background:#111a22}.tree{padding:16px 10px}.info{padding:18px}.branch-name,.field{border-color:#18232d}.leaf,input,button,.count{border-radius:0}.leaf{border-left:2px solid transparent}.leaf:hover,.leaf.active{background:#101820;border-left-color:var(--cyan)}.count{padding:4px 7px}.tools{background:#111a22}input,button{background:#151f28;border-color:#304351}button:hover{border-color:var(--cyan)}#canvas{background-color:#0b1218;background-image:linear-gradient(#17232d 1px,transparent 1px),linear-gradient(90deg,#17232d 1px,transparent 1px);background-size:72px 72px}.edge{stroke:#536878}.edge.active{stroke:#dceaf2}footer{letter-spacing:.08em}</style></head><body><header><div class="mast"><img src="__LOGO__" alt="Mitsu"><div><small>✦ Mitsu · Session Intel</small><h1>__TITLE__</h1></div></div><div class="brand">ATTACK SURFACE MAP</div></header><main><nav class="tree"><div class="tree-title">Session Intel</div><div class="counts" id="counts"></div><div id="tree"></div></nav><section class="stage"><div class="tools"><input id="search" type="search" placeholder="Find a node…" aria-label="Find a node"><button id="minus" aria-label="Zoom out">−</button><button id="plus" aria-label="Zoom in">+</button><button id="reset">Reset view</button></div><div id="canvas"><svg id="map" aria-label="Interactive graph"></svg></div></section><aside class="info"><div class="info-title">Node details</div><div id="empty" class="empty">Select a node to view its recorded details, evidence, and connections.</div><div id="detail" hidden></div></aside></main><footer id="footer"></footer>
 <script>
-const graph=__GRAPH__;
-const labels={asset:"Targets & network",service:"Services & technologies",finding:"Findings",exploit:"Vulnerabilities & exploits",observation:"Observations",account:"Accounts & credentials",person:"People"};
-const order=Object.keys(labels),svg=document.querySelector("#map"),canvas=document.querySelector("#canvas"),ns="http://www.w3.org/2000/svg";
-const meta=document.querySelector("#meta"),legend=document.querySelector("#legend"),positions=new Map(),nodeElements=new Map(),edgeElements=new Map(),byId=new Map(graph.nodes.map(node=>[node.id,node]));
-for(const [label,value] of [["Mode",graph.mode||"—"],["Created",graph.created_at||"—"],["Updated",graph.updated_at||"—"],["Nodes",String(graph.nodes.length)],["Links",String(graph.edges.length)]]){const pill=document.createElement("span");pill.className="pill";pill.textContent=label+": "+value;meta.append(pill)}
-for(const key of order){if(!graph.counts[key])continue;const item=document.createElement("span");item.className=key;item.textContent=labels[key]+" · "+graph.counts[key];legend.append(item);const filter=document.createElement("label");filter.className="filter";const toggle=document.createElement("input");toggle.type="checkbox";toggle.checked=true;toggle.dataset.category=key;toggle.addEventListener("change",()=>{for(const node of graph.nodes.filter(node=>node.category===key))nodeElements.get(node.id).hidden=!toggle.checked;updateEdges()});filter.append(toggle,labels[key]);document.querySelector("#filters").append(filter)}
-const columns=order.map(key=>[key,graph.nodes.filter(node=>node.category===key)]).filter(([,nodes])=>nodes.length);
-const width=Math.max(1050,columns.length*270+80),height=Math.max(720,...columns.map(([,nodes])=>nodes.length*104+120));
-svg.setAttribute("viewBox",`0 0 ${width} ${height}`);svg.setAttribute("width",width);svg.setAttribute("height",height);
-const defs=document.createElementNS(ns,"defs"),marker=document.createElementNS(ns,"marker");marker.setAttribute("id","arrow");marker.setAttribute("markerWidth","8");marker.setAttribute("markerHeight","8");marker.setAttribute("refX","7");marker.setAttribute("refY","4");marker.setAttribute("orient","auto");marker.setAttribute("markerUnits","strokeWidth");const arrow=document.createElementNS(ns,"path");arrow.setAttribute("d","M0,0 L8,4 L0,8 z");arrow.setAttribute("fill","#7891a8");marker.append(arrow);defs.append(marker);svg.append(defs);
-const world=document.createElementNS(ns,"g");world.setAttribute("id","world");svg.append(world);let scale=1,offsetX=0,offsetY=0;
-// Move the view, not every node, when zooming and panning.
-function setView(){world.setAttribute("transform",`translate(${offsetX} ${offsetY}) scale(${scale})`)}
-function updateEdges(){for(const edge of graph.edges){const hidden=nodeElements.get(edge.source).hidden||nodeElements.get(edge.target).hidden;for(const element of edgeElements.get(edge)||[])element.hidden=hidden}}
-for(const [column,[category,nodes]] of columns.entries()){const x=55+column*270;for(const [index,node] of nodes.entries())positions.set(node.id,{x,y:72+index*104,category})}
-for(const edge of graph.edges){const from=positions.get(edge.source),to=positions.get(edge.target);if(!from||!to)continue;const startX=from.x+208,startY=from.y+30,endX=to.x,endY=to.y+30,midX=(startX+endX)/2,path=document.createElementNS(ns,"path");path.setAttribute("class","edge");path.setAttribute("d",`M ${startX} ${startY} C ${midX} ${startY}, ${midX} ${endY}, ${endX} ${endY}`);path.setAttribute("marker-end","url(#arrow)");path.setAttribute("aria-label",edge.label);world.append(path);const elements=[path];if(edge.label){const text=document.createElementNS(ns,"text");text.setAttribute("class","edge-label");text.setAttribute("x",midX);text.setAttribute("y",(startY+endY)/2-5);text.textContent=edge.label;world.append(text);elements.push(text)}edgeElements.set(edge,elements)}
-function showNode(node,element){document.querySelectorAll(".map-node.active").forEach(item=>item.classList.remove("active"));element.classList.add("active");document.querySelector("#empty").hidden=true;const panel=document.querySelector("#detail");panel.hidden=false;panel.replaceChildren();const title=document.createElement("div");title.className="detail-title";title.textContent=node.label;panel.append(title);const subtitle=document.createElement("div");subtitle.className="detail-sub";subtitle.textContent=[labels[node.category],node.kind,node.timestamp].filter(Boolean).join(" · ");panel.append(subtitle);for(const field of node.details){const row=document.createElement("div");row.className="field";const name=document.createElement("strong");name.textContent=field.label;const value=document.createElement("p");value.textContent=field.value;row.append(name,value);panel.append(row)}const links=graph.edges.filter(edge=>edge.source===node.id||edge.target===node.id);if(links.length){const row=document.createElement("div");row.className="field";const name=document.createElement("strong");name.textContent="Connections";row.append(name);for(const edge of links){const related=byId.get(edge.source===node.id?edge.target:edge.source);const value=document.createElement("p");value.textContent=`${edge.label} · ${related?.label||"Unknown node"}${edge.evidence?"\\n"+edge.evidence:""}`;row.append(value)}panel.append(row)}}
-for(const node of graph.nodes){const pos=positions.get(node.id),group=document.createElementNS(ns,"g");group.setAttribute("class","map-node");group.setAttribute("data-category",node.category);group.setAttribute("transform",`translate(${pos.x} ${pos.y})`);group.setAttribute("tabindex","0");group.setAttribute("role","button");group.setAttribute("aria-label",`${node.label}, ${labels[node.category]}`);const title=document.createElementNS(ns,"title");title.textContent=node.label;const rect=document.createElementNS(ns,"rect");rect.setAttribute("width","208");rect.setAttribute("height","62");const name=document.createElementNS(ns,"text");name.setAttribute("class","node-title");name.setAttribute("x","12");name.setAttribute("y","25");name.textContent=node.label.length>27?node.label.slice(0,26)+"…":node.label;const sub=document.createElementNS(ns,"text");sub.setAttribute("class","node-sub");sub.setAttribute("x","12");sub.setAttribute("y","46");sub.textContent=[node.kind,node.timestamp].filter(Boolean).join(" · ").slice(0,38);group.append(title,rect,name,sub);group.addEventListener("click",()=>showNode(node,group));group.addEventListener("keydown",event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();showNode(node,group)}});world.append(group);nodeElements.set(node.id,group)}
-document.querySelector("#search").addEventListener("input",event=>{const query=event.target.value.trim().toLocaleLowerCase();for(const node of graph.nodes){const element=nodeElements.get(node.id),match=!query||node.label.toLocaleLowerCase().includes(query)||node.details.some(field=>field.value.toLocaleLowerCase().includes(query));element.classList.toggle("search-match",Boolean(query&&match));element.classList.toggle("search-muted",Boolean(query&&!match))}});
-document.querySelector("#zoom-in").addEventListener("click",()=>{scale=Math.min(2.5,scale*1.2);setView()});document.querySelector("#zoom-out").addEventListener("click",()=>{scale=Math.max(.45,scale/1.2);setView()});document.querySelector("#reset-view").addEventListener("click",()=>{scale=1;offsetX=0;offsetY=0;setView()});
-let drag=null;canvas.addEventListener("pointerdown",event=>{if(event.target.closest(".map-node"))return;drag={x:event.clientX-offsetX,y:event.clientY-offsetY};canvas.classList.add("dragging");canvas.setPointerCapture(event.pointerId)});canvas.addEventListener("pointermove",event=>{if(!drag)return;offsetX=event.clientX-drag.x;offsetY=event.clientY-drag.y;setView()});canvas.addEventListener("pointerup",()=>{drag=null;canvas.classList.remove("dragging")});canvas.addEventListener("wheel",event=>{event.preventDefault();scale=Math.max(.45,Math.min(2.5,scale*(event.deltaY<0?1.1:.9)));setView()},{passive:false});
-</script></body></html>"""
-    return template.replace("__TITLE__", title).replace("__GRAPH__", safe_graph)
+const graph=__GRAPH__,svg=document.querySelector('#map'),canvas=document.querySelector('#canvas'),ns='http://www.w3.org/2000/svg',colors={target:'#70d8e8',domain:'#b59aff',host:'#5ec8ff',nameserver:'#4fdfc2',ip:'#83aaff',service:'#f0bd68',email:'#ff91c8',person:'#ff718f',account:'#85d9ad'},glyphs={target:'◎',domain:'◎',host:'⌂',nameserver:'⌘',ip:'⌖',service:'▤',email:'✉',person:'♙',account:'◈'},groups=[...new Set(graph.nodes.map(n=>n.group))],pos=new Map(),els=new Map(),edgeEls=new Map(),byId=new Map(graph.nodes.map(n=>[n.id,n]));
+const tree=document.querySelector('#tree'),counts=document.querySelector('#counts');for(const [kind,total] of Object.entries(graph.counts)){const c=document.createElement('span');c.className='count';c.textContent=kind+' · '+total;counts.append(c)}
+for(const group of groups){const box=document.createElement('section');box.className='branch';const heading=document.createElement('div');heading.className='branch-name';heading.textContent=group;box.append(heading);for(const node of graph.nodes.filter(n=>n.group===group)){const item=document.createElement('button');item.className='leaf';item.innerHTML='<i></i>';item.lastChild.style.setProperty('--c',colors[node.category]);item.append(document.createTextNode(node.label));item.addEventListener('click',()=>selectNode(node));box.append(item);node.treeItem=item}tree.append(box)}
+// Lay out linked nodes by distance from the primary asset; group the rest by type.
+const categoryOrder=["target","domain","host","ip","nameserver","service","person","email","account"],categoryNames={target:"Targets",domain:"Domains",host:"Hosts",ip:"IP addresses",nameserver:"Nameservers",service:"Services",person:"People",email:"Email addresses",account:"Accounts"},categories=[...new Set([...categoryOrder.filter(c=>graph.nodes.some(n=>n.category===c)),...graph.nodes.map(n=>n.category).filter(c=>!categoryOrder.includes(c)).sort()])],rank=new Map(categories.map((category,index)=>[category,index])),neighbors=new Map(graph.nodes.map(n=>[n.id,[]])),depths=new Map();for(const e of graph.edges){if(neighbors.has(e.source)&&neighbors.has(e.target)){neighbors.get(e.source).push(e.target);neighbors.get(e.target).push(e.source)}}const root=graph.nodes.find(n=>n.primary)||graph.nodes[0];if(root){depths.set(root.id,0);const queue=[root.id];for(let cursor=0;cursor<queue.length;cursor++){const id=queue[cursor];for(const other of neighbors.get(id)||[]){if(!depths.has(other)){depths.set(other,depths.get(id)+1);queue.push(other)}}}}const maxDepth=Math.max(0,...depths.values()),rows=[],rowLimit=5;for(let depth=0;depth<=maxDepth;depth++){const layer=graph.nodes.filter(n=>depths.get(n.id)===depth).sort((a,b)=>(rank.get(a.category)??99)-(rank.get(b.category)??99)||a.label.localeCompare(b.label));for(let i=0;i<layer.length;i+=rowLimit)rows.push(layer.slice(i,i+rowLimit))}for(const category of categories){const layer=graph.nodes.filter(n=>!depths.has(n.id)&&n.category===category).sort((a,b)=>a.label.localeCompare(b.label));for(let i=0;i<layer.length;i+=rowLimit)rows.push(layer.slice(i,i+rowLimit))}const rowGap=230,nodeGap=220,width=Math.max(900,Math.max(1,...rows.map(row=>row.length))*nodeGap+160),height=Math.max(720,130+rows.length*rowGap);svg.setAttribute("viewBox",`0 0 ${width} ${height}`);const defs=document.createElementNS(ns,"defs"),arrow=document.createElementNS(ns,"marker"),arrowPath=document.createElementNS(ns,"path");arrow.setAttribute("id","edge-arrow");arrow.setAttribute("viewBox","0 0 10 10");arrow.setAttribute("refX","8");arrow.setAttribute("refY","5");arrow.setAttribute("markerWidth","6");arrow.setAttribute("markerHeight","6");arrow.setAttribute("orient","auto");arrowPath.setAttribute("d","M 0 0 L 10 5 L 0 10 z");arrowPath.setAttribute("fill","#718899");arrow.append(arrowPath);defs.append(arrow);svg.append(defs);const world=document.createElementNS(ns,"g");svg.append(world);let scale=1,ox=0,oy=0,moving=null,panning=null;rows.forEach((row,rowIndex)=>{const startX=(width-(row.length-1)*nodeGap)/2;row.forEach((n,index)=>pos.set(n.id,{x:startX+index*nodeGap,y:145+rowIndex*rowGap}));});let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;for(const n of graph.nodes){const p=pos.get(n.id);minX=Math.min(minX,p.x-24);maxX=Math.max(maxX,p.x+28+(n.display_label||n.label).length*8);minY=Math.min(minY,p.y-24);maxY=Math.max(maxY,p.y+24)}const fit=Math.min(1.3,(width-160)/(maxX-minX||1),(height-140)/(maxY-minY||1));scale=fit;ox=width/2-(minX+maxX)/2*scale;oy=height/2-(minY+maxY)/2*scale;function view(){world.setAttribute('transform',`translate(${ox} ${oy}) scale(${scale})`)}view();
+function pathFor(e){const a=pos.get(e.source),b=pos.get(e.target);if(!a||!b)return '';const dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy)||1,ra=22,rb=22;return `M${a.x+dx/d*ra} ${a.y+dy/d*ra} L${b.x-dx/d*rb} ${b.y-dy/d*rb}`}
+for(const e of graph.edges){const line=document.createElementNS(ns,'path');line.setAttribute('class','edge');line.setAttribute('d',pathFor(e));line.setAttribute('marker-end','url(#edge-arrow)');line.dataset.edge=graph.edges.indexOf(e);const title=document.createElementNS(ns,'title');title.textContent=[e.label,e.evidence].filter(Boolean).join(' · ');line.append(title);world.append(line);edgeEls.set(e,line)}
+for(const n of graph.nodes){const p=pos.get(n.id),g=document.createElementNS(ns,'g');g.classList.add('node');if(n.primary)g.classList.add('primary');g.style.setProperty('--c',colors[n.category]||'#70d8e8');g.setAttribute('transform',`translate(${p.x} ${p.y})`);g.setAttribute('tabindex','0');g.setAttribute('role','button');g.setAttribute('aria-label',n.label);const circle=document.createElementNS(ns,'circle');circle.setAttribute('r',n.primary?'19':'15');const mark=document.createElementNS(ns,'text');mark.setAttribute('class','node-mark');mark.setAttribute('dominant-baseline','central');mark.setAttribute('text-anchor','middle');mark.setAttribute('y','0');mark.setAttribute('x','0');mark.textContent=n.os==='windows'?'▦':n.os==='linux'?'🐧':glyphs[n.category]||'•';g.append(circle,mark);const label=document.createElementNS(ns,'text');label.setAttribute('x','25');label.setAttribute('y','5');label.textContent=n.display_label||n.label;const title=document.createElementNS(ns,'title');title.textContent=n.label;g.prepend(title);g.append(label);g.addEventListener('click',()=>{if(!moving)selectNode(n)});g.addEventListener('pointerdown',ev=>{ev.stopPropagation();moving={node:n,el:g};g.setPointerCapture(ev.pointerId)});g.addEventListener('pointermove',ev=>{if(!moving||moving.node!==n)return;const r=svg.getBoundingClientRect(),x=(ev.clientX-r.left)/r.width*width,y=(ev.clientY-r.top)/r.height*height;p.x=(x-ox)/scale;p.y=(y-oy)/scale;g.setAttribute('transform',`translate(${p.x} ${p.y})`);for(const e of graph.edges)if(e.source===n.id||e.target===n.id)edgeEls.get(e).setAttribute('d',pathFor(e))});g.addEventListener('pointerup',()=>{moving=null});g.addEventListener('keydown',ev=>{if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();selectNode(n)}});world.append(g);els.set(n.id,g)}
+function addDetails(title,items){const section=document.createElement('section');section.className='detail-section';const heading=document.createElement('h3');heading.textContent=title;section.append(heading);for(const field of items){const row=document.createElement('div');row.className='field';const label=document.createElement('strong');label.textContent=field.label;const value=document.createElement('p');value.textContent=field.value;row.append(label,value);section.append(row)}document.querySelector('#detail').append(section)}
+function selectNode(n){for(const el of els.values())el.classList.remove('active');for(const item of tree.querySelectorAll('.leaf'))item.classList.remove('active');els.get(n.id).classList.add('active');n.treeItem.classList.add('active');document.querySelector('#empty').hidden=true;const panel=document.querySelector('#detail');panel.hidden=false;panel.replaceChildren();const name=document.createElement('div');name.className='detail-name';name.textContent=n.label;panel.append(name);const kind=document.createElement('div');kind.className='detail-kind';kind.textContent=n.group+' · '+n.kind+(n.os?' · '+n.os:'');panel.append(kind);if(n.summary){const summary=document.createElement('p');summary.className='detail-summary';summary.textContent=n.summary;panel.append(summary)}if(Array.isArray(n.sections)){for(const section of n.sections)addDetails(section.section,section.items)}else{const sections=new Map();for(const field of n.details){const title=field.section||'Asset';if(!sections.has(title))sections.set(title,[]);sections.get(title).push(field)}for(const [title,items] of sections)addDetails(title,items)}const links=graph.edges.filter(e=>e.source===n.id||e.target===n.id).map(e=>{const other=byId.get(e.source===n.id?e.target:e.source);const relation=e.source===n.id?e.label:e.label==='parent of'?'child of':e.label;return{label:other?.label||'Connection',value:[relation,e.evidence].filter(Boolean).join('\n')}});if(links.length)addDetails('Connections',links)}
+function point(ev){const r=svg.getBoundingClientRect();return{x:(ev.clientX-r.left)/r.width*width,y:(ev.clientY-r.top)/r.height*height}}canvas.addEventListener('pointerdown',ev=>{if(ev.target.closest('.node'))return;const p=point(ev);panning={x:p.x-ox,y:p.y-oy};canvas.classList.add('grab');canvas.setPointerCapture(ev.pointerId)});canvas.addEventListener('pointermove',ev=>{if(!panning)return;const p=point(ev);ox=p.x-panning.x;oy=p.y-panning.y;view()});canvas.addEventListener('pointerup',()=>{panning=null;canvas.classList.remove('grab')});canvas.addEventListener('wheel',ev=>{ev.preventDefault();scale=Math.max(.35,Math.min(3,scale*(ev.deltaY<0?1.1:.9)));view()},{passive:false});document.querySelector('#plus').onclick=()=>{scale=Math.min(3,scale*1.2);view()};document.querySelector('#minus').onclick=()=>{scale=Math.max(.35,scale/1.2);view()};document.querySelector('#reset').onclick=()=>{scale=fit;ox=width/2-(minX+maxX)/2*scale;oy=height/2-(minY+maxY)/2*scale;view()};document.querySelector('#search').addEventListener('input',ev=>{const q=ev.target.value.toLowerCase().trim();for(const n of graph.nodes){const match=!q||n.label.toLowerCase().includes(q)||n.details.some(f=>f.value.toLowerCase().includes(q));els.get(n.id).style.opacity=match?'1':'.12';n.treeItem.hidden=!match}});document.querySelector('#footer').textContent='Mitsu · '+graph.nodes.length+' nodes · '+graph.edges.length+' links · '+(graph.mode||'Session Intel');
+</script></body></html>'''
+    return page.replace("__TITLE__", title).replace("__GRAPH__", data).replace("__LOGO__", logo)
 
 
-def create_surface_map(
-    session: dict[str, Any],
-    session_root: Path,
-    extra_nodes: list[dict[str, Any]] | None = None,
-    connections: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
+def create_surface_map(session: dict[str, Any], session_root: Path, mapPlan: dict[str, Any] | None = None) -> dict[str, Any]:
     session_id = _text(session.get("id"), 64)
     if not re.fullmatch(r"[a-f0-9]{32}", session_id):
         raise ValueError("This session has no valid ID for saving its map.")
-    graph = build_surface_graph(session, extra_nodes, connections)
+    mapPlan = mapPlan if isinstance(mapPlan, dict) else {}
+    graph = build_surface_graph(session, mapPlan.get("connections", []))
+    by_id = {node["id"]: node for node in graph["nodes"]}
+    entities = mapPlan.get("entities", [])
+    if isinstance(entities, list):
+        for item in entities:
+            if not isinstance(item, dict):
+                continue
+            node = by_id.get(_text(item.get("id"), 160))
+            summary = item.get("summary")
+            if node is None or not isinstance(summary, str) or summary.lstrip().startswith(("{", "[")):
+                continue
+            node["summary"] = summary.strip()[:1_200]
+            sections = item.get("sections", [])
+            if not isinstance(sections, list):
+                continue
+            clean = []
+            for section in sections[:20]:
+                if not isinstance(section, dict) or not isinstance(section.get("items"), list):
+                    continue
+                title = section.get("title")
+                if not isinstance(title, str) or not title.strip():
+                    continue
+                fields = []
+                for field in section["items"][:40]:
+                    if not isinstance(field, dict):
+                        continue
+                    label, value = field.get("label"), field.get("value")
+                    if not isinstance(label, str) or not isinstance(value, str) or not label.strip() or not value.strip():
+                        continue
+                    if value.lstrip().startswith(("{", "[")):
+                        continue
+                    fields.append({"label": label.strip()[:160], "value": value.strip()[:2_000]})
+                if fields:
+                    clean.append({"section": title.strip()[:100], "items": fields})
+            if clean:
+                node["sections"] = clean
     directory = session_root / session_id / "artifacts"
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     directory.chmod(0o700)
     destination = directory / "attack-surface-map.html"
     temporary = directory / ".attack-surface-map.html.tmp"
-    # These map files can contain secrets, so keep the permissions locked down just in case.
     temporary.write_text(_basic_html(graph), encoding="utf-8")
     temporary.chmod(0o600)
     temporary.replace(destination)
-    return {
-        "path": str(destination),
-        "node_count": len(graph["nodes"]),
-        "edge_count": len(graph["edges"]),
-        "transcript_node_count": graph["transcript_node_count"],
-        "title": graph["title"],
-    }
+    return {"path": str(destination), "node_count": len(graph["nodes"]), "edge_count": len(graph["edges"]), "transcript_node_count": 0, "title": graph["title"]}

@@ -572,12 +572,16 @@ OptionList:focus > .option-list--option-highlighted {
     color: $foreground;
 }
 
-#activity-summary {
+#activity-text {
     height: auto;
     max-height: 5;
     margin: 0 0 1 0;
-    padding-left: 1;
-    border-left: tall $secondary;
+    padding-left: 0;
+    border: none;
+}
+
+#activity-text.is-success {
+    color: $success;
 }
 
 #search-label {
@@ -698,7 +702,7 @@ OptionList:focus > .option-list--option-highlighted {
 }
 
 #intel-summary,
-#activity-summary,
+#activity-text,
 #aggressive-level {
     height: auto;
     color: #aaa6a0;
@@ -1436,6 +1440,11 @@ ShowCommandDialog {
     height: auto;
     margin-bottom: 1;
     color: #e7e2dc;
+}
+
+#ask-user-question {
+    max-height: 5;
+    overflow-y: auto;
 }
 
 #ask-user-choices,
@@ -2248,7 +2257,7 @@ OptionList:focus > .option-list--option-highlighted {
 #intel-summary,
 #intel-tab-content,
 #intel-tab-title,
-#activity-summary,
+#activity-text,
 #aggressive-level {
     color: $text-muted;
 }
@@ -2558,9 +2567,9 @@ OptionList:focus > .option-list--option-highlighted {
     width: 100%;
     height: auto;
     margin: 1 0 0 0;
-    padding: 0 1;
-    border: round $secondary;
-    background: $panel;
+    padding: 0;
+    border: none;
+    background: transparent;
     color: $foreground;
 }
 
@@ -2568,15 +2577,15 @@ OptionList:focus > .option-list--option-highlighted {
     width: 100%;
     height: auto;
     margin: 0 0 1 0;
-    padding: 0 1;
-    border: round $secondary;
-    background: $surface;
+    padding: 0;
+    border: none;
+    background: transparent;
     color: $text-muted;
 }
 
 .tool-result-message:hover,
 .tool-result-message:focus {
-    border: round $primary;
+    border: none;
 }
 
 .system-message,
@@ -2840,7 +2849,7 @@ OperatorDialog {
     width: 70;
     max-width: 90%;
     height: auto;
-    max-height: 22;
+    max-height: 90%;
     margin-bottom: 3;
     padding: 0 2;
     border: round $primary;
@@ -2852,12 +2861,15 @@ OperatorDialog {
 }
 
 #operator-dialog-question {
+    height: auto;
+    max-height: 4;
     margin: 0 0 1 0;
+    overflow-y: auto;
 }
 
 #operator-dialog-form {
     height: auto;
-    max-height: 12;
+    max-height: 7;
 }
 
 .operator-dialog-field-label {
@@ -2912,4 +2924,43 @@ OperatorDialog {
 #operator-dialog-error {
     height: auto;
     color: $secondary;
+}
+
+SessionLogsDialog {
+    align: center middle;
+    background: #000000 48%;
+}
+
+#session-logs-dialog {
+    width: 90%;
+    height: 80%;
+    max-width: 120;
+    border: round $secondary;
+    background: $background;
+    padding: 1 2;
+}
+
+#session-logs-title {
+    height: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+#session-logs-scroll {
+    height: 1fr;
+    border: round $secondary;
+    background: $panel;
+}
+
+#session-logs-content {
+    width: 100%;
+    height: auto;
+    padding: 1;
+    color: $foreground;
+}
+
+#session-logs-hint {
+    height: 1;
+    color: $foreground;
+    text-align: right;
 }

@@ -13,7 +13,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "ARCANGEL0" }]
 keywords = ["penetration-testing", "red-team", "MCP", "security", "agentic-framework"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 5 - Production/Stable",
   "Environment :: Console",
   "Intended Audience :: Information Technology",
   "Operating System :: OS Independent",
@@ -76,5 +76,5 @@ packages = [
 "mitsu.workspace" = "workspace"
 
 [tool.setuptools.package-data]
-mitsu = ["assets/pets/*.webp", "version.txt"]
+mitsu = ["assets/pets/*.webp", "assets/example/icon.svg", "version.txt"]
 "mitsu.tui" = ["theme.tcss"]

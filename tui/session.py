@@ -8,12 +8,14 @@ import os
 import re
 import shlex
 import time
+import traceback
 from datetime import date, datetime, timezone
 from contextlib import aclosing
 from pathlib import Path
 import tempfile
 from typing import Any, Callable
 from urllib.parse import urlsplit
+import webbrowser
 
 from pygments.token import Token
 from pygments.util import ClassNotFound
@@ -51,8 +53,15 @@ from mitsu.workspace.intel import (
     upsert_manhunt,
     upsert_observation,
 )
-from mitsu.workspace.surface_map import create_surface_map
-from mitsu.providers import ProviderRequestError, check_image_input_support, check_reasoning_support
+from mitsu.workspace.surface_map import build_surface_graph, create_surface_map
+from mitsu.providers import (
+    ProviderRequestError,
+    RequestCancellation,
+    check_image_input_support,
+    check_reasoning_support,
+    is_transient_provider_error,
+    request_agent_turn,
+)
 from mitsu.tui.images import (
     IMAGE_TOKEN,
     prepare_image_prompt,
@@ -228,6 +237,9 @@ class PromptTextArea(TextArea):
         self._workspace_files: list[Path] | None = None
         self.image_attachments: dict[str, Path] = {}
         self._last_paste: tuple[str | bytes, float] | None = None
+        self.message_history: list[str] = []
+        self.history_index: int | None = None
+        self.history_draft = ""
 
     class Submitted(Message):
         def __init__(self, prompt: str) -> None:
@@ -244,6 +256,10 @@ class PromptTextArea(TextArea):
                 self.action_complete_slash_command()
                 return
         prompt = self.text
+        if prompt.strip() and (not self.message_history or self.message_history[-1] != prompt):
+            self.message_history.append(prompt)
+        self.history_index = None
+        self.history_draft = ""
         self.clear()
         self.post_message(self.Submitted(prompt))
 
@@ -251,6 +267,8 @@ class PromptTextArea(TextArea):
         self.insert("\n")
 
     def action_clear_input(self) -> None:
+        self.history_index = None
+        self.history_draft = ""
         self.clear()
         self.image_attachments.clear()
         self.focus()
@@ -283,7 +301,23 @@ class PromptTextArea(TextArea):
         self.cursor_location = (len(preceding) - 1, len(preceding[-1]))
         self.focus()
 
+    def set_message_history(self, messages: list[str]) -> None:
+        self.message_history = [message for message in messages if message.strip()]
+        self.history_index = None
+        self.history_draft = ""
+
+    def _show_history_entry(self, index: int) -> None:
+        if self.history_index is None:
+            self.history_draft = self.text
+        self.history_index = index
+        self.text = self.message_history[index]
+        lines = self.text.splitlines() or [""]
+        self.cursor_location = (len(lines) - 1, len(lines[-1]))
+
     def action_cursor_up(self, select: bool = False) -> None:
+        if not select and self.history_index is not None:
+            self._show_history_entry(max(0, self.history_index - 1))
+            return
         if self.file_suggestions and not select:
             self.file_suggestion_index = (self.file_suggestion_index - 1) % len(self.file_suggestions)
             self.post_message(self.FileSuggestionsChanged())
@@ -292,9 +326,23 @@ class PromptTextArea(TextArea):
             self.slash_suggestion_index = (self.slash_suggestion_index - 1) % len(self.slash_suggestions)
             self.post_message(self.SlashSuggestionsChanged())
             return
+        if not select and self.message_history and self.cursor_location[0] == 0:
+            index = len(self.message_history) - 1 if self.history_index is None else max(0, self.history_index - 1)
+            self._show_history_entry(index)
+            return
         super().action_cursor_up(select)
 
     def action_cursor_down(self, select: bool = False) -> None:
+        if not select and self.history_index is not None:
+            next_index = self.history_index + 1
+            if next_index >= len(self.message_history):
+                self.history_index = None
+                self.text = self.history_draft
+                lines = self.text.splitlines() or [""]
+                self.cursor_location = (len(lines) - 1, len(lines[-1]))
+            else:
+                self._show_history_entry(next_index)
+            return
         if self.file_suggestions and not select:
             self.file_suggestion_index = (self.file_suggestion_index + 1) % len(self.file_suggestions)
             self.post_message(self.FileSuggestionsChanged())
@@ -1025,6 +1073,9 @@ class AskUserDialog(ModalScreen[str]):
             yield Static("↑ / ↓ choose    Type on Other    Enter answer    Esc skip", id="ask-user-hint", markup=False)
 
     def on_mount(self) -> None:
+        self.call_after_refresh(self._focus_answer)
+
+    def _focus_answer(self) -> None:
         if self.choices:
             self.query_one("#ask-user-choices", OptionList).focus()
         else:
@@ -1147,7 +1198,7 @@ class OperatorDialog(ModalScreen[str | None]):
             )
 
     def on_mount(self) -> None:
-        self._focus_question(0)
+        self.call_after_refresh(self._focus_question, 0)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "operator-dialog-next":
@@ -1295,6 +1346,24 @@ class ShowCommandDialog(ModalScreen[bool]):
 
     def action_cancel(self) -> None:
         self.dismiss(False)
+
+
+class SessionLogsDialog(ModalScreen[None]):
+    BINDINGS = [Binding("escape", "close", "Close", priority=True)]
+
+    def __init__(self, logs: str) -> None:
+        super().__init__()
+        self.logs = logs
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="session-logs-dialog"):
+            yield Static("SESSION LOGS", id="session-logs-title", markup=False)
+            with VerticalScroll(id="session-logs-scroll"):
+                yield Static(self.logs, id="session-logs-content", markup=False)
+            yield Static("Esc close", id="session-logs-hint", markup=False)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
 
 
 class VulnSearchDialog(ModalScreen[None]):
@@ -1844,6 +1913,7 @@ class SessionScreen(Screen):
     BINDINGS = [
         Binding("ctrl+b", "toggle_chat_history", "Chat history", priority=True),
         Binding("ctrl+f", "search_chat", "Find in chat", priority=True),
+        Binding("ctrl+t", "show_logs", "Logs", priority=True),
         Binding("escape", "cancel_agent", "Stop / latest", priority=True),
         Binding("shift+tab", "cycle_mode", "Switch mode", priority=True),
         Binding("pageup", "scroll_chat_up", "Scroll chat up", priority=True),
@@ -1980,6 +2050,9 @@ class SessionScreen(Screen):
             surface_map_handler=self._generate_surface_map,
         )
         self._closing_session = False
+        self._map_cancel: RequestCancellation | None = None
+        self._map_task: asyncio.Task[None] | None = None
+        self._map_logs: list[str] = []
         self._session_cleanup_task: asyncio.Task | None = None
         self._tool_connection_task: asyncio.Task | None = None
         self._tool_reconnect_task: asyncio.Task | None = None
@@ -2027,7 +2100,7 @@ class SessionScreen(Screen):
             with VerticalScroll(id="session-left"):
                 yield MitsuCompanion(sprite_path=self.companion_path, id="session-companion")
                 yield Static("Mitsu is Ready to Pwn!", id="companion-status", markup=False)
-                yield Static(self._last_activity, id="activity-summary", markup=False)
+                yield Static(self._last_activity, id="activity-text", markup=False)
                 yield Static("Workspace", classes="session-label", markup=False)
                 yield Static(str(self.workspace), id="project-path", markup=False)
                 yield Static("Investigation intensity:", classes="session-label", markup=False)
@@ -2097,6 +2170,12 @@ class SessionScreen(Screen):
 
     def on_mount(self) -> None:
         self._update_context()
+        prompt_history = [
+            str(entry.get("text", "")).removeprefix("›  ")
+            for entry in self.session.get("messages", [])
+            if isinstance(entry, dict) and entry.get("role") == "user" and str(entry.get("text", "")).strip()
+        ]
+        self.query_one("#prompt-input", PromptTextArea).set_message_history(prompt_history)
         self._update_search_sidebar()
         self.call_after_refresh(self._scroll_to_latest_message)
         self.call_after_refresh(self._focus_prompt)
@@ -2170,7 +2249,7 @@ class SessionScreen(Screen):
         else:
             label.display = False
             status.display = False
-            hint.update("Enter send    Shift+Enter new line    Shift+Tab mode    Esc stop    Ctrl+B chat history")
+            hint.update("↑/↓ prompts    Enter send    Shift+Enter new line    Shift+Tab mode    Esc stop    Ctrl+B chat history")
 
     def on_click(self, _event: Click) -> None:
         self.call_after_refresh(self._focus_prompt)
@@ -2203,6 +2282,10 @@ class SessionScreen(Screen):
         await self.close_session()
 
     async def close_session(self) -> None:
+        if self._map_cancel is not None:
+            self._map_cancel.cancel()
+        if self._map_task is not None and not self._map_task.done():
+            self._map_task.cancel()
         if self._session_cleanup_task is None:
             self._closing_session = True
             self._queued_prompts.clear()
@@ -2380,6 +2463,9 @@ class SessionScreen(Screen):
         if not prompt:
             return
         if prompt.startswith("/") and not self._dispatching_prompt:
+            suggestions = self.query_one("#slash-suggestions", OptionList)
+            suggestions.display = False
+            suggestions.clear_options()
             await self._dispatch_prompt(prompt)
             self.call_after_refresh(self._focus_prompt)
             return
@@ -2506,6 +2592,7 @@ class SessionScreen(Screen):
                         and command not in {
                             "/search",
                             "/clear",
+                            "/map",
                             "/level",
                             "/mode",
                             "/export",
@@ -3237,7 +3324,10 @@ class SessionScreen(Screen):
                             )
                             // 4,
                         )
-                        self._set_activity(self._tool_activity(name, arguments, failed=failed))
+                        self._set_activity(
+                            self._tool_activity(name, arguments, failed=failed),
+                            success=name.endswith("__surface_map") and not failed,
+                        )
                         await self._append_message(result, "tool-result", tool_failed=failed)
                         if failed:
                             self._set_companion("failed", "Tool failed", reset_after=1.5)
@@ -4634,34 +4724,133 @@ class SessionScreen(Screen):
         await self._append_message("\n".join(lines))
 
     async def _map_command(self) -> None:
-        self._set_activity("Building an attack surface map from session Intel…")
-        try:
-            result = await self._generate_surface_map()
-        except (OSError, ValueError) as error:
-            await self._fail(f"Could not create the attack surface map: {error}", "Map generation failed")
+        if self._map_task is not None and not self._map_task.done():
             return
-        self._set_activity("Attack surface map is ready.")
-        map_uri = Path(result["path"]).resolve().as_uri()
-        await self._append_message(
-            "Attack surface map ready! (✧ω✧)\n\n"
-            f"**{result['node_count']} nodes · {result['edge_count']} recorded relationships**\n\n"
-            f"[Open the interactive map]({map_uri})\n\n"
-            "It uses saved Intel and leaves unsupported relationships unconnected."
-        )
+        self._set_activity("Building artifact...")
+        self._map_task = asyncio.create_task(self._build_map_artifact())
+
+    async def _build_map_artifact(self) -> None:
+        try:
+            await self._generate_surface_map()
+        except Exception:
+            if self._closing_session:
+                return
+            self._set_activity("Mitsu couldn’t build the attack surface map. Press ^T to see logs.")
+
+    def action_show_logs(self) -> None:
+        logs = "\n\n".join(self._map_logs) or "No map errors have been logged in this session."
+        self.app.push_screen(SessionLogsDialog(logs))
+
+    def _record_map_error(self) -> None:
+        detail = traceback.format_exc()
+        now = datetime.now().astimezone()
+        stamp = now.isoformat(timespec="seconds")
+        log_path = Path(tempfile.gettempdir()) / f"mitsu-map-error-{now.strftime('%Y%m%d-%H%M%S-%f')}.log"
+        message = f"Log saved at {log_path}:\n\n{detail}"
+        try:
+            log_path.write_text(message, encoding="utf-8")
+            log_path.chmod(0o600)
+        except OSError as error:
+            message = f"Could not save map error log at {log_path}: {error}\n\n{detail}"
+        self._map_logs.append(f"[{stamp}] {message}")
+        del self._map_logs[:-10]
+        self.log.error("Attack surface map failed\n%s", detail)
 
     async def _generate_surface_map(
         self,
-        extra_nodes: list[dict[str, Any]] | None = None,
         connections: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        self._set_activity("Building artifact...")
         session_snapshot = copy.deepcopy(self.session)
-        return await asyncio.to_thread(
-            create_surface_map,
-            session_snapshot,
-            self.sessions.path,
-            extra_nodes,
-            connections,
-        )
+        try:
+            mapPlan = await self.planMap(session_snapshot)
+            if connections:
+                mapPlan["connections"].extend(connections)
+            result = await asyncio.to_thread(
+                create_surface_map,
+                session_snapshot,
+                self.sessions.path,
+                mapPlan,
+            )
+            map_uri = Path(result["path"]).resolve().as_uri()
+            await asyncio.to_thread(webbrowser.open_new_tab, map_uri)
+            self._set_activity("Artifact built!\nOpening in your browser the map artifact!", success=True)
+            return result
+        except Exception:
+            self._record_map_error()
+            raise
+
+    async def planMap(
+        self,
+        session: dict[str, Any],
+    ) -> dict[str, Any]:
+        graph = await asyncio.to_thread(build_surface_graph, session)
+        context = {
+            "title": graph["title"],
+            "nodes": [
+                {key: node.get(key) for key in ("id", "label", "category", "kind", "details")}
+                for node in graph["nodes"]
+            ],
+            "recorded_links": graph["edges"],
+            "intel": session.get("intel", {}),
+        }
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Prepare readable detail panels and evidence-backed relationships for this attack-surface map. "
+                    "The entity list is fixed; do not add or remove entities. For every entity, deduplicate repeated "
+                    "Intel, summarize it in plain language, and group useful fields into short sections. Convert "
+                    "serialized evidence records into readable statements that preserve source and timestamp when "
+                    "available. Never return JSON serialized inside a value. Do not invent facts. If records disagree, "
+                    "show the conflict and its timestamps instead of choosing one value. Keep observations, findings, "
+                    "exploits, and account data in that entity's panel, never as graph entities. "
+                    "Only connect entities when saved Intel directly establishes the relationship. Do not infer links "
+                    "from matching names, shared networks, or plausibility. Return only JSON shaped as: "
+                    "{\"entities\":[{\"id\":\"existing id\",\"summary\":\"plain-language summary\","
+                    "\"sections\":[{\"title\":\"section\",\"items\":[{\"label\":\"field\","
+                    "\"value\":\"readable value\"}]}]}],\"connections\":[{\"source\":\"existing id\","
+                    "\"target\":\"existing id\",\"label\":\"relationship\",\"evidence\":\"exact quote from Intel\"}]}. "
+                    "Use concise sections such as Asset, Observations, Findings, Exploits, Accounts, and Evidence. "
+                    "Return an empty connections array when evidence does not establish a link."
+                ),
+            },
+            {"role": "user", "content": json.dumps(context, ensure_ascii=False, default=str)},
+        ]
+        cancel = RequestCancellation()
+        self._map_cancel = cancel
+        try:
+            for attempt in range(11):
+                try:
+                    turn = await asyncio.to_thread(
+                        request_agent_turn,
+                        self.provider,
+                        messages,
+                        [],
+                        cancellation=cancel,
+                    )
+                    break
+                except ProviderRequestError as error:
+                    if attempt >= 10 or not is_transient_provider_error(error):
+                        raise
+                    await asyncio.sleep(10)
+        finally:
+            if self._map_cancel is cancel:
+                self._map_cancel = None
+        raw = turn.text.strip()
+        if raw.startswith("```"):
+            raw = raw.partition("\n")[2].rsplit("```", 1)[0].strip()
+        try:
+            plan = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise ValueError("The model returned an unreadable map plan.") from error
+        if not isinstance(plan, dict):
+            raise ValueError("The model returned an invalid map plan.")
+        entities = plan.get("entities", [])
+        connections = plan.get("connections", [])
+        if not isinstance(entities, list) or not isinstance(connections, list):
+            raise ValueError("The model returned invalid map details or relationships.")
+        return {"entities": entities, "connections": connections}
 
     async def _vulnsearch_command(self, query: str) -> None:
         label = query or "saved Intel"
@@ -5304,7 +5493,7 @@ CURRENT MODE: {self.mode}
             self._set_companion("error", "Something went wrong", reset_after=2.0)
         elif role == "success":
             self._set_companion("success", "Nice work!", reset_after=1.5)
-        if self._command_running and self._active_command != "/clear":
+        if self._command_running and self._active_command not in {"/clear", "/map"}:
             title = "Command error" if role == "error" else f"{self._active_command or 'Command'} result"
             self._show_command_panel(title, message)
             return
@@ -5617,10 +5806,12 @@ CURRENT MODE: {self.mode}
             else:
                 self._set_companion("idle", "Mitsu is Ready to Pwn!")
 
-    def _set_activity(self, activity: str) -> None:
+    def _set_activity(self, activity: str, success: bool = False) -> None:
         self._last_activity = activity
         if self.is_mounted and not self._closing_session:
-            self.query_one("#activity-summary", Static).update(activity)
+            widget = self.query_one("#activity-text", Static)
+            widget.update(activity)
+            widget.set_class(success, "is-success")
 
     def _tool_activity(self, name: str, arguments: object = None, failed: bool | None = None) -> str:
         normalized_name = name.casefold()
@@ -5668,8 +5859,8 @@ CURRENT MODE: {self.mode}
                 "Mitsu couldn’t search the artifact.",
             ),
             "surface_map": (
-                "Mitsu is mapping session Intel…",
-                "Mitsu finished the attack surface map.",
+                "Building artifact...",
+                "Artifact built!\nOpening in your browser the map artifact!",
                 "Mitsu couldn’t build the attack surface map.",
             ),
             "vulnsearch": (
@@ -5780,7 +5971,7 @@ CURRENT MODE: {self.mode}
             f"{len(self.intel['manhunt'])} people · {len(self.intel['observations'])} notes"
         )
         self.query_one("#intel-summary", Static).update(summary)
-        self.query_one("#activity-summary", Static).update(self._last_activity)
+        self.query_one("#activity-text", Static).update(self._last_activity)
         level_text = Text(
             f"{self.level}/5 · {LEVEL_NAMES[self.level]}",
             style=f"bold {THEMES.get(self.theme_id, THEMES['ember'])['accent']}",

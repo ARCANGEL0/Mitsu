@@ -56,7 +56,7 @@ ShowCommandHandler = Callable[[str, str], Awaitable[bool]]
 ModeDialogHandler = Callable[[str], Awaitable[str]]
 ToolResultHandler = Callable[[str, dict[str, Any], str], Awaitable[str]]
 SurfaceMapHandler = Callable[
-    [list[dict[str, Any]] | None, list[dict[str, Any]] | None],
+    [list[dict[str, Any]] | None],
     Awaitable[dict[str, Any]],
 ]
 
@@ -326,13 +326,12 @@ class AgentToolHost:
 
         @self.server.tool(annotations=ToolAnnotations(read_only_hint=False, open_world_hint=False))
         async def surface_map(
-            nodes: list[dict[str, Any]] | None = None,
             connections: list[dict[str, Any]] | None = None,
         ) -> str:
-            "Generate or refresh this session's interactive attack surface map from saved Intel and conversation context. Use when asked for a graph or map. Optional nodes need a label, category (asset, service, finding, exploit, observation, account, or person), and verbatim evidence from the session transcript. Optional connections need source and target node IDs or unique labels, a relationship label, and verbatim evidence from Intel or the transcript. Unsupported items are ignored and transcript-only nodes are marked unverified."
+            "Generate or refresh this session's interactive attack surface map from saved Intel. Use when asked for a graph or map. The graph contains entity nodes only; findings, exploits, accounts, and observations belong in the selected entity's details. Optional connections need source and target entity IDs, a relationship label, and verbatim evidence from saved Intel. Unsupported connections are ignored."
             if self.surface_map_handler is None:
                 raise ToolHostError("The session map generator is unavailable.")
-            result = await self.surface_map_handler(nodes, connections)
+            result = await self.surface_map_handler(connections)
             return (
                 f"[Open the attack surface map]({Path(result['path']).resolve().as_uri()})\n"
                 f"Saved at: {result['path']}\n"
