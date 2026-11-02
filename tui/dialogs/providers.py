@@ -26,6 +26,7 @@ class ProviderDialog(ModalScreen[dict | None]):
         self.stage = "provider_list" if self.dialog_kind == "connect" else "model_list"
         self.pending_profile: dict | None = None
         self.model_choices: list[tuple[dict, str]] = []
+        self.all_model_choices: list[tuple[dict, str]] = []
         self.key_prompted = False
         self.endpoint_prompted = False
 
@@ -58,6 +59,14 @@ class ProviderDialog(ModalScreen[dict | None]):
             self.run_worker(self._load_provider_models(), name="provider-dialog-models", exclusive=True)
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "provider-dialog-input" and self.stage == "model_list":
+            event.stop()
+            listing = self.query_one("#provider-dialog-list", OptionList)
+            index = listing.highlighted
+            if index is not None and 0 <= index < len(self.model_choices):
+                profile, model = self.model_choices[index]
+                await self._save_selection(profile, model)
+            return
         if event.input.id != "provider-dialog-input" or not self.pending_profile:
             return
         value = event.value.strip()
@@ -112,6 +121,7 @@ class ProviderDialog(ModalScreen[dict | None]):
             state = " · active" if provider.id == active else " · saved" if provider.id in configured else ""
             options.append(f"{provider.name}{state}")
         self.query_one("#provider-dialog-title", Static).update("CONNECT A PROVIDER")
+        self.query_one("#provider-dialog-input", Input).display = False
         self.query_one("#provider-dialog-detail", Static).update(
             "Choose a provider to save its own key and model. Other provider setups stay saved."
         )
@@ -200,6 +210,7 @@ class ProviderDialog(ModalScreen[dict | None]):
         initial_value: str = "",
     ) -> None:
         self.stage = stage
+        self.query_one("#provider-dialog-input", Input).display = False
         self.query_one("#provider-dialog-title", Static).update(title)
         self.query_one("#provider-dialog-detail", Static).update(prompt)
         listing = self.query_one("#provider-dialog-list", OptionList)
@@ -218,6 +229,7 @@ class ProviderDialog(ModalScreen[dict | None]):
             return
         spec = PROVIDER_BY_ID[str(profile["provider_id"])]
         self.stage = "retry_provider_models"
+        self.query_one("#provider-dialog-input", Input).display = False
         self.query_one("#provider-dialog-title", Static).update(f"{spec.name.upper()} MODELS")
         self.query_one("#provider-dialog-detail", Static).update(f"Loading models from {spec.name}…")
         try:
@@ -230,6 +242,7 @@ class ProviderDialog(ModalScreen[dict | None]):
     async def _load_all_models(self) -> None:
         profiles = self.credentials.configured_profiles()
         self.stage = "model_list"
+        self.query_one("#provider-dialog-input", Input).display = False
         self.query_one("#provider-dialog-title", Static).update("CHOOSE A MODEL")
         if not profiles:
             self._show_retry("No providers are configured yet. Use /connect to add one.", "retry_models")
@@ -256,26 +269,72 @@ class ProviderDialog(ModalScreen[dict | None]):
 
     def _show_models(self, choices: list[tuple[dict, str]], detail: str) -> None:
         self.stage = "model_list"
-        self.model_choices = choices
-        options = []
+        self.all_model_choices = choices
         current = self.credentials.load().get("active_provider")
         active_profile = self.credentials.active() or {}
-        for profile, model in choices:
-            name = PROVIDER_BY_ID[str(profile["provider_id"])].name
-            active = "› " if profile["provider_id"] == current and model == active_profile.get("model") else "  "
-            options.append(f"{active}{name}  ·  {model}")
         self.query_one("#provider-dialog-title", Static).update("CHOOSE A MODEL")
         self.query_one("#provider-dialog-detail", Static).update(detail)
+        search = self.query_one("#provider-dialog-input", Input)
+        search.value = ""
+        search.password = False
+        search.placeholder = "Filter providers and models"
+        search.display = True
+        listing = self.query_one("#provider-dialog-list", OptionList)
+        listing.display = True
+        listing.styles.max_height = 8
+        self.query_one("#provider-dialog-hint", Static).update(
+            "Type to filter    Tab to browse    ↑ / ↓ choose    Enter select    Esc close"
+        )
+        self._filter_models(search.value, current, active_profile)
+        search.focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "provider-dialog-input" and self.stage == "model_list":
+            current = self.credentials.load().get("active_provider")
+            active_profile = self.credentials.active() or {}
+            self._filter_models(event.value, current, active_profile)
+
+    def _filter_models(
+        self,
+        query: str,
+        current_provider: str | None = None,
+        active_profile: dict | None = None,
+    ) -> None:
+        normalized = query.casefold().strip()
+        active_profile = active_profile or {}
+        self.model_choices = [
+            (profile, model)
+            for profile, model in self.all_model_choices
+            if not normalized
+            or normalized in model.casefold()
+            or normalized in PROVIDER_BY_ID[str(profile["provider_id"])].name.casefold()
+        ]
         listing = self.query_one("#provider-dialog-list", OptionList)
         listing.clear_options()
-        listing.add_options(options)
-        listing.display = True
-        self.query_one("#provider-dialog-input", Input).display = False
-        listing.focus()
+        options = []
+        for profile, model in self.model_choices:
+            name = PROVIDER_BY_ID[str(profile["provider_id"])].name
+            active = "› " if profile["provider_id"] == current_provider and model == active_profile.get("model") else "  "
+            options.append(f"{active}{name}  ·  {model}")
+        listing.add_options(options or ["No matching models"])
+        if options:
+            listing.highlighted = next(
+                (
+                    index
+                    for index, (profile, model) in enumerate(self.model_choices)
+                    if not normalized
+                    and profile["provider_id"] == current_provider
+                    and model == active_profile.get("model")
+                ),
+                0,
+            )
 
     def _show_retry(self, detail: str, stage: str) -> None:
         self.stage = stage
         self.model_choices = []
+        self.all_model_choices = []
+        self.query_one("#provider-dialog-input", Input).display = False
+        self.query_one("#provider-dialog-hint", Static).update("↑ / ↓ move    Enter select    Esc close")
         self.query_one("#provider-dialog-detail", Static).update(detail)
         listing = self.query_one("#provider-dialog-list", OptionList)
         listing.clear_options()
