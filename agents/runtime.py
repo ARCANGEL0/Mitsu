@@ -11,7 +11,13 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 from mitsu.tools import AgentToolHost
-from mitsu.providers import ProviderRequestError, ProviderTurn, RequestCancellation, request_agent_turn
+from mitsu.providers import (
+    ProviderRequestError,
+    ProviderTurn,
+    RequestCancellation,
+    is_transient_provider_error,
+    request_agent_turn,
+)
 
 
 @dataclass(frozen=True)
@@ -323,7 +329,7 @@ async def run_agent_turn(
                             raise
                     break
                 except ProviderRequestError as error:
-                    if retry_number >= 10 or not _is_transient_provider_error(error):
+                    if retry_number >= 10 or not is_transient_provider_error(error):
                         raise
                     retry_attempt = retry_number + 1
                     yield AgentEvent("api_retry", {
@@ -453,18 +459,3 @@ def history_from_legacy(entries: list[Any]) -> list[dict[str, Any]]:
     return history
 
 
-def _is_transient_provider_error(error: ProviderRequestError) -> bool:
-    message = str(error).casefold()
-    if "provider request failed (429)" in message:
-        return True
-    for status in range(500, 600):
-        if f"provider request failed ({status})" in message:
-            return True
-    return any(
-        marker in message
-        for marker in (
-            "could not reach the provider",
-            "provider stream ended unexpectedly",
-            "provider returned an unreadable streamed response",
-        )
-    )

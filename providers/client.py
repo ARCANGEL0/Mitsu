@@ -19,6 +19,23 @@ class ProviderRequestError(Exception):
     pass
 
 
+def is_transient_provider_error(error: ProviderRequestError) -> bool:
+    message = str(error).casefold()
+    if "provider request failed (429)" in message:
+        return True
+    for status in range(500, 600):
+        if f"provider request failed ({status})" in message:
+            return True
+    return any(
+        marker in message
+        for marker in (
+            "could not reach the provider",
+            "provider stream ended unexpectedly",
+            "provider returned an unreadable streamed response",
+        )
+    )
+
+
 @dataclass(frozen=True)
 class ToolInvocation:
     id: str
@@ -883,6 +900,9 @@ def list_models(profile: dict[str, Any]) -> list[str]:
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         cursor_parameter = "after"
+
+    headers["Cache-Control"] = "no-cache, no-store"
+    headers["Pragma"] = "no-cache"
 
     model_ids: set[str] = set()
     cursor: str | None = None
