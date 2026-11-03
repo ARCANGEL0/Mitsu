@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from html.parser import HTMLParser
 import json
+import os
 import re
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
@@ -36,6 +37,7 @@ SEARCH_ENGINES = (
     SearchEngineSpec("yahoo", "Yahoo Search", "No key · Yahoo direct", "html"),
     SearchEngineSpec("startpage", "Startpage Search", "No key · Startpage direct", "html"),
     SearchEngineSpec("exa", "Exa Web Search", "API key · semantic web search", "exa", ("api_key",)),
+    SearchEngineSpec("keenable", "Keenable Search", "No key · search API for AI agents", "keenable"),
     SearchEngineSpec("tavily", "Tavily Search", "API key · search for AI agents", "tavily", ("api_key",)),
     SearchEngineSpec("ollama", "Ollama Web Search", "Hosted API · Ollama account key", "ollama", ("api_key",)),
     SearchEngineSpec("brave_api", "Brave Search API", "Subscription API key", "brave_api", ("api_key",)),
@@ -347,6 +349,21 @@ def _api_results(engine_id: str, query: str, settings: dict[str, Any], count: in
         )
         raw_results = data.get("results", [])
         snippet_key = "content"
+    elif engine_id == "keenable":
+        # Free public endpoint needs no key; KEENABLE_API_KEY switches to the keyed endpoint.
+        api_key = os.environ.get("KEENABLE_API_KEY", "").strip()
+        headers = {"X-Keenable-Title": "Mitsu"}
+        url = "https://api.keenable.ai/v1/search/public"
+        if api_key:
+            headers["X-API-Key"] = api_key
+            url = "https://api.keenable.ai/v1/search"
+        data = _request_json(url, headers=headers, body={"query": query, "max_results": min(count, 20)})
+        raw_results = []
+        for item in data.get("results", []) or []:
+            if isinstance(item, dict):
+                snippet = item.get("description") or str(item.get("snippet") or "")[:1000]
+                raw_results.append({**item, "description": snippet})
+        snippet_key = "description"
     elif engine_id == "ollama":
         data = _request_json(
             "https://ollama.com/api/web_search",
