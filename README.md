@@ -414,7 +414,7 @@ Configure search sources with <code>/config</code>. Mitsu can query multiple con
 
 | Connection type | Search engines |
 | --- | --- |
-| Direct search, no key | DuckDuckGo, Google, Bing, Brave, Mojeek, Ecosia, Yahoo, Startpage |
+| Direct search, no key | DuckDuckGo, Google, Bing, Brave, Mojeek, Ecosia, Yahoo, Startpage, Keenable (optional `KEENABLE_API_KEY`) |
 | API key or account | Exa, Tavily, Ollama Web Search, Brave Search API, Serper, SerpApi, Firecrawl, Google Programmable Search |
 | Self-hosted metasearch | SearXNG |
 
