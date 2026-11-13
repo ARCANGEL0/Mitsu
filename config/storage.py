@@ -80,7 +80,10 @@ class CredentialStore:
         configured = []
         for spec in PROVIDERS:
             profile = profiles.get(spec.id)
-            if not isinstance(profile, dict) or not profile.get("base_url"):
+            if not isinstance(profile, dict):
+                continue
+            # LiteLLM routes by model ID and needs a base URL only for self-hosted endpoints.
+            if not profile.get("base_url") and spec.protocol != "litellm":
                 continue
             if spec.requires_api_key and not profile.get("api_key"):
                 continue
@@ -91,7 +94,9 @@ class CredentialStore:
 
     def ready(self) -> bool:
         profile = self.active()
-        if not profile or not profile.get("model") or not profile.get("base_url"):
+        if not profile or not profile.get("model"):
+            return False
+        if not profile.get("base_url") and profile.get("protocol") != "litellm":
             return False
         spec = PROVIDER_BY_ID.get(str(profile.get("provider_id")))
         if not spec:

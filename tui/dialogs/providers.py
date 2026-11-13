@@ -163,6 +163,25 @@ class ProviderDialog(ModalScreen[dict | None]):
                 detail = "API key already set. Leave empty to keep it unchanged, or enter a replacement."
             self._request_input("api_key", "CUSTOM API KEY", detail, "API key (optional)", True)
             return
+        if provider_id == "litellm" and not self.key_prompted:
+            self.key_prompted = True
+            detail = (
+                "Optional. LiteLLM reads each provider's own credentials (ANTHROPIC_API_KEY, AWS, Google ADC). "
+                "Enter a key only to override them."
+            )
+            if profile.get("api_key"):
+                detail = "API key already set. Leave empty to keep it unchanged, or enter a replacement."
+            self._request_input("api_key", "LITELLM API KEY", detail, "API key (optional)", True)
+            return
+        if provider_id == "litellm":
+            self._request_input(
+                "model_name",
+                "LITELLM MODEL",
+                "Enter a LiteLLM provider/model ID, e.g. anthropic/claude-sonnet-4-6 or vertex_ai/gemini-2.5-flash.",
+                "provider/model",
+                initial_value=str(profile.get("model", "")),
+            )
+            return
         if provider_id == "cloudflare" and not self._has_cloudflare_account(str(profile.get("base_url", ""))):
             self._request_input("account_id", "CLOUDFLARE ACCOUNT", "Enter the account ID for Workers AI.", "Account ID")
             return

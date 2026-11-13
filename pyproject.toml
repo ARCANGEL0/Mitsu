@@ -31,6 +31,10 @@ dependencies = [
   "textual>=1.0.0",
 ]
 
+[project.optional-dependencies]
+# The LiteLLM provider: Bedrock, Vertex AI, Azure and other providers by provider/model ID.
+litellm = ["litellm>=1.97.0,<1.106.0"]
+
 [project.urls]
 Homepage = "https://github.com/ARCANGEL0/Mitsu"
 Repository = "https://github.com/ARCANGEL0/Mitsu"

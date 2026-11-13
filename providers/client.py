@@ -142,9 +142,11 @@ def request_agent_turn(
     base_url = str(profile.get("base_url", "")).rstrip("/")
     model = str(profile.get("model", ""))
     api_key = str(profile.get("api_key", ""))
-    if not base_url or not model:
+    if not model or (not base_url and protocol != "litellm"):
         raise ProviderRequestError("Provider setup is incomplete. Reopen provider setup from the main menu.")
     try:
+        if protocol == "litellm":
+            return _request_litellm_turn(profile, messages, tools, on_event, cancellation)
         if protocol == "anthropic":
             return _request_anthropic_turn(
                 base_url, model, api_key, messages, tools, on_event, cancellation
@@ -185,17 +187,7 @@ def _request_openai_turn(
     payload: dict[str, Any] = {
         "model": model,
         "messages": _openai_messages(messages),
-        "tools": [
-            {
-                "type": "function",
-                "function": {
-                    "name": tool["name"],
-                    "description": tool["description"],
-                    "parameters": tool["parameters"],
-                },
-            }
-            for tool in tools
-        ],
+        "tools": _openai_tools(tools),
         "stream": False,
     }
     if reasoning_parameter == "reasoning_effort" and reasoning_enabled:
@@ -385,6 +377,15 @@ def _request_openai_stream(
         if not isinstance(decoded, dict):
             raise ProviderRequestError("The provider returned an unexpected response.")
         return _openai_turn_from_response(decoded, on_event)
+    return _read_openai_stream(response, on_event, cancellation)
+
+
+def _read_openai_stream(
+    response: Any,
+    on_event: StreamCallback,
+    cancellation: RequestCancellation | None,
+) -> ProviderTurn | None:
+    """Assemble a turn from Chat Completions stream lines (``data: {chunk}``), emitting text deltas as they arrive."""
     text_parts: list[str] = []
     reply_filter = _ReplyFilter()
     tool_calls: dict[int, dict[str, Any]] = {}
@@ -780,9 +781,12 @@ def send_chat(profile: dict[str, Any], messages: list[dict[str, str]]) -> str:
     base_url = str(profile.get("base_url", "")).rstrip("/")
     model = str(profile.get("model", ""))
     api_key = str(profile.get("api_key", ""))
-    if not base_url or not model:
+    if not model or (not base_url and protocol != "litellm"):
         raise ProviderRequestError("Provider setup is incomplete. Reopen provider setup from the main menu.")
     try:
+        if protocol == "litellm":
+            turn = _request_litellm_turn(profile, messages, [], None, None)
+            return turn.text
         if protocol == "anthropic":
             return _send_anthropic(base_url, model, api_key, messages)
         return _send_openai_compatible(
@@ -805,6 +809,8 @@ def test_connection(profile: dict[str, Any]) -> str:
     protocol = profile.get("protocol", "openai")
     base_url = str(profile.get("base_url", "")).rstrip("/")
     api_key = str(profile.get("api_key", ""))
+    if protocol == "litellm":
+        return _test_litellm(profile)
     if not base_url:
         raise ProviderRequestError("Enter a provider base URL first.")
     if protocol == "anthropic":
@@ -850,6 +856,8 @@ def list_models(profile: dict[str, Any]) -> list[str]:
     base_url = str(profile.get("base_url", "")).rstrip("/")
     api_key = str(profile.get("api_key", ""))
     provider_id = str(profile.get("provider_id", ""))
+    if protocol == "litellm":
+        return _list_litellm_models(profile)
     if not base_url:
         raise ProviderRequestError("Enter a provider base URL first.")
     if provider_id == "cloudflare":
@@ -965,6 +973,12 @@ def check_reasoning_support(profile: dict[str, Any]) -> str | None:
     model = str(profile.get("model", ""))
     if protocol == "anthropic":
         return None
+    if protocol == "litellm":
+        supported = _litellm_capability("supports_reasoning", model)
+        if supported is None:
+            return None
+        # LiteLLM maps reasoning_effort onto each provider's own thinking controls.
+        return "reasoning_effort" if supported else "unsupported"
     if provider_id == "nvidia_nim" and "nemotron-3-ultra" in model.casefold():
         return "nvidia_chat_template"
     base_url = str(profile.get("base_url", "")).rstrip("/")
@@ -1037,6 +1051,8 @@ def check_image_input_support(profile: dict[str, Any]) -> bool | None:
     base_url = str(profile.get("base_url", "")).rstrip("/")
     model = str(profile.get("model", ""))
     api_key = str(profile.get("api_key", ""))
+    if protocol == "litellm":
+        return _litellm_capability("supports_vision", model)
     if not base_url or not model:
         return None
     if provider_id == "cloudflare":
@@ -1152,6 +1168,20 @@ def _image_data(path: str) -> tuple[str, str]:
     return media_type, encoded
 
 
+def _openai_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["parameters"],
+            },
+        }
+        for tool in tools
+    ]
+
+
 def _openai_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized = []
     for message in messages:
@@ -1203,6 +1233,129 @@ def apply_reasoning_default(profile: dict[str, Any]) -> bool:
     profile["reasoning_parameter"] = capability
     profile["reasoning_effort"] = "medium"
     return True
+
+
+def _litellm() -> Any:
+    try:
+        import litellm
+    except ImportError as error:
+        raise ProviderRequestError(
+            "The LiteLLM provider needs the LiteLLM SDK: pip install 'mitsu[litellm]'"
+        ) from error
+    litellm.suppress_debug_info = True  # its help banners print to stdout, under the TUI
+    return litellm
+
+
+class _LiteLLMStream:
+    """A LiteLLM completion stream presented as the ``data:`` lines _read_openai_stream reads."""
+
+    def __init__(self, chunks: Any) -> None:
+        self._chunks = chunks
+
+    def __iter__(self):
+        for chunk in self._chunks:
+            data = chunk.model_dump(exclude_none=True) if hasattr(chunk, "model_dump") else chunk
+            yield b"data: " + json.dumps(data, default=str).encode("utf-8")
+        yield b"data: [DONE]"
+
+    def close(self) -> None:
+        close = getattr(self._chunks, "close", None)
+        if callable(close):
+            close()
+
+
+def _litellm_request(profile: dict[str, Any]) -> dict[str, Any]:
+    """Arguments shared by every LiteLLM call: credentials come from each provider's own environment
+    variables unless the profile carries a key, and an endpoint only for self-hosted routes."""
+    request: dict[str, Any] = {"model": str(profile.get("model", "")), "drop_params": True, "timeout": 120}
+    base_url = str(profile.get("base_url", "")).rstrip("/")
+    api_key = str(profile.get("api_key", ""))
+    if base_url:
+        request["api_base"] = base_url
+    if api_key:
+        request["api_key"] = api_key
+    return request
+
+
+def _request_litellm_turn(
+    profile: dict[str, Any],
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    on_event: StreamCallback | None,
+    cancellation: RequestCancellation | None,
+) -> ProviderTurn:
+    litellm = _litellm()
+    request = {**_litellm_request(profile), "messages": _openai_messages(messages)}
+    if tools:
+        request["tools"] = _openai_tools(tools)
+    if profile.get("reasoning_enabled") is True and profile.get("reasoning_parameter") == "reasoning_effort":
+        request["reasoning_effort"] = str(profile.get("reasoning_effort", "medium"))
+    try:
+        if on_event is not None:
+            stream = _LiteLLMStream(
+                litellm.completion(**request, stream=True, stream_options={"include_usage": True})
+            )
+            if cancellation is not None:
+                cancellation.attach(stream)
+            try:
+                streamed = _read_openai_stream(stream, on_event, cancellation)
+            finally:
+                if cancellation is not None:
+                    cancellation.detach(stream)
+            if streamed is not None:
+                return streamed
+        if cancellation is not None and cancellation.cancelled():
+            return ProviderTurn("", {"role": "assistant", "content": ""}, [])
+        response = litellm.completion(**request)
+    except ProviderRequestError:
+        raise
+    except Exception as error:
+        raise ProviderRequestError(f"Provider request failed: {_litellm_error(error)}") from error
+    return _openai_turn_from_response(response.model_dump(), on_event)
+
+
+def _litellm_error(error: Exception) -> str:
+    message = str(getattr(error, "message", "") or error)
+    return message.splitlines()[0][:400] if message else type(error).__name__
+
+
+def _test_litellm(profile: dict[str, Any]) -> str:
+    litellm = _litellm()
+    if not profile.get("model"):
+        return "LiteLLM SDK found. Choose a provider/model to finish the connection check."
+    try:
+        litellm.completion(
+            **_litellm_request(profile), messages=[{"role": "user", "content": "Reply with OK."}], max_tokens=5
+        )
+    except Exception as error:
+        message = f"Provider request failed: {_litellm_error(error)}"
+        raise ProviderRequestError(_hide_secret(message, str(profile.get("api_key", "")))) from error
+    return "Connection succeeded."
+
+
+def _list_litellm_models(profile: dict[str, Any]) -> list[str]:
+    """Models of the providers whose credentials LiteLLM finds in the environment, plus the saved one."""
+    litellm = _litellm()
+    try:
+        models = set(litellm.get_valid_models())
+    except Exception as error:
+        raise ProviderRequestError(f"Could not list LiteLLM models: {_litellm_error(error)}") from error
+    if profile.get("model"):
+        models.add(str(profile["model"]))
+    if not models:
+        raise ProviderRequestError(
+            "LiteLLM found no provider credentials. Set a provider's API key (e.g. ANTHROPIC_API_KEY) "
+            "or enter a provider/model ID."
+        )
+    return sorted(models, key=str.casefold)
+
+
+def _litellm_capability(check: str, model: str) -> bool | None:
+    try:
+        litellm = _litellm()
+        return bool(getattr(litellm, check)(model=model))
+    except Exception:
+        return None
 
 
 def _hide_secret(message: str, secret: str) -> str:

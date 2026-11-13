@@ -30,6 +30,14 @@ PROVIDERS = (
         "openai",
         note="Replace {account_id} with your Cloudflare account ID.",
     ),
+    ProviderSpec(
+        "litellm",
+        "LiteLLM",
+        "",
+        "litellm",
+        False,
+        note="provider/model IDs (bedrock/..., vertex_ai/..., azure/...); credentials from each provider's environment.",
+    ),
     ProviderSpec("custom", "Custom", "", "openai", False),
 )
 
