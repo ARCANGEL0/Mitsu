@@ -251,7 +251,8 @@ async def run_agent_turn(
             active_mode = get_mode() if get_mode is not None else mode
             if active_mode != "Guided":
                 guided_checkpoint_due = False
-            checkpoint_pending = redirect_pending or guided_checkpoint_due
+            redirect_checkpoint_pending = redirect_pending and active_mode == "Guided"
+            checkpoint_pending = redirect_checkpoint_pending or guided_checkpoint_due
             active_system_prompt = get_system_prompt() if get_system_prompt is not None else system_prompt
             active_system_prompt += (
                 "\n\nRecent operator messages, oldest first, follow as JSON. Apply their constraints "
@@ -262,12 +263,30 @@ async def run_agent_turn(
                 + json.dumps(operator_history[-16:], ensure_ascii=False)
             )
             if redirect_pending:
-                active_system_prompt += (
-                    "\n\nThe operator interrupted an active run. Answer their latest message first in "
-                    "Mitsu's own voice. The previous batch is cancelled. You may save Intel or open "
-                    "mitsu__user_dialog to let them choose how to proceed; investigation tools are paused "
-                    "until that choice. For a direct question, give the answer and end the turn."
-                )
+                if active_mode == "AutoPwn":
+                    active_system_prompt += (
+                        "\n\nThe operator redirected an active run. The previous batch is cancelled. "
+                        "Address the latest message first, apply its direction to the ongoing objective, "
+                        "then continue autonomously within the authorized scope. Do not pause or open a "
+                        "dialog solely because the run was interrupted; ask only if a material decision "
+                        "or missing information genuinely blocks safe progress. If the latest message is "
+                        "only a direct question, answer it and end the turn."
+                    )
+                elif active_mode == "Guided":
+                    active_system_prompt += (
+                        "\n\nThe operator redirected an active run. The previous batch is cancelled. "
+                        "Answer the latest message first, then use mitsu__user_dialog to let them choose "
+                        "the next investigation step. Keep investigation tools paused until they choose. "
+                        "For a direct question, give the answer and end the turn."
+                    )
+                else:
+                    active_system_prompt += (
+                        "\n\nThe operator redirected an active run. The previous batch is cancelled. "
+                        "Address the latest message first, then continue only with passive Recon actions. "
+                        "Do not open a dialog solely because the run was interrupted. If the requested "
+                        "next step requires active target interaction, use mitsu__request_mode. For a "
+                        "direct question, give the answer and end the turn."
+                    )
             elif checkpoint_pending:
                 active_system_prompt += (
                     "\n\nA Guided investigation step has finished. Save the new evidence in Intel. "
@@ -337,6 +356,8 @@ async def run_agent_turn(
                     })
                     await asyncio.sleep(10)
                     yield AgentEvent("api_retrying", {"attempt": retry_attempt})
+            if redirect_pending and active_mode != "Guided":
+                redirect_pending = False
             if interrupt_requested is not None and interrupt_requested():
                 raise asyncio.CancelledError
             if turn.usage:
@@ -371,7 +392,7 @@ async def run_agent_turn(
                 is_error = True
                 if dialog_used:
                     result = "Not run: review the operator's dialog answer before proposing another action."
-                elif (redirect_pending or (invocation_mode == "Guided" and guided_checkpoint_due)) and not _guided_checkpoint_tool(invocation.name):
+                elif checkpoint_pending and not _guided_checkpoint_tool(invocation.name):
                     result = "Not run: waiting for the operator's next-step choice through mitsu__user_dialog."
                 elif invocation_mode == "Guided" and guided_action_seen and _guided_flow_action(invocation.name):
                     result = "Not run: Guided mode pauses after one investigation action for the operator's next-step choice."
