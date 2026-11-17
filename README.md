@@ -553,28 +553,31 @@ mitsu/
 
 ## Disclaimer
 
-### Cute companion, serious rules ✦
+> ### Cute companion, serious rules ✦
+> 
+> Mitsu is a tool; the person operating her is responsible for every target, command, and result. Use her only where you have explicit permission and keep all activity within the agreed scope. The project’s maintainers are not responsible for unauthorized use or damage caused by misuse.
+> 
+> **Good places to use Mitsu**
 
-Mitsu is a tool; the person operating her is responsible for every target, command, and result. Use her only where you have explicit permission and keep all activity within the agreed scope. The project’s maintainers are not responsible for unauthorized use or damage caused by misuse.
-
-**Good places to use Mitsu**
-
-- CTFs, cyber ranges, and isolated labs.
-- Authorized penetration tests and internal security assessments.
-- Systems and accounts you own or have clear permission to test.
-
-**Do not use Mitsu to**
-
-- Access or test systems without authorization, or go beyond the approved scope.
-- Steal data or credentials, disrupt services, cause damage, evade monitoring, or establish unauthorized persistence.
-- Run destructive or disruptive checks unless they are explicitly authorized in the rules of engagement.
-
-Mitsu may handle sensitive assessment data. Before sending prompts, Intel, tool output, credentials, or images, check the privacy and retention terms of the model provider you selected. Privacy protections and data handling vary by provider and account settings; Mitsu cannot guarantee what a third-party service does with submitted data. Also review the terms of any search service or external MCP server you connect. Check tool output and verify evidence before reporting findings. If permission or scope is unclear, pause and ask first.
+> - CTFs, cyber ranges, and isolated labs.
+> - Authorized penetration tests and internal security assessments.
+> - Systems and accounts you own or have clear permission to test.
+> 
+> **Do not use Mitsu to**
+> 
+> - Access or test systems without authorization, or go beyond the approved scope.
+> - Steal data or credentials, disrupt services, cause damage, evade monitoring, or establish unauthorized persistence.
+> - Run destructive or disruptive checks unless they are explicitly authorized in the rules of engagement.
+>
+> Mitsu may handle sensitive assessment data. Before sending prompts, Intel, tool output, credentials, or images, check the privacy and retention terms of the model provider you selected. Privacy protections and data handling vary by provider and account settings; Mitsu cannot guarantee what a third-party service does with submitted data. Also review the terms of any search service or external MCP server you connect. Check tool output and verify evidence before reporting findings. If permission or scope is unclear, pause and ask first.
 
 ## License
 
 MIT License
 
+<details> 
+    
+```
 Copyright (c) 2026 ARCANGEL0
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -594,6 +597,9 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+</details>
 
 <div align="center">
 
