@@ -4,6 +4,41 @@ These versions mark development milestones in the Git history. Versions before
 1.4.21 were assigned retrospectively; skipped numbers do not represent releases.
 Each milestone has a matching Git tag and consistent runtime and package versions.
 
+## 1.5.0
+
+### Features
+
+- AI-assisted attack-surface mapping from session Intel.
+- Professional HTML and PDF security assessment reports.
+- Branded report cover, table of contents, severity grouping, evidence, and remediation sections.
+- Confirmed-finding filtering for client-ready reports.
+- Single-instance process locking.
+- Improved interrupted AutoPwn recovery.
+
+### Changelog
+
+- Added report and map artifact workflows to the session interface.
+- Added bundled report assets and PDF rendering support.
+- Added provider response validation for artifact generation.
+- Added clearer activity states while reports and maps are being built.
+- Updated package metadata and distribution resources.
+- Improved menu resizing and companion dialog presentation.
+
+### Fixes
+
+- Omit empty `tools` arrays from provider requests.
+- Retry transient provider failures and malformed artifact responses.
+- Prevent interrupted AutoPwn sessions from stopping unnecessarily.
+- Ensure Ctrl+Q completes bounded cleanup and terminates the process.
+- Preserve existing provider, Intel, session, and merge-request functionality.
+
+### To-do
+
+- Add automated coverage for report and map artifact generation.
+- Add provider compatibility checks for PDF/report workflows.
+- Improve report previews before opening the generated artifact.
+- Add a documented release verification checklist.
+
 ## 1.4.21
 
 - New messages interrupt the active run in every mode. Redirects pause investigation
