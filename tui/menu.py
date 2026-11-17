@@ -226,10 +226,6 @@ class MainMenuScreen(Screen):
             field_id = "#menu-left-list"
         self.query_one(field_id).focus()
 
-    def on_resize(self, _event: Resize) -> None:
-        if self.is_mounted and self.right_items and self.panel_kind != "mcp_custom_tool_form":
-            self.call_after_refresh(self._render_right_list)
-
     async def on_key(self, event: Key) -> None:
         if (
             event.key == "space"
@@ -252,6 +248,10 @@ class MainMenuScreen(Screen):
         elif event.key == "shift+tab" and self.panel_kind == "mcp_custom_tool_form":
             event.stop()
             self._previous_custom_tool_field()
+
+    def on_resize(self, _event: Resize) -> None:
+        if self.is_mounted and self.right_items and self.panel_kind != "mcp_custom_tool_form":
+            self.call_after_refresh(self._render_right_list)
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "menu-model-search" and self.panel_kind == "configured_models":
