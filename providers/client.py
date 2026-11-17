@@ -154,6 +154,7 @@ def request_agent_turn(
     tools: list[dict[str, Any]],
     on_event: StreamCallback | None = None,
     cancellation: RequestCancellation | None = None,
+    max_tokens: int | None = None,
 ) -> ProviderTurn:
     protocol = profile.get("protocol", "openai")
     base_url = str(profile.get("base_url", "")).rstrip("/")
@@ -166,7 +167,7 @@ def request_agent_turn(
             return _request_litellm_turn(profile, messages, tools, on_event, cancellation)
         if protocol == "anthropic":
             return _request_anthropic_turn(
-                base_url, model, api_key, messages, tools, on_event, cancellation
+                base_url, model, api_key, messages, tools, on_event, cancellation, max_tokens
             )
         return _request_openai_turn(
             base_url,
@@ -179,6 +180,7 @@ def request_agent_turn(
             profile.get("reasoning_enabled") is True,
             on_event,
             cancellation,
+            max_tokens,
         )
     except ProviderRequestError as error:
         message = _hide_secret(str(error), api_key)
@@ -196,6 +198,7 @@ def _request_openai_turn(
     reasoning_enabled: bool,
     on_event: StreamCallback | None = None,
     cancellation: RequestCancellation | None = None,
+    max_tokens: int | None = None,
 ) -> ProviderTurn:
     endpoint = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
     headers = {"Content-Type": "application/json"}
@@ -204,9 +207,12 @@ def _request_openai_turn(
     payload: dict[str, Any] = {
         "model": model,
         "messages": _openai_messages(messages),
-        "tools": _openai_tools(tools),
         "stream": False,
     }
+    if tools:
+        payload["tools"] = _openai_tools(tools)
+    if max_tokens is not None:
+        payload["max_tokens"] = max(1, int(max_tokens))
     if reasoning_parameter == "reasoning_effort" and reasoning_enabled:
         payload["reasoning_effort"] = reasoning_effort
     elif reasoning_parameter == "reasoning" and reasoning_enabled:
@@ -564,6 +570,7 @@ def _request_anthropic_turn(
     tools: list[dict[str, Any]],
     on_event: StreamCallback | None = None,
     cancellation: RequestCancellation | None = None,
+    max_tokens: int | None = None,
 ) -> ProviderTurn:
     endpoint = f"{base_url}/messages" if base_url.endswith("/v1") else f"{base_url}/v1/messages"
     headers = {"Content-Type": "application/json", "anthropic-version": "2023-06-01"}
@@ -577,17 +584,18 @@ def _request_anthropic_turn(
     ]
     payload: dict[str, Any] = {
         "model": model,
-        "max_tokens": 8192,
+        "max_tokens": max(1, int(max_tokens)) if max_tokens is not None else 8192,
         "messages": conversation,
-        "tools": [
+    }
+    if tools:
+        payload["tools"] = [
             {
                 "name": tool["name"],
                 "description": tool["description"],
                 "input_schema": tool["parameters"],
             }
             for tool in tools
-        ],
-    }
+        ]
     if system_messages:
         payload["system"] = "\n\n".join(system_messages)
     if on_event is not None:
