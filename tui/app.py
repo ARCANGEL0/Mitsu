@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import os
 import signal
 import shutil
 import sys
-from pathlib import Path
+from textual.binding import Binding
 
 from rich.align import Align
 from rich.console import Console
@@ -20,12 +19,18 @@ from mitsu.pets import companion_by_id
 from mitsu.config import CredentialStore, PreferencesStore, SessionStore, THEMES
 from mitsu.providers import ProviderRequestError, apply_reasoning_default
 from mitsu.services.searxng import stop_local_searxng
+from mitsu.services.single_instance import (
+    InstanceAlreadyRunning,
+    acquire_instance_lock,
+    release_instance_lock,
+)
 from mitsu.tui.menu import MainMenuScreen
 from mitsu.tui.onboarding import OnboardingScreen
 from mitsu.tui.session import SessionScreen
 
 
 class MitsuApp(App):
+    BINDINGS = [Binding("ctrl+q", "quit", "Quit Mitsu", priority=True)]
     TITLE = "Mitsu"
     SUB_TITLE = "A little companion for the work ahead"
     CSS_PATH = "theme.tcss"
@@ -82,7 +87,9 @@ class MitsuApp(App):
 
     async def _quit_after_cleanup(self) -> None:
         try:
-            await self._close_sessions()
+            await asyncio.wait_for(self._close_sessions(), timeout=8)
+        except TimeoutError:
+            self.log.error("Session cleanup exceeded the 8 second shutdown deadline.")
         finally:
             self.exit()
 
@@ -120,7 +127,9 @@ class MitsuApp(App):
         settings = self.credentials.search_engines().get("searxng", {})
         if settings.get("managed_local"):
             try:
-                await asyncio.to_thread(stop_local_searxng, settings)
+                await asyncio.wait_for(asyncio.to_thread(stop_local_searxng, settings), timeout=4)
+            except TimeoutError:
+                self.log.error("Stopping local SearXNG exceeded the 4 second shutdown deadline.")
             except Exception as error:
                 self.log.error("Could not stop local SearXNG during shutdown: %s", error)
         loop = asyncio.get_running_loop()
@@ -197,45 +206,38 @@ class MitsuApp(App):
 
 
 def main() -> None:
-    lock_path = Path("/tmp") / f"mitsu-{os.getuid()}.lock"
-    lock_flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    lock_fd = os.open(lock_path, lock_flags, 0o600)
-    os.fchmod(lock_fd, 0o600)
-    lock_file = os.fdopen(lock_fd, "r+")
     try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        lock_file.close()
-        owner = lock_path.read_text().strip()
-        detail = f" (PID {owner})" if owner.isdecimal() else ""
-        print(f"Mitsu is already running for this user{detail}.", file=sys.stderr)
+        instance_lock = acquire_instance_lock()
+    except InstanceAlreadyRunning as error:
+        print(f"{error} Close it before starting another.", file=sys.stderr)
         return
-    lock_file.seek(0)
-    lock_file.truncate()
-    lock_file.write(f"{os.getpid()}\n")
-    lock_file.flush()
+
+    app = MitsuApp()
     try:
-        app = MitsuApp()
-        try:
-            app.run(mouse=True)
-        finally:
-            if app._ui_started and app._show_bye_banner and sys.stdout.isatty():
-                console = Console()
-                console.clear()
-                width, height = shutil.get_terminal_size(fallback=(80, 24))
-                banner = Text("✦  M I T S U  ✦", style="bold #55d7df", justify="center")
-                banner.append("\n\nSESSION SAVED!", style="bold #f08ab6")
-                banner.append("\nBYE-BYEE, SEE YA SOON~!", style="#e7e2dc")
-                panel = Panel(
-                    Align.center(banner),
-                    width=min(54, max(20, width - 4)),
-                    padding=(1, 3),
-                    border_style="#55d7df",
-                    style="on #101a24",
-                )
-                console.print("\n" * max(1, (height - 9) // 2), end="")
-                console.print(Align.center(panel, width=width))
+        app.run(mouse=True)
     finally:
-        lock_file.close()
+        if app._ui_started and app._show_bye_banner and sys.stdout.isatty():
+            console = Console()
+            console.clear()
+            width, height = shutil.get_terminal_size(fallback=(80, 24))
+            banner = Text("✦  M I T S U  ✦", style="bold #55d7df", justify="center")
+            banner.append("\n\nSESSION SAVED!", style="bold #f08ab6")
+            banner.append("\nBYE-BYEE, SEE YA SOON~!", style="#e7e2dc")
+            panel = Panel(
+                Align.center(banner),
+                width=min(54, max(20, width - 4)),
+                padding=(1, 3),
+                border_style="#55d7df",
+                style="on #101a24",
+            )
+            console.print("\n" * max(1, (height - 9) // 2), end="")
+            console.print(Align.center(panel, width=width))
     if app._restart_after_update:
+        release_instance_lock(instance_lock)
         os.execv(sys.executable, [sys.executable, "-m", "mitsu", *sys.argv[1:]])
+    sys.stdout.flush()
+    sys.stderr.flush()
+    release_instance_lock(instance_lock)
+    # UI shutdown is complete. Exit without waiting for abandoned executor threads
+    # (for example, a cancelled report request blocked in network I/O).
+    os._exit(0)
