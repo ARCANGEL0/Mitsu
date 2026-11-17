@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="480" viewBox="0 0 1200 480">
+<rect width="1200" height="480" fill="#173451"/>
+<rect y="150" width="290" height="330" fill="#102a42"/>
+<rect x="310" y="45" width="365" height="435" fill="#244e69"/>
+<rect x="700" y="120" width="275" height="360" fill="#102b43"/>
+<g fill="#8aaebe">
+<path d="M34 182h248v3H34zm0 54h248v3H34zm0 54h248v3H34zm0 54h248v3H34z"/>
+<path d="M85 150h3v330h-3zm75 0h3v330h-3zm75 0h3v330h-3z"/>
+<path d="M340 92h305v3H340zm0 66h305v3H340zm0 66h305v3H340zm0 66h305v3H340zm0 66h305v3H340z" fill="#a4bfca"/>
+<path d="M390 45h3v435h-3zm75 0h3v435h-3zm75 0h3v435h-3zm75 0h3v435h-3z" fill="#a4bfca"/>
+<path d="M730 157h215v3H730zm0 66h215v3H730zm0 66h215v3H730zm0 66h215v3H730z"/>
+<path d="M780 120h3v360h-3zm75 0h3v360h-3zm75 0h3v360h-3z"/>
+</g>
+<polygon points="915,0 1010,0 1180,480 1080,480" fill="#df5051"/>
+<polygon points="860,0 882,0 1055,480 1032,480" fill="#d9e4e8"/>
+<polygon points="824,0 840,0 1010,480 994,480" fill="#6fa0b4"/>
+<rect y="442" width="1200" height="38" fill="#0e2439"/>
+</svg>

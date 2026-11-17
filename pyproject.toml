@@ -29,6 +29,7 @@ dependencies = [
   "pydantic>=2.0",
   "rich>=13.7.0",
   "textual>=1.0.0",
+  "xhtml2pdf>=0.2.28,<0.3",
 ]
 
 [project.optional-dependencies]
@@ -76,5 +77,5 @@ packages = [
 "mitsu.workspace" = "workspace"
 
 [tool.setuptools.package-data]
-mitsu = ["assets/pets/*.webp", "assets/example/icon.svg", "version.txt"]
+mitsu = ["assets/pets/*.webp", "assets/example/*.svg", "assets/example/mitsu-cover-art.png", "version.txt"]
 "mitsu.tui" = ["theme.tcss"]
