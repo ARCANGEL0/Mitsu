@@ -1075,6 +1075,7 @@ def test_connection(profile: dict[str, Any]) -> str:
     protocol = profile.get("protocol", "openai")
     base_url = str(profile.get("base_url", "")).rstrip("/")
     api_key = str(profile.get("api_key", ""))
+    provider_id = str(profile.get("provider_id", ""))
     account_auth = profile.get("auth_method") == "account"
     if account_auth and protocol == "anthropic":
         api_key = _account_access_token(profile)
@@ -1082,6 +1083,11 @@ def test_connection(profile: dict[str, Any]) -> str:
         api_key = _codex_access_token(profile)
     if protocol == "litellm":
         return _test_litellm(profile)
+    if provider_id in {"zai", "mistral", "vercel_gateway", "ollama_cloud", "fireworks"}:
+        reply = send_chat(profile, [{"role": "user", "content": "Reply only with OK."}])
+        if not reply.strip():
+            raise ProviderRequestError("The provider accepted the request but returned no model reply.")
+        return "Connection succeeded. The model returned a reply."
     if not base_url:
         raise ProviderRequestError("Enter a provider base URL first.")
     if protocol == "anthropic":
@@ -1138,6 +1144,11 @@ def list_models(profile: dict[str, Any]) -> list[str]:
         api_key = _codex_access_token(profile)
     if protocol == "litellm":
         return _list_litellm_models(profile)
+    if provider_id in {"zai", "mistral", "vercel_gateway", "ollama_cloud", "fireworks"}:
+        model = str(profile.get("model", "")).strip()
+        if model:
+            return [model]
+        raise ProviderRequestError("Enter a model ID to use this provider.")
     if not base_url:
         raise ProviderRequestError("Enter a provider base URL first.")
     if provider_id == "cloudflare":
