@@ -47,7 +47,7 @@ Each session keeps its own Intel, including targets, IPs, domains, services, vul
 
 ## At a glance
 
-- **Model providers:** OpenAI, Anthropic, OpenRouter, Ollama local and cloud, DeepSeek, Moonshot (Kimi), Z.AI, AgentRouter, Kilo Gateway, Vercel AI Gateway, NVIDIA NIM, Cloudflare Models, and UberLLM, plus custom OpenAI- or Anthropic-compatible endpoints.
+- **Model providers:** OpenAI, Anthropic, OpenRouter, Ollama local and cloud, DeepSeek, Groq, Moonshot (Kimi), Z.AI, AgentRouter, Kilo Gateway, Vercel AI Gateway, NVIDIA NIM, Cloudflare Models, and UberLLM, plus custom OpenAI- or Anthropic-compatible endpoints.
 - **Mitsu’s MCP server** connects models to a catalog of 165+ Red Team Armory tools across 17 categories, plus custom CLI wrappers and external MCP servers.
 - **Persistent engagement Intel** for targets, findings, services, vulnerabilities, domains, IPs, accounts, people, and working observations.
 - **Three operating modes:** Recon, Guided, and AutoPwn.
@@ -402,7 +402,7 @@ Mitsu can read and update Intel through MCP during a session. Older session data
 
 ## Models and providers
 
-Mitsu connects to the OpenAI and Anthropic APIs directly. Other built-in connections include OpenRouter, NVIDIA NIM, local and cloud Ollama, DeepSeek, Moonshot (Kimi), Z.AI, AgentRouter, Kilo Gateway, Vercel AI Gateway, and UberLLM (a marketplace of third-party sellers for open-weight and uncensored models) through OpenAI-compatible APIs, plus Cloudflare Models through a Cloudflare account endpoint. You can also configure a custom endpoint that follows either the OpenAI or Anthropic API format.
+Mitsu connects to the OpenAI and Anthropic APIs directly. Other built-in connections include OpenRouter, NVIDIA NIM, local and cloud Ollama, DeepSeek, Groq, Moonshot (Kimi), Z.AI, AgentRouter, Kilo Gateway, Vercel AI Gateway, and UberLLM (a marketplace of third-party sellers for open-weight and uncensored models) through OpenAI-compatible APIs, plus Cloudflare Models through a Cloudflare account endpoint. You can also configure a custom endpoint that follows either the OpenAI or Anthropic API format.
 
 Image input is supported for models that accept vision. Paste an image into chat or attach one from the session workspace; Mitsu checks the selected model’s image capability before sending it. Supported formats include PNG, JPEG, WebP, and GIF. Image support depends on the provider and specific model, so choose a vision-capable model when working from screenshots or other images.
 
