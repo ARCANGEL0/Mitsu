@@ -24,6 +24,7 @@ PROVIDERS = (
     ProviderSpec("moonshot", "Moonshot", "https://api.moonshot.ai/v1", "openai"),
     ProviderSpec("zai", "Z.AI", "https://api.z.ai/api/paas/v4", "openai"),
     ProviderSpec("agentrouter", "AgentRouter", "https://co.agentrouter.org/v1", "openai"),
+    ProviderSpec("kilo", "Kilo Gateway", "https://ai-gateway.kilo.ai/api/v1", "openai"),
     ProviderSpec("nvidia_nim", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1", "openai"),
     ProviderSpec(
         "cloudflare",
