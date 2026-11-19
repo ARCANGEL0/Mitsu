@@ -152,6 +152,21 @@ class CredentialStore:
         data["providers"] = providers
         _atomic_json(self.path, data, private=True)
 
+    def update_auth_tokens(self, provider_id: str, tokens: dict[str, Any]) -> None:
+        data = self.load()
+        providers = data.get("providers")
+        if not isinstance(providers, dict):
+            providers = {}
+        profile = providers.get(provider_id)
+        if not isinstance(profile, dict):
+            return
+        for key in ("access_token", "refresh_token", "expires_at", "id_token", "scopes"):
+            if key in tokens:
+                profile[key] = tokens[key]
+        providers[provider_id] = profile
+        data["providers"] = providers
+        _atomic_json(self.path, data, private=True)
+
     def search_engines(self) -> dict[str, dict[str, Any]]:
         engines = self.load().get("search_engines", {})
         if not isinstance(engines, dict):

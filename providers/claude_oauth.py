@@ -70,7 +70,7 @@ def access_token(profile: dict[str, object]) -> str:
         {"grant_type": "refresh_token", "refresh_token": refresh, "client_id": CLIENT_ID}
     )
     profile.update(_profile_tokens(token))
-    CredentialStore().save_profile(profile, activate=False)
+    CredentialStore().update_auth_tokens("anthropic", profile)
     return str(profile["access_token"])
 
 
@@ -107,6 +107,9 @@ def _token_request(payload: dict[str, str]) -> dict[str, object]:
             raise ProviderRequestError("Claude OAuth returned an invalid token response.")
         except HTTPError as error:
             detail = error.read(1024).decode("utf-8", errors="replace")
+            for secret in payload.values():
+                if secret:
+                    detail = detail.replace(secret, "[hidden]")
             last_error = f"Claude OAuth returned HTTP {error.code}: {detail[:240]}"
             if error.code not in {404, 405, 410}:
                 break

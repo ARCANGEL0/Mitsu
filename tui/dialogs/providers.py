@@ -16,6 +16,7 @@ from textual.widgets import Input, OptionList, Static
 from mitsu.config import CredentialStore, PROVIDERS, PROVIDER_BY_ID
 from mitsu.providers import ProviderRequestError, apply_reasoning_default, list_models
 from mitsu.providers import claude_oauth
+from mitsu.providers import codex_oauth
 
 
 class ProviderDialog(ModalScreen[dict | None]):
@@ -118,11 +119,6 @@ class ProviderDialog(ModalScreen[dict | None]):
             profile.update(tokens)
             profile["auth_method"] = "account"
             self.query_one("#provider-dialog-input", Input).display = False
-            try:
-                self.credentials.save_profile(profile)
-            except OSError as error:
-                self._show_retry(f"Could not save provider credentials: {error}", "retry_provider_models")
-                return
             self._continue_connect()
             return
         elif stage == "account_id":
@@ -183,11 +179,12 @@ class ProviderDialog(ModalScreen[dict | None]):
             return
         provider_id = str(profile["provider_id"])
         spec = PROVIDER_BY_ID[provider_id]
-        if provider_id == "anthropic" and not self.auth_method_prompted and self.stage != "claude_oauth_code":
+        if provider_id in {"anthropic", "openai"} and not self.auth_method_prompted and self.stage != "claude_oauth_code":
             self.auth_method_prompted = True
             self.stage = "auth_method"
-            self.query_one("#provider-dialog-title", Static).update("ANTHROPIC SIGN-IN")
-            self.query_one("#provider-dialog-detail", Static).update("Choose how to connect Anthropic.")
+            name = "Anthropic" if provider_id == "anthropic" else "OpenAI"
+            self.query_one("#provider-dialog-title", Static).update(f"{name.upper()} SIGN-IN")
+            self.query_one("#provider-dialog-detail", Static).update(f"Choose how to connect {name}.")
             listing = self.query_one("#provider-dialog-list", OptionList)
             listing.clear_options()
             listing.add_options(["Sign in with account", "Sign in with API key"])
@@ -251,6 +248,23 @@ class ProviderDialog(ModalScreen[dict | None]):
             return
         listing = self.query_one("#provider-dialog-list", OptionList)
         listing.display = False
+        if str(profile.get("provider_id")) == "openai":
+            if index == 0:
+                self.stage = "codex_oauth"
+                self.query_one("#provider-dialog-title", Static).update("OPENAI ACCOUNT SIGN-IN")
+                self.query_one("#provider-dialog-detail", Static).update(
+                    "Complete sign-in in the browser. Mitsu is waiting for the local callback."
+                )
+                self.run_worker(self._finish_codex_login(), name="provider-dialog-openai-oauth", exclusive=True)
+                return
+            self.auth_method_prompted = True
+            profile["auth_method"] = "api_key"
+            profile["access_token"] = ""
+            profile["refresh_token"] = ""
+            profile["expires_at"] = 0
+            self.key_prompted = False
+            self._continue_connect()
+            return
         if index == 0:
             url, self.oauth_verifier, self.oauth_state = claude_oauth.create_login()
             profile["auth_method"] = "account"
@@ -268,6 +282,26 @@ class ProviderDialog(ModalScreen[dict | None]):
         profile["refresh_token"] = ""
         profile["expires_at"] = 0
         self.key_prompted = False
+        self._continue_connect()
+
+    async def _finish_codex_login(self) -> None:
+        profile = self.pending_profile
+        if profile is None:
+            return
+        try:
+            tokens = await asyncio.to_thread(codex_oauth.sign_in, profile)
+        except ProviderRequestError as error:
+            self.stage = "auth_method"
+            self.query_one("#provider-dialog-title", Static).update("OPENAI ACCOUNT SIGN-IN")
+            self.query_one("#provider-dialog-detail", Static).update(str(error))
+            listing = self.query_one("#provider-dialog-list", OptionList)
+            listing.clear_options()
+            listing.add_options(["Try account sign-in again", "Use API key"])
+            listing.display = True
+            listing.focus()
+            return
+        profile.update(tokens)
+        self.auth_method_prompted = True
         self._continue_connect()
 
     def _request_input(

@@ -17,6 +17,7 @@ from mitsu.pets import COMPANIONS, companion_by_id
 from mitsu.config import PROVIDERS, PROVIDER_BY_ID, THEMES, CredentialStore, PreferencesStore
 from mitsu.providers import ProviderRequestError, list_models
 from mitsu.providers import claude_oauth
+from mitsu.providers import codex_oauth
 from mitsu.tui.branding import MOON_YELLOW
 from mitsu.tui.dialogs import SearchEnginePanel
 from mitsu.tui.widgets import CityScene, MitsuCompanion, MoonScene
@@ -124,8 +125,8 @@ class OnboardingScreen(Screen):
                     yield Input(placeholder="Paste API key", password=True, id="provider-api-key")
                     yield Static("", id="provider-key-note", classes="wizard-note", markup=False)
                 with Vertical(id="wizard-page-auth-method", classes="wizard-page"):
-                    yield Static("ANTHROPIC SIGN-IN", classes="wizard-title", markup=False)
-                    yield Static("Choose an Anthropic API key or your Claude account.", classes="wizard-copy", markup=False)
+                    yield Static("PROVIDER SIGN-IN", id="auth-method-title", classes="wizard-title", markup=False)
+                    yield Static("Choose an account or API key.", id="auth-method-copy", classes="wizard-copy", markup=False)
                     yield OptionList("Sign in with account", "Sign in with API key", id="auth-method-list", compact=True)
                 with Vertical(id="wizard-page-oauth-code", classes="wizard-page"):
                     yield Static("CLAUDE ACCOUNT SIGN-IN", classes="wizard-title", markup=False)
@@ -222,7 +223,7 @@ class OnboardingScreen(Screen):
             self.protocol_id = "anthropic" if event.option_index == 1 else "openai"
             self._go_to("api_key")
         elif list_id == "auth-method-list":
-            await self._select_claude_auth(event.option_index)
+            await self._select_provider_auth(event.option_index)
         elif list_id == "model-list":
             if self.loading_models:
                 return
@@ -312,7 +313,7 @@ class OnboardingScreen(Screen):
             self._select_provider(selected if selected is not None else 0)
         elif self.stage == "auth_method":
             selected = self.query_one("#auth-method-list", OptionList).highlighted
-            await self._select_claude_auth(selected if selected is not None else 0)
+            await self._select_provider_auth(selected if selected is not None else 0)
         elif self.stage == "oauth_code":
             await self._submit_claude_oauth(self.query_one("#claude-oauth-code", Input).value.strip())
         elif self.stage == "custom_url":
@@ -394,8 +395,18 @@ class OnboardingScreen(Screen):
         else:
             await self._fetch_models()
 
-    async def _select_claude_auth(self, index: int) -> None:
+    async def _select_provider_auth(self, index: int) -> None:
         if index == 0:
+            if self.provider_id == "openai":
+                self._set_status("Complete sign-in in the browser. Mitsu is waiting for the local callback.")
+                try:
+                    tokens = await asyncio.to_thread(codex_oauth.sign_in, self.profile)
+                except ProviderRequestError as error:
+                    self._set_status(str(error))
+                    return
+                self.profile.update(tokens)
+                await self._fetch_models()
+                return
             url, self.oauth_verifier, self.oauth_state = claude_oauth.create_login()
             webbrowser.open(url)
             self.profile["auth_method"] = "account"
@@ -560,7 +571,13 @@ class OnboardingScreen(Screen):
             if self.provider_id == "custom":
                 steps.extend(("custom_url", "api_key", "custom_model"))
             else:
-                steps.extend(((["auth_method", "oauth_code"] if self.provider_id == "anthropic" else []) + ["api_key"]))
+                steps.extend(((
+                    ["auth_method", "oauth_code"]
+                    if self.provider_id == "anthropic"
+                    else ["auth_method"]
+                    if self.provider_id == "openai"
+                    else []
+                ) + ["api_key"]))
                 if self.provider_id == "cloudflare":
                     steps.append("cloudflare_account")
                 steps.append("models")
@@ -569,7 +586,13 @@ class OnboardingScreen(Screen):
         if self.provider_id == "custom":
             steps.extend(("custom_url", "api_key", "custom_model"))
         else:
-            steps.extend(((["auth_method", "oauth_code"] if self.provider_id == "anthropic" else []) + ["api_key"]))
+            steps.extend(((
+                ["auth_method", "oauth_code"]
+                if self.provider_id == "anthropic"
+                else ["auth_method"]
+                if self.provider_id == "openai"
+                else []
+            ) + ["api_key"]))
             if self.provider_id == "cloudflare":
                 steps.append("cloudflare_account")
             steps.append("models")
@@ -593,6 +616,10 @@ class OnboardingScreen(Screen):
         self._show_step()
 
     def _show_step(self) -> None:
+        if self.stage == "auth_method":
+            name = "Anthropic / Claude" if self.provider_id == "anthropic" else "OpenAI / ChatGPT"
+            self.query_one("#auth-method-title", Static).update(f"{name.upper()} SIGN-IN")
+            self.query_one("#auth-method-copy", Static).update(f"Choose an account subscription or an API key for {name}.")
         page_ids = (
             "welcome", "provider", "custom-url", "api-key", "auth-method", "oauth-code", "cloudflare-account",
             "models", "custom-model", "search", "style", "companion",
@@ -689,6 +716,11 @@ class OnboardingScreen(Screen):
 
     def _update_provider_key_title(self) -> None:
         provider = PROVIDER_BY_ID[self.provider_id]
+        if self.profile.get("auth_method") == "account":
+            self.query_one("#provider-key-title", Static).update(f"{provider.name.upper()} ACCOUNT")
+            self.query_one("#provider-key-prompt", Static).update("Use the saved account session to load models.")
+            self.query_one("#provider-key-note", Static).update("Your account session is stored in Mitsu's private user config.")
+            return
         self.query_one("#provider-key-title", Static).update(
             f"{provider.name.upper()} API KEY"
         )
