@@ -246,6 +246,15 @@ class ProviderDialog(ModalScreen[dict | None]):
                 initial_value=str(profile.get("model", "")),
             )
             return
+        if provider_id == "vercel_gateway":
+            self._request_input(
+                "model_name",
+                "VERCEL AI GATEWAY MODEL",
+                "Enter a provider/model ID from the Vercel AI Gateway model catalog, such as openai/gpt-5.4.",
+                "provider/model",
+                initial_value=str(profile.get("model", "")),
+            )
+            return
         if provider_id == "custom":
             self._request_input("model_name", "MODEL NAME", "Enter the model ID exactly as the endpoint expects it.", "Model ID")
             return
