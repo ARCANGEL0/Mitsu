@@ -384,6 +384,13 @@ class OnboardingScreen(Screen):
             await self._fetch_models()
 
     async def _select_provider_auth(self, index: int) -> None:
+        self.profile.update(
+            {
+                "provider_id": self.provider_id,
+                "base_url": self.base_url,
+                "protocol": self.protocol_id if self.provider_id == "custom" else PROVIDER_BY_ID[self.provider_id].protocol,
+            }
+        )
         if index == 0:
             if self.provider_id == "openai":
                 self._set_status("Complete sign-in in the browser. Mitsu is waiting for the local callback.")
