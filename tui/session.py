@@ -1725,13 +1725,13 @@ class MessageActionsMenu(Vertical):
     def on_mount(self) -> None:
         self.query_one("#message-actions-options", OptionList).focus()
 
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+    async def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         if event.option_list.id != "message-actions-options":
             return
         if not (0 <= event.option_index < len(self._actions)):
             return
         choice = self._actions[event.option_index]
-        self._remove()
+        await self._remove()
         if choice == "Copy":
             self._screen.app.copy_to_clipboard(self._message_text)
             self._screen.app.notify("Copied to clipboard", title="Copied")
@@ -1743,13 +1743,14 @@ class MessageActionsMenu(Vertical):
                 name=f"rewind-message-{self._message_index}",
             )
 
-    def _remove(self) -> None:
+    async def _remove(self) -> None:
         if getattr(self._screen, "_message_actions_menu", None) is self:
             self._screen._message_actions_menu = None
-        self.remove()
+        if self.is_attached:
+            await self.remove()
 
-    def action_cancel(self) -> None:
-        self._remove()
+    async def action_cancel(self) -> None:
+        await self._remove()
 
 
 class ChatMessage(Static):
@@ -1763,7 +1764,7 @@ class ChatMessage(Static):
         self.message_text = message
         self.update(content)
 
-    def on_click(self, event: Click) -> None:
+    async def on_click(self, event: Click) -> None:
         style = event.style
         value = style.meta.get("mitsu_copy") if style is not None else None
         if isinstance(value, str):
@@ -1778,7 +1779,7 @@ class ChatMessage(Static):
             event.stop()
             screen = self.screen
             if hasattr(screen, "_show_message_actions"):
-                screen._show_message_actions(self)
+                await screen._show_message_actions(self)
             return
 
 
@@ -5653,7 +5654,7 @@ CURRENT MODE: {self.mode}
             self.session.setdefault("messages", []).append(entry)
             self.sessions.save_session(self.session)
 
-    def _show_message_actions(self, message_widget: ChatMessage) -> None:
+    async def _show_message_actions(self, message_widget: ChatMessage) -> None:
         messages = self.session.get("messages", [])
         try:
             message_index = self._message_widgets.index(message_widget)
@@ -5673,23 +5674,21 @@ CURRENT MODE: {self.mode}
             actions.append("Stop")
         if can_rewind:
             actions.append("Rewind")
-        self._remove_message_actions_menu()
+        await self._remove_message_actions_menu()
         conversation = self.query_one("#conversation", ConversationScroll)
         menu = MessageActionsMenu(message_widget.message_text, message_index, self, actions)
-        conversation.mount(menu, after=message_widget)
+        await conversation.mount(menu, after=message_widget)
         conversation.scroll_to_widget(menu, animate=False)
         self._message_actions_menu = menu
 
 
-    def _remove_message_actions_menu(self) -> None:
+    async def _remove_message_actions_menu(self) -> None:
         menu = getattr(self, "_message_actions_menu", None)
         if menu is None:
             return
         self._message_actions_menu = None
-        try:
-            menu.remove()
-        except Exception:
-            pass
+        if menu.is_attached:
+            await menu.remove()
 
     def _message_action_selected(
         self,
