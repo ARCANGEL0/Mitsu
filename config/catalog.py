@@ -22,6 +22,7 @@ PROVIDERS = (
     ProviderSpec("ollama", "Ollama", "http://localhost:11434/v1", "openai", False),
     ProviderSpec("deepseek", "DeepSeek", "https://api.deepseek.com", "openai"),
     ProviderSpec("moonshot", "Moonshot", "https://api.moonshot.ai/v1", "openai"),
+    ProviderSpec("zai", "Z.AI", "https://api.z.ai/api/paas/v4", "openai"),
     ProviderSpec("nvidia_nim", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1", "openai"),
     ProviderSpec(
         "cloudflare",

@@ -237,6 +237,15 @@ class ProviderDialog(ModalScreen[dict | None]):
         if provider_id == "cloudflare" and not self._has_cloudflare_account(str(profile.get("base_url", ""))):
             self._request_input("account_id", "CLOUDFLARE ACCOUNT", "Enter the account ID for Workers AI.", "Account ID")
             return
+        if provider_id == "zai":
+            self._request_input(
+                "model_name",
+                "Z.AI MODEL",
+                "Enter a Z.AI model ID, such as glm-4.6. See the Z.AI model catalog for available IDs.",
+                "Model ID",
+                initial_value=str(profile.get("model", "")),
+            )
+            return
         if provider_id == "custom":
             self._request_input("model_name", "MODEL NAME", "Enter the model ID exactly as the endpoint expects it.", "Model ID")
             return
