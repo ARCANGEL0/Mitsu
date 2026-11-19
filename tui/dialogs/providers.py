@@ -225,6 +225,15 @@ class ProviderDialog(ModalScreen[dict | None]):
                 detail = "API key already set. Leave empty to keep it unchanged, or enter a replacement."
             self._request_input("api_key", "LITELLM API KEY", detail, "API key (optional)", True)
             return
+        if provider_id == "amazon_bedrock":
+            self._request_input(
+                "model_name",
+                "AMAZON BEDROCK MODEL",
+                "Enter a LiteLLM Bedrock model ID (bedrock/<model-or-inference-profile-id>). Install Mitsu's litellm extra and configure AWS credentials and region locally.",
+                "bedrock/model-id",
+                initial_value=str(profile.get("model", "")),
+            )
+            return
         if provider_id == "litellm":
             self._request_input(
                 "model_name",

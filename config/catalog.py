@@ -55,6 +55,14 @@ PROVIDERS = (
         False,
         note="provider/model IDs (bedrock/..., vertex_ai/..., azure/...); credentials from each provider's environment.",
     ),
+    ProviderSpec(
+        "amazon_bedrock",
+        "Amazon Bedrock",
+        "",
+        "litellm",
+        False,
+        note="Uses LiteLLM and AWS credentials from the environment or AWS credential chain.",
+    ),
     ProviderSpec("custom", "Custom", "", "openai", False),
 )
 
