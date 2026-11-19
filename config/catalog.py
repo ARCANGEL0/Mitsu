@@ -31,6 +31,13 @@ PROVIDERS = (
         note="Replace {account_id} with your Cloudflare account ID.",
     ),
     ProviderSpec(
+        "uberllm",
+        "UberLLM",
+        "https://api.uberllm.dev/v1",
+        "openai",
+        note="Marketplace of third-party sellers; open-weight and uncensored models, prepaid.",
+    ),
+    ProviderSpec(
         "litellm",
         "LiteLLM",
         "",
