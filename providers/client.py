@@ -1286,6 +1286,8 @@ def check_reasoning_support(profile: dict[str, Any]) -> str | None:
             return None
         # LiteLLM maps reasoning_effort onto each provider's own thinking controls.
         return "reasoning_effort" if supported else "unsupported"
+    if provider_id in {"zai", "mistral", "vercel_gateway", "ollama_cloud", "fireworks"}:
+        return None
     if provider_id == "nvidia_nim" and "nemotron-3-ultra" in model.casefold():
         return "nvidia_chat_template"
     base_url = str(profile.get("base_url", "")).rstrip("/")
