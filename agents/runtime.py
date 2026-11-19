@@ -7,6 +7,7 @@ import json
 import re
 import shlex
 import threading
+import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Awaitable, Callable
 
@@ -29,7 +30,7 @@ class AgentEvent:
 ApprovalHandler = Callable[[str, dict[str, Any]], Awaitable[bool]]
 HistoryHandler = Callable[[], None]
 RequestTurn = Callable[
-    [dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]], Awaitable[ProviderTurn]
+    [dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], Callable[[str, dict[str, Any]], None]], Awaitable[ProviderTurn]
 ]
 MAX_TOOL_CALLS_PER_TURN = 48
 MAX_BINARY_GREP_SEARCHES_PER_ARTIFACT = 3
@@ -173,6 +174,116 @@ def _binary_grep_key(name: str, arguments: Any) -> str | None:
     return None
 
 
+async def _request_claude_code_turn(
+    profile: dict[str, Any],
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    tool_host: AgentToolHost,
+    mode: str,
+    approve: ApprovalHandler,
+    on_history: HistoryHandler,
+    history: list[dict[str, Any]],
+    on_event: Callable[[str, dict[str, Any]], None],
+    interrupt_requested: Callable[[], bool] | None,
+    get_mode: Callable[[], str] | None,
+    backend_state: dict[str, Any] | None,
+) -> ProviderTurn:
+    from mitsu.providers.claude_code import request_turn
+
+    tool_calls = 0
+    failed_calls: set[str] = set()
+    binary_grep_counts: dict[str, int] = {}
+    guided_action_seen = False
+    dialog_cancelled = False
+    session_state = backend_state if backend_state is not None else {}
+    session_id = str(session_state.get("claude_code_session_id", ""))
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", session_id):
+        session_id = str(uuid.uuid4())
+        session_state["claude_code_session_id"] = session_id
+        session_state["claude_code_session_started"] = False
+        on_history()
+    resumed = session_state.get("claude_code_session_started") is True
+
+    async def dispatch(name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
+        nonlocal tool_calls, guided_action_seen, dialog_cancelled
+        invocation_id = f"claude_{tool_calls + 1}_{uuid.uuid4().hex[:12]}"
+        on_event("tool_started", {"name": name, "arguments": arguments})
+        tool_calls += 1
+        active_mode = get_mode() if get_mode is not None else mode
+        failed_key = _failed_call_key(name, arguments)
+        binary_key = _binary_grep_key(name, arguments)
+        result = ""
+        is_error = True
+        if interrupt_requested is not None and interrupt_requested():
+            raise asyncio.CancelledError
+        if tool_calls > MAX_TOOL_CALLS_PER_TURN:
+            result = f"Not run: per-message action limit reached ({MAX_TOOL_CALLS_PER_TURN})."
+        elif dialog_cancelled:
+            result = "Not run: the operator paused this investigation. Wait for their next message."
+        elif active_mode == "Guided" and guided_action_seen and _guided_flow_action(name):
+            result = "Not run: use mitsu__user_dialog to review this action's result and ask for the next step."
+        elif failed_key is not None and failed_key in failed_calls:
+            result = "Not run: this identical command already failed during this message."
+        elif binary_key is not None and binary_grep_counts.get(binary_key, 0) >= MAX_BINARY_GREP_SEARCHES_PER_ARTIFACT:
+            result = f"Not run: printable-string search limit reached for {binary_key.removeprefix('strings-grep:')}."
+        else:
+            if binary_key is not None:
+                binary_grep_counts[binary_key] = binary_grep_counts.get(binary_key, 0) + 1
+            needs_approval = (
+                active_mode == "Guided" and tool_host.requires_guided_approval(name)
+            ) or (
+                active_mode == "Recon" and not tool_host.recon_action_is_low_impact(name, arguments)
+            )
+            allowed = not needs_approval or await approve(name, arguments)
+            if interrupt_requested is not None and interrupt_requested():
+                raise asyncio.CancelledError
+            if allowed:
+                result, is_error, _ = await tool_host.call(name, arguments)
+            else:
+                result = "The operator declined this action. Do not retry it; ask which direction to take."
+            if is_error and failed_key is not None:
+                failed_calls.add(failed_key)
+            if active_mode == "Guided" and _guided_flow_action(name) and not is_error:
+                guided_action_seen = True
+            if name == "mitsu__user_dialog" and not is_error:
+                try:
+                    answer = json.loads(result)
+                    dialog_cancelled = bool(answer.get("cancelled", False)) or not answer.get("answers")
+                    if not dialog_cancelled:
+                        guided_action_seen = False
+                except (json.JSONDecodeError, AttributeError, TypeError):
+                    dialog_cancelled = True
+        history.append(
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": invocation_id, "name": name, "input": arguments}],
+            }
+        )
+        history.append(
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": invocation_id, "content": result, "is_error": is_error}],
+            }
+        )
+        on_history()
+        on_event("tool_finished", {"name": name, "arguments": arguments, "result": result, "is_error": is_error})
+        return result, is_error
+
+    turn = await request_turn(
+        profile,
+        messages,
+        tools,
+        dispatch,
+        session_id,
+        resumed,
+        on_event,
+        interrupt_requested,
+    )
+    session_state["claude_code_session_started"] = True
+    on_history()
+    return turn
+
+
 def _request_agent_turn_background(
     profile: dict[str, Any],
     messages: list[dict[str, Any]],
@@ -225,6 +336,7 @@ async def run_agent_turn(
     interrupt_requested: Callable[[], bool] | None = None,
     operator_messages: list[str] | None = None,
     get_session_intel: Callable[[], dict[str, Any]] | None = None,
+    claude_session_state: dict[str, Any] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     anthropic = profile.get("protocol") == "anthropic"
     finish_interrupted_tools(history)
@@ -313,8 +425,79 @@ async def run_agent_turn(
             request_messages = [{"role": "system", "content": active_system_prompt}, *history]
             for retry_number in range(11):
                 try:
-                    if request_turn:
-                        turn = await request_turn(profile, request_messages, tools)
+                    if profile.get("provider_id") == "anthropic" and profile.get("auth_method") == "claude_code":
+                        loop = asyncio.get_running_loop()
+                        progress: asyncio.Queue[AgentEvent] = asyncio.Queue()
+
+                        def report_progress(kind: str, data: dict[str, Any]) -> None:
+                            try:
+                                loop.call_soon_threadsafe(progress.put_nowait, AgentEvent(kind, data))
+                            except RuntimeError:
+                                pass
+
+                        request_task = asyncio.create_task(
+                            _request_claude_code_turn(
+                                profile,
+                                request_messages,
+                                tools,
+                                tool_host,
+                                active_mode,
+                                approve,
+                                on_history,
+                                history,
+                                report_progress,
+                                interrupt_requested,
+                                get_mode,
+                                claude_session_state,
+                            )
+                        )
+                        try:
+                            while not request_task.done():
+                                if interrupt_requested is not None and interrupt_requested():
+                                    raise asyncio.CancelledError
+                                try:
+                                    event = await asyncio.wait_for(progress.get(), timeout=0.1)
+                                except TimeoutError:
+                                    continue
+                                yield event
+                            turn = await request_task
+                            await asyncio.sleep(0)
+                            while not progress.empty():
+                                yield progress.get_nowait()
+                        except (asyncio.CancelledError, GeneratorExit):
+                            request_task.cancel()
+                            await asyncio.gather(request_task, return_exceptions=True)
+                            raise
+                    elif request_turn:
+                        loop = asyncio.get_running_loop()
+                        progress: asyncio.Queue[AgentEvent] = asyncio.Queue()
+
+                        def report_progress(kind: str, data: dict[str, Any]) -> None:
+                            try:
+                                loop.call_soon_threadsafe(progress.put_nowait, AgentEvent(kind, data))
+                            except RuntimeError:
+                                pass
+
+                        request_task = asyncio.create_task(
+                            request_turn(profile, request_messages, tools, report_progress)
+                        )
+                        try:
+                            while not request_task.done():
+                                if interrupt_requested is not None and interrupt_requested():
+                                    raise asyncio.CancelledError
+                                try:
+                                    event = await asyncio.wait_for(progress.get(), timeout=0.1)
+                                except TimeoutError:
+                                    continue
+                                yield event
+                            turn = await request_task
+                            await asyncio.sleep(0)
+                            while not progress.empty():
+                                yield progress.get_nowait()
+                        except (asyncio.CancelledError, GeneratorExit):
+                            request_task.cancel()
+                            await asyncio.gather(request_task, return_exceptions=True)
+                            raise
                     else:
                         loop = asyncio.get_running_loop()
                         progress: asyncio.Queue[AgentEvent] = asyncio.Queue()

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-import webbrowser
 from urllib.parse import urlsplit
 
 from rich.text import Text
@@ -15,8 +14,7 @@ from textual.widgets import Input, OptionList, Static
 
 from mitsu.pets import COMPANIONS, companion_by_id
 from mitsu.config import PROVIDERS, PROVIDER_BY_ID, THEMES, CredentialStore, PreferencesStore
-from mitsu.providers import ProviderRequestError, list_models
-from mitsu.providers import claude_oauth
+from mitsu.providers import ProviderRequestError, list_models, test_connection
 from mitsu.providers import codex_oauth
 from mitsu.tui.branding import MOON_YELLOW
 from mitsu.tui.dialogs import SearchEnginePanel
@@ -52,8 +50,6 @@ class OnboardingScreen(Screen):
         self.protocol_id = str(self.profile.get("protocol", PROVIDER_BY_ID[self.provider_id].protocol))
         self.base_url = str(self.profile.get("base_url", PROVIDER_BY_ID[self.provider_id].base_url) or "")
         self.api_key = ""
-        self.oauth_verifier = ""
-        self.oauth_state = ""
         self.model_id = str(self.profile.get("model", "") or "")
         self.cloudflare_account_id = self._account_id(self.base_url)
         self.model_options: list[str] = []
@@ -128,10 +124,6 @@ class OnboardingScreen(Screen):
                     yield Static("PROVIDER SIGN-IN", id="auth-method-title", classes="wizard-title", markup=False)
                     yield Static("Choose an account or API key.", id="auth-method-copy", classes="wizard-copy", markup=False)
                     yield OptionList("Sign in with account", "Sign in with API key", id="auth-method-list", compact=True)
-                with Vertical(id="wizard-page-oauth-code", classes="wizard-page"):
-                    yield Static("CLAUDE ACCOUNT SIGN-IN", classes="wizard-title", markup=False)
-                    yield Static("Authorize Mitsu in the browser, then paste the code#state shown by Claude.", classes="wizard-copy", markup=False)
-                    yield Input(placeholder="Paste code#state", password=True, id="claude-oauth-code")
                 with Vertical(id="wizard-page-cloudflare-account", classes="wizard-page"):
                     yield Static("CLOUDFLARE ACCOUNT", classes="wizard-title", markup=False)
                     yield Static("Enter the account ID used by your Workers AI endpoint.", classes="wizard-copy", markup=False)
@@ -245,8 +237,6 @@ class OnboardingScreen(Screen):
             self.query_one("#protocol-list", OptionList).focus()
         elif event.input.id == "provider-api-key" and self.stage == "api_key":
             await self._submit_api_key(event.value.strip())
-        elif event.input.id == "claude-oauth-code" and self.stage == "oauth_code":
-            await self._submit_claude_oauth(event.value.strip())
         elif event.input.id == "cloudflare-account-id" and self.stage == "cloudflare_account":
             account_id = event.value.strip()
             if not re.fullmatch(r"[A-Fa-f0-9]{32}", account_id):
@@ -314,8 +304,6 @@ class OnboardingScreen(Screen):
         elif self.stage == "auth_method":
             selected = self.query_one("#auth-method-list", OptionList).highlighted
             await self._select_provider_auth(selected if selected is not None else 0)
-        elif self.stage == "oauth_code":
-            await self._submit_claude_oauth(self.query_one("#claude-oauth-code", Input).value.strip())
         elif self.stage == "custom_url":
             base_input = self.query_one("#custom-base-url", Input)
             if self.app.focused is base_input:
@@ -385,7 +373,7 @@ class OnboardingScreen(Screen):
         spec = PROVIDER_BY_ID[self.provider_id]
         saved_key = str(self.profile.get("api_key", "") or "")
         self.api_key = entered_key or saved_key
-        if spec.requires_api_key and not self.api_key and self.profile.get("auth_method") != "account":
+        if spec.requires_api_key and not self.api_key and self.profile.get("auth_method") not in {"account", "claude_code"}:
             self._set_status("This provider needs an API key to load its models.")
             return
         if self.provider_id == "custom":
@@ -405,36 +393,34 @@ class OnboardingScreen(Screen):
                     self._set_status(str(error))
                     return
                 self.profile.update(tokens)
+                self._set_status("Checking that Mitsu can receive a model reply from this account…")
+                try:
+                    await asyncio.to_thread(test_connection, self.profile)
+                except ProviderRequestError as error:
+                    self._set_status(f"Account sign-in completed, but model verification failed: {error}")
+                    return
                 await self._fetch_models()
                 return
-            url, self.oauth_verifier, self.oauth_state = claude_oauth.create_login()
-            webbrowser.open(url)
-            self.profile["auth_method"] = "account"
-            self.query_one("#wizard-page-oauth-code .wizard-copy", Static).update(
-                f"Authorize Mitsu at {url}, then paste the code#state shown by Claude."
-            )
-            self._go_to("oauth_code")
+            self.profile["auth_method"] = "claude_code"
+            self.profile["model"] = str(self.profile.get("model") or "opus")
+            self.profile["api_key"] = ""
+            for key in ("access_token", "refresh_token", "expires_at", "id_token"):
+                self.profile[key] = 0 if key == "expires_at" else ""
+            self._set_status("Checking the Claude Code binary, account login, and Opus model reply…")
+            try:
+                await asyncio.to_thread(test_connection, self.profile)
+            except ProviderRequestError as error:
+                self._set_status(str(error))
+                return
+            await self._fetch_models()
             return
         self.profile["auth_method"] = "api_key"
-        self.profile["access_token"] = ""
-        self.profile["refresh_token"] = ""
-        self.profile["expires_at"] = 0
+        for key in (
+            "access_token", "refresh_token", "expires_at", "id_token", "client_id",
+            "host_id", "subject", "email", "scopes", "nonce",
+        ):
+            self.profile[key] = "" if key != "expires_at" else 0
         self._go_to("api_key")
-
-    async def _submit_claude_oauth(self, value: str) -> None:
-        if not value:
-            self._set_status("Paste the code#state returned by Claude.")
-            return
-        try:
-            tokens = await asyncio.to_thread(
-                claude_oauth.exchange_login, value, self.oauth_verifier, self.oauth_state
-            )
-        except ProviderRequestError as error:
-            self._set_status(str(error))
-            return
-        self.profile.update(tokens)
-        self.profile["auth_method"] = "account"
-        await self._fetch_models()
 
     async def _fetch_models(self) -> None:
         self.loading_models = True
@@ -478,6 +464,20 @@ class OnboardingScreen(Screen):
         if not self.provider_confirmed or not self.model_id:
             self._set_status("Choose a provider and model before finishing setup.")
             return
+        if self.provider_id == "anthropic" and self.profile.get("auth_method") == "claude_code":
+            profile = {
+                "provider_id": self.provider_id,
+                "base_url": self.base_url,
+                "model": self.model_id,
+                "protocol": PROVIDER_BY_ID[self.provider_id].protocol,
+                "auth_method": "claude_code",
+            }
+            self._set_status(f"Verifying Claude Code account and {self.model_id} response before saving…")
+            try:
+                await asyncio.to_thread(test_connection, profile)
+            except ProviderRequestError as error:
+                self._set_status(f"Claude model verification failed; setup was not saved: {error}")
+                return
         try:
             self.credentials.save_profile(
                 {
@@ -524,7 +524,12 @@ class OnboardingScreen(Screen):
         self._change_provider(PROVIDERS[index].id)
         self.provider_confirmed = True
         self._rebuild_steps()
-        self._go_to(self.steps[self.step_index + 1])
+        next_step = (
+            "auth_method"
+            if self.provider_id in {"anthropic", "openai"}
+            else self.steps[self.step_index + 1]
+        )
+        self._go_to(next_step)
 
     def _change_provider(self, provider_id: str) -> None:
         if provider_id == self.provider_id:
@@ -572,10 +577,8 @@ class OnboardingScreen(Screen):
                 steps.extend(("custom_url", "api_key", "custom_model"))
             else:
                 steps.extend(((
-                    ["auth_method", "oauth_code"]
-                    if self.provider_id == "anthropic"
-                    else ["auth_method"]
-                    if self.provider_id == "openai"
+                    ["auth_method"]
+                    if self.provider_id in {"anthropic", "openai"}
                     else []
                 ) + ["api_key"]))
                 if self.provider_id == "cloudflare":
@@ -587,10 +590,8 @@ class OnboardingScreen(Screen):
             steps.extend(("custom_url", "api_key", "custom_model"))
         else:
             steps.extend(((
-                ["auth_method", "oauth_code"]
-                if self.provider_id == "anthropic"
-                else ["auth_method"]
-                if self.provider_id == "openai"
+                ["auth_method"]
+                if self.provider_id in {"anthropic", "openai"}
                 else []
             ) + ["api_key"]))
             if self.provider_id == "cloudflare":
@@ -619,16 +620,16 @@ class OnboardingScreen(Screen):
         if self.stage == "auth_method":
             name = "Anthropic / Claude" if self.provider_id == "anthropic" else "OpenAI / ChatGPT"
             self.query_one("#auth-method-title", Static).update(f"{name.upper()} SIGN-IN")
-            self.query_one("#auth-method-copy", Static).update(f"Choose an account subscription or an API key for {name}.")
+            detail = "Use Claude Code's saved account login or an API key." if self.provider_id == "anthropic" else f"Choose an account subscription or an API key for {name}."
+            self.query_one("#auth-method-copy", Static).update(detail)
         page_ids = (
-            "welcome", "provider", "custom-url", "api-key", "auth-method", "oauth-code", "cloudflare-account",
+            "welcome", "provider", "custom-url", "api-key", "auth-method", "cloudflare-account",
             "models", "custom-model", "search", "style", "companion",
         )
         stage_to_page = {
             "custom_url": "custom-url",
             "api_key": "api-key",
             "auth_method": "auth-method",
-            "oauth_code": "oauth-code",
             "cloudflare_account": "cloudflare-account",
             "custom_model": "custom-model",
         }
@@ -644,7 +645,6 @@ class OnboardingScreen(Screen):
             "custom_url": "custom-base-url",
             "api_key": "provider-api-key",
             "auth_method": "auth-method-list",
-            "oauth_code": "claude-oauth-code",
             "cloudflare_account": "cloudflare-account-id",
             "models": "model-list",
             "custom_model": "custom-model-name",
@@ -716,7 +716,7 @@ class OnboardingScreen(Screen):
 
     def _update_provider_key_title(self) -> None:
         provider = PROVIDER_BY_ID[self.provider_id]
-        if self.profile.get("auth_method") == "account":
+        if self.profile.get("auth_method") in {"account", "claude_code"}:
             self.query_one("#provider-key-title", Static).update(f"{provider.name.upper()} ACCOUNT")
             self.query_one("#provider-key-prompt", Static).update("Use the saved account session to load models.")
             self.query_one("#provider-key-note", Static).update("Your account session is stored in Mitsu's private user config.")

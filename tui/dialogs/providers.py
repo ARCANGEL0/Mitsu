@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-import webbrowser
 from urllib.parse import urlsplit
 
 from textual.app import ComposeResult
@@ -14,8 +13,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList, Static
 
 from mitsu.config import CredentialStore, PROVIDERS, PROVIDER_BY_ID
-from mitsu.providers import ProviderRequestError, apply_reasoning_default, list_models
-from mitsu.providers import claude_oauth
+from mitsu.providers import ProviderRequestError, apply_reasoning_default, list_models, test_connection
 from mitsu.providers import codex_oauth
 
 
@@ -32,8 +30,6 @@ class ProviderDialog(ModalScreen[dict | None]):
         self.all_model_choices: list[tuple[dict, str]] = []
         self.key_prompted = False
         self.endpoint_prompted = False
-        self.oauth_verifier = ""
-        self.oauth_state = ""
         self.auth_method_prompted = False
 
     def compose(self) -> ComposeResult:
@@ -104,23 +100,6 @@ class ProviderDialog(ModalScreen[dict | None]):
             profile["access_token"] = ""
             profile["refresh_token"] = ""
             profile["expires_at"] = 0
-        elif stage == "claude_oauth_code":
-            self.query_one("#provider-dialog-title", Static).update("Completing Claude sign-in…")
-            self.query_one("#provider-dialog-detail", Static).update("Validating the code and exchanging it for a session.")
-            try:
-                tokens = await asyncio.to_thread(
-                    claude_oauth.exchange_login, value, self.oauth_verifier, self.oauth_state
-                )
-            except ProviderRequestError as error:
-                self._request_input(
-                    "claude_oauth_code", "CLAUDE ACCOUNT SIGN-IN", str(error), "Paste code#state"
-                )
-                return
-            profile.update(tokens)
-            profile["auth_method"] = "account"
-            self.query_one("#provider-dialog-input", Input).display = False
-            self._continue_connect()
-            return
         elif stage == "account_id":
             if not re.fullmatch(r"[A-Fa-f0-9]{32}", value):
                 self.query_one("#provider-dialog-detail", Static).update(
@@ -179,7 +158,7 @@ class ProviderDialog(ModalScreen[dict | None]):
             return
         provider_id = str(profile["provider_id"])
         spec = PROVIDER_BY_ID[provider_id]
-        if provider_id in {"anthropic", "openai"} and not self.auth_method_prompted and self.stage != "claude_oauth_code":
+        if provider_id in {"anthropic", "openai"} and not self.auth_method_prompted:
             self.auth_method_prompted = True
             self.stage = "auth_method"
             name = "Anthropic" if provider_id == "anthropic" else "OpenAI"
@@ -201,7 +180,7 @@ class ProviderDialog(ModalScreen[dict | None]):
                 initial_value=str(profile.get("base_url", "")),
             )
             return
-        if spec.requires_api_key and profile.get("auth_method") != "account" and not self.key_prompted:
+        if spec.requires_api_key and profile.get("auth_method") not in {"account", "claude_code"} and not self.key_prompted:
             self.key_prompted = True
             detail = f"Please input your API key for {spec.name}."
             if profile.get("api_key"):
@@ -290,7 +269,8 @@ class ProviderDialog(ModalScreen[dict | None]):
             return
         listing = self.query_one("#provider-dialog-list", OptionList)
         listing.display = False
-        if str(profile.get("provider_id")) == "openai":
+        provider_id = str(profile.get("provider_id"))
+        if provider_id == "openai":
             if index == 0:
                 self.stage = "codex_oauth"
                 self.query_one("#provider-dialog-title", Static).update("OPENAI ACCOUNT SIGN-IN")
@@ -299,30 +279,35 @@ class ProviderDialog(ModalScreen[dict | None]):
                 )
                 self.run_worker(self._finish_codex_login(), name="provider-dialog-openai-oauth", exclusive=True)
                 return
+        elif provider_id == "anthropic" and index == 0:
+            profile["auth_method"] = "claude_code"
+            profile["model"] = str(profile.get("model") or "opus")
+            profile["api_key"] = ""
+            for key in ("access_token", "refresh_token", "expires_at", "id_token"):
+                profile[key] = 0 if key == "expires_at" else ""
+            self.query_one("#provider-dialog-title", Static).update("VERIFYING CLAUDE CODE")
+            self.query_one("#provider-dialog-detail", Static).update(
+                "Checking the Claude Code binary, account login, and Opus model reply…"
+            )
+            try:
+                await asyncio.to_thread(test_connection, profile)
+            except ProviderRequestError as error:
+                self.stage = "auth_method"
+                self.auth_method_prompted = False
+                self.query_one("#provider-dialog-title", Static).update("CLAUDE CODE ACCOUNT")
+                self.query_one("#provider-dialog-detail", Static).update(str(error))
+                listing.clear_options()
+                listing.add_options(["Check Claude Code again", "Use API key"])
+                listing.display = True
+                listing.focus()
+                return
             self.auth_method_prompted = True
-            profile["auth_method"] = "api_key"
-            profile["access_token"] = ""
-            profile["refresh_token"] = ""
-            profile["expires_at"] = 0
-            self.key_prompted = False
             self._continue_connect()
             return
-        if index == 0:
-            url, self.oauth_verifier, self.oauth_state = claude_oauth.create_login()
-            profile["auth_method"] = "account"
-            webbrowser.open(url)
-            self._request_input(
-                "claude_oauth_code",
-                "CLAUDE ACCOUNT SIGN-IN",
-                f"Authorize Mitsu at {url}, then paste the code#state shown by Claude.",
-                "Paste code#state",
-            )
-            return
-        self.auth_method_prompted = True
         profile["auth_method"] = "api_key"
-        profile["access_token"] = ""
-        profile["refresh_token"] = ""
-        profile["expires_at"] = 0
+        self.auth_method_prompted = True
+        for key in ("access_token", "refresh_token", "expires_at", "id_token"):
+            profile[key] = 0 if key == "expires_at" else ""
         self.key_prompted = False
         self._continue_connect()
 
@@ -343,6 +328,24 @@ class ProviderDialog(ModalScreen[dict | None]):
             listing.focus()
             return
         profile.update(tokens)
+        self.query_one("#provider-dialog-title", Static).update("VERIFYING OPENAI ACCOUNT")
+        self.query_one("#provider-dialog-detail", Static).update(
+            "Checking that Mitsu can receive a model reply from this account…"
+        )
+        try:
+            await asyncio.to_thread(test_connection, profile)
+        except ProviderRequestError as error:
+            self.stage = "auth_method"
+            self.query_one("#provider-dialog-title", Static).update("OPENAI ACCOUNT SIGN-IN")
+            self.query_one("#provider-dialog-detail", Static).update(
+                f"Account sign-in completed, but model verification failed:\n{error}"
+            )
+            listing = self.query_one("#provider-dialog-list", OptionList)
+            listing.clear_options()
+            listing.add_options(["Try account sign-in again", "Use API key"])
+            listing.display = True
+            listing.focus()
+            return
         self.auth_method_prompted = True
         self._continue_connect()
 
@@ -495,6 +498,17 @@ class ProviderDialog(ModalScreen[dict | None]):
             selected["reasoning_parameter"] = ""
             selected["reasoning_effort"] = "medium"
         selected["model"] = model
+        if selected.get("provider_id") == "anthropic" and selected.get("auth_method") == "claude_code":
+            self.query_one("#provider-dialog-detail", Static).update(
+                f"Verifying Claude Code account and {model} response before saving…"
+            )
+            try:
+                await asyncio.to_thread(test_connection, selected)
+            except ProviderRequestError as error:
+                self.query_one("#provider-dialog-detail", Static).update(
+                    f"The selected Claude model did not pass verification:\n{error}"
+                )
+                return
         if not isinstance(selected.get("reasoning_enabled"), bool):
             self.query_one("#provider-dialog-detail", Static).update("Checking model reasoning support…")
             try:

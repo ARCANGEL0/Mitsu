@@ -3251,6 +3251,7 @@ class SessionScreen(Screen):
                     if isinstance(entry, dict) and entry.get("role") == "user"
                 ],
                 get_session_intel=lambda: self.intel,
+                claude_session_state=self.session,
             )
             async with aclosing(events):
                 async for event in events:

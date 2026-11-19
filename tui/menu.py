@@ -25,7 +25,8 @@ from mitsu.armory import CATEGORIES as ARMORY_CATEGORIES
 from mitsu.armory import TOOLS, TOOLS_BY_CATEGORY, TOOL_BY_ID
 from mitsu.pets import COMPANIONS, companion_by_id
 from mitsu.config import CredentialStore, PreferencesStore, PROVIDERS, PROVIDER_BY_ID, SessionStore, THEMES
-from mitsu.providers import ProviderRequestError, apply_reasoning_default, list_models
+from mitsu.providers import ProviderRequestError, apply_reasoning_default, list_models, test_connection
+from mitsu.providers import codex_oauth
 from mitsu.services.host_environment import HostEnvironment, load_host_environment
 from mitsu.services.redteam_armory import (
     ArmoryError,
@@ -541,6 +542,10 @@ class MainMenuScreen(Screen):
             await self._update_mitsu()
         elif action == "select_provider":
             await self._choose_provider(item["provider_id"])
+        elif action == "provider_auth_account":
+            await self._select_provider_auth("account")
+        elif action == "provider_auth_api_key":
+            await self._select_provider_auth("api_key")
         elif action == "select_model":
             await self._save_pending_profile(item["model"])
         elif action == "select_configured_model":
@@ -1406,9 +1411,6 @@ class MainMenuScreen(Screen):
                 for index, record in enumerate(self.records, start=1)
                 if record.get("id")
             ]
-            self.right_items.append(
-                {"label": "[+] CREATE NEW SESSION", "action": "create_session", "detail": "Start a fresh session."}
-            )
         elif kind == "configuration":
             self.right_items = [
                 {"label": f"[{index}] {label}", "action": action, "detail": detail}
@@ -1732,6 +1734,99 @@ class MainMenuScreen(Screen):
         self.inline_flow = "provider"
         self.panel_kind = "provider_setup"
         self.api_key_prompted = False
+        if provider_id in {"anthropic", "openai"}:
+            self._show_provider_auth_methods()
+            return
+        self._continue_pending_profile()
+
+    def _show_provider_auth_methods(self, detail: str = "") -> None:
+        profile = self.pending_profile or {}
+        provider_id = str(profile.get("provider_id", ""))
+        name = PROVIDER_BY_ID[provider_id].name
+        self.panel_kind = "provider_auth"
+        self.input_stage = None
+        self._hide_inline_inputs()
+        self.right_items = [
+            {
+                "label": "Sign in with account",
+                "action": "provider_auth_account",
+                "detail": f"Use your {name} account subscription.",
+            },
+            {
+                "label": "Sign in with API key",
+                "action": "provider_auth_api_key",
+                "detail": f"Use an API key from {name}.",
+            },
+        ]
+        self.right_index = 0
+        self.query_one("#menu-right-title", Static).update(f"{name.upper()} SIGN-IN")
+        self._render_right_list()
+        self.query_one("#menu-right-detail", Static).update(
+            detail or f"Choose how to connect {name}."
+        )
+        self.query_one("#menu-right-list", MenuList).focus()
+
+    async def _select_provider_auth(self, method: str) -> None:
+        profile = self.pending_profile
+        if profile is None:
+            return
+        provider_id = str(profile["provider_id"])
+        if method == "api_key":
+            profile["auth_method"] = "api_key"
+            for key in (
+                "access_token", "refresh_token", "expires_at", "id_token", "client_id",
+                "host_id", "subject", "email", "scopes", "nonce",
+            ):
+                profile[key] = "" if key != "expires_at" else 0
+            self.api_key_prompted = False
+            self._continue_pending_profile()
+            return
+        profile["auth_method"] = "account"
+        if provider_id == "openai":
+            self.query_one("#menu-right-title", Static).update("OPENAI ACCOUNT SIGN-IN")
+            self.query_one("#menu-right-detail", Static).update(
+                "Complete sign-in in the browser. Mitsu is waiting for the local callback."
+            )
+            self.right_items = []
+            self._render_right_list()
+            try:
+                tokens = await asyncio.to_thread(codex_oauth.sign_in, profile)
+            except ProviderRequestError as error:
+                self._show_provider_auth_methods(
+                    f"{error}\n\nChoose another sign-in method or try account sign-in again."
+                )
+                return
+            profile.update(tokens)
+            self.query_one("#menu-right-title", Static).update("VERIFYING OPENAI ACCOUNT")
+            self.query_one("#menu-right-detail", Static).update(
+                "Checking that Mitsu can receive a model reply from this account…"
+            )
+            try:
+                await asyncio.to_thread(test_connection, profile)
+            except ProviderRequestError as error:
+                self._show_provider_auth_methods(
+                    f"Account sign-in completed, but model verification failed:\n{error}"
+                )
+                return
+            self.api_key_prompted = False
+            self._continue_pending_profile()
+            return
+        profile["auth_method"] = "claude_code"
+        profile["model"] = str(profile.get("model") or "opus")
+        profile["api_key"] = ""
+        for key in ("access_token", "refresh_token", "expires_at", "id_token"):
+            profile[key] = 0 if key == "expires_at" else ""
+        self.query_one("#menu-right-title", Static).update("VERIFYING CLAUDE CODE")
+        self.query_one("#menu-right-detail", Static).update(
+            "Checking the Claude Code binary, account login, and Opus model reply…"
+        )
+        try:
+            await asyncio.to_thread(test_connection, profile)
+        except ProviderRequestError as error:
+            self._show_provider_auth_methods(
+                f"Claude Code verification failed:\n{error}"
+            )
+            return
         self._continue_pending_profile()
 
     def _continue_pending_profile(self) -> None:
@@ -1748,7 +1843,11 @@ class MainMenuScreen(Screen):
                 "https://your-endpoint.example/v1",
             )
             return
-        if spec.requires_api_key and not self.api_key_prompted:
+        if (
+            spec.requires_api_key
+            and profile.get("auth_method") not in {"account", "claude_code"}
+            and not self.api_key_prompted
+        ):
             prompt = f"Please input your API key for {spec.name}."
             self.api_key_prompted = True
             self._request_inline_input("api_key", f"{spec.name.upper()} API KEY", prompt, "Paste API key", secret=True)
@@ -1870,7 +1969,12 @@ class MainMenuScreen(Screen):
         self.input_stage = None
         self.query_one("#menu-right-title", Static).update("AVAILABLE MODELS")
         self.query_one("#menu-right-list", Static).update("")
-        self.query_one("#menu-right-detail", Static).update(f"Loading models from {provider.name}…")
+        detail = (
+            f"Verifying account access and loading models from {provider.name}…"
+            if profile.get("auth_method") in {"account", "claude_code"}
+            else f"Loading models from {provider.name}…"
+        )
+        self.query_one("#menu-right-detail", Static).update(detail)
         self._hide_inline_inputs()
         try:
             models = await asyncio.to_thread(list_models, profile)
@@ -1916,6 +2020,20 @@ class MainMenuScreen(Screen):
             self.pending_profile["reasoning_parameter"] = ""
             self.pending_profile["reasoning_effort"] = "medium"
         self.pending_profile["model"] = model
+        if (
+            self.pending_profile.get("provider_id") == "anthropic"
+            and self.pending_profile.get("auth_method") == "claude_code"
+        ):
+            self.query_one("#menu-right-detail", Static).update(
+                f"Verifying Claude Code account and {model} response before saving…"
+            )
+            try:
+                await asyncio.to_thread(test_connection, self.pending_profile)
+            except ProviderRequestError as error:
+                self.query_one("#menu-right-detail", Static).update(
+                    f"The selected Claude model did not pass verification:\n{error}"
+                )
+                return
         if not isinstance(self.pending_profile.get("reasoning_enabled"), bool):
             try:
                 await asyncio.to_thread(apply_reasoning_default, self.pending_profile)

@@ -85,9 +85,13 @@ class CredentialStore:
             # LiteLLM routes by model ID and needs a base URL only for self-hosted endpoints.
             if not profile.get("base_url") and spec.protocol != "litellm":
                 continue
-            if spec.requires_api_key and not profile.get("api_key") and not (
-                profile.get("auth_method") == "account" and profile.get("access_token")
-            ):
+            has_account_token = (
+                spec.id != "anthropic"
+                and profile.get("auth_method") == "account"
+                and profile.get("access_token")
+            )
+            has_claude_code = spec.id == "anthropic" and profile.get("auth_method") == "claude_code"
+            if spec.requires_api_key and not profile.get("api_key") and not has_account_token and not has_claude_code:
                 continue
             if spec.id == "cloudflare" and "{account_id}" in str(profile.get("base_url", "")):
                 continue
@@ -103,9 +107,13 @@ class CredentialStore:
         spec = PROVIDER_BY_ID.get(str(profile.get("provider_id")))
         if not spec:
             return False
-        if spec.requires_api_key and not profile.get("api_key") and not (
-            profile.get("auth_method") == "account" and profile.get("access_token")
-        ):
+        has_account_token = (
+            spec.id != "anthropic"
+            and profile.get("auth_method") == "account"
+            and profile.get("access_token")
+        )
+        has_claude_code = spec.id == "anthropic" and profile.get("auth_method") == "claude_code"
+        if spec.requires_api_key and not profile.get("api_key") and not has_account_token and not has_claude_code:
             return False
         return True
 
@@ -141,7 +149,7 @@ class CredentialStore:
                 stored[key] = profile[key]
         if (
             not profile.get("api_key")
-            and profile.get("auth_method") != "account"
+            and profile.get("auth_method") not in {"account", "claude_code"}
             and isinstance(previous, dict)
             and previous.get("api_key")
         ):
