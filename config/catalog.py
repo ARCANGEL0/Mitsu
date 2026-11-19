@@ -20,6 +20,7 @@ PROVIDERS = (
     ProviderSpec("anthropic", "Anthropic", "https://api.anthropic.com", "anthropic"),
     ProviderSpec("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "openai"),
     ProviderSpec("ollama", "Ollama", "http://localhost:11434/v1", "openai", False),
+    ProviderSpec("ollama_cloud", "Ollama Cloud", "https://ollama.com/v1", "openai"),
     ProviderSpec("deepseek", "DeepSeek", "https://api.deepseek.com", "openai"),
     ProviderSpec("moonshot", "Moonshot", "https://api.moonshot.ai/v1", "openai"),
     ProviderSpec("zai", "Z.AI", "https://api.z.ai/api/paas/v4", "openai"),

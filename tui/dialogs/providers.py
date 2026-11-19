@@ -255,6 +255,15 @@ class ProviderDialog(ModalScreen[dict | None]):
                 initial_value=str(profile.get("model", "")),
             )
             return
+        if provider_id == "ollama_cloud":
+            self._request_input(
+                "model_name",
+                "OLLAMA CLOUD MODEL",
+                "Enter an Ollama cloud model ID. Choose a model that supports tool calling for Mitsu agent actions.",
+                "Model ID",
+                initial_value=str(profile.get("model", "")),
+            )
+            return
         if provider_id == "custom":
             self._request_input("model_name", "MODEL NAME", "Enter the model ID exactly as the endpoint expects it.", "Model ID")
             return
