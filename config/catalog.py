@@ -25,6 +25,7 @@ PROVIDERS = (
     ProviderSpec("groq", "Groq", "https://api.groq.com/openai/v1", "openai"),
     ProviderSpec("mistral", "Mistral AI", "https://api.mistral.ai/openai/v1", "openai"),
     ProviderSpec("together", "Together AI", "https://api.together.ai/v1", "openai"),
+    ProviderSpec("fireworks", "Fireworks AI", "https://api.fireworks.ai/inference/v1", "openai"),
     ProviderSpec("moonshot", "Moonshot", "https://api.moonshot.ai/v1", "openai"),
     ProviderSpec("zai", "Z.AI", "https://api.z.ai/api/paas/v4", "openai"),
     ProviderSpec("agentrouter", "AgentRouter", "https://co.agentrouter.org/v1", "openai"),
