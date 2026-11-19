@@ -160,6 +160,9 @@ def request_agent_turn(
     base_url = str(profile.get("base_url", "")).rstrip("/")
     model = str(profile.get("model", ""))
     api_key = str(profile.get("api_key", ""))
+    account_auth = profile.get("auth_method") == "account"
+    if account_auth and protocol == "anthropic":
+        api_key = _account_access_token(profile)
     if not model or (not base_url and protocol != "litellm"):
         raise ProviderRequestError("Provider setup is incomplete. Reopen provider setup from the main menu.")
     try:
@@ -167,7 +170,15 @@ def request_agent_turn(
             return _request_litellm_turn(profile, messages, tools, on_event, cancellation)
         if protocol == "anthropic":
             return _request_anthropic_turn(
-                base_url, model, api_key, messages, tools, on_event, cancellation, max_tokens
+                base_url,
+                model,
+                api_key,
+                messages,
+                tools,
+                on_event,
+                cancellation,
+                max_tokens,
+                account_auth,
             )
         return _request_openai_turn(
             base_url,
@@ -571,11 +582,18 @@ def _request_anthropic_turn(
     on_event: StreamCallback | None = None,
     cancellation: RequestCancellation | None = None,
     max_tokens: int | None = None,
+    account_auth: bool = False,
 ) -> ProviderTurn:
     endpoint = f"{base_url}/messages" if base_url.endswith("/v1") else f"{base_url}/v1/messages"
     headers = {"Content-Type": "application/json", "anthropic-version": "2023-06-01"}
     if api_key:
-        headers["x-api-key"] = api_key
+        headers["Authorization"] = f"Bearer {api_key}" if account_auth else ""
+        if account_auth:
+            headers["anthropic-beta"] = "oauth-2025-04-20"
+            headers["User-Agent"] = "claude-cli/2.1.2 (external, cli)"
+        else:
+            headers["x-api-key"] = api_key
+    system_prefix = "You are Claude Code, Anthropic's official CLI for Claude."
     system_messages = [str(message["content"]) for message in messages if message.get("role") == "system"]
     conversation = [
         _anthropic_message(message)
@@ -596,6 +614,8 @@ def _request_anthropic_turn(
             }
             for tool in tools
         ]
+    if account_auth:
+        system_messages.insert(0, system_prefix)
     if system_messages:
         payload["system"] = "\n\n".join(system_messages)
     if on_event is not None:
@@ -806,6 +826,9 @@ def send_chat(profile: dict[str, Any], messages: list[dict[str, str]]) -> str:
     base_url = str(profile.get("base_url", "")).rstrip("/")
     model = str(profile.get("model", ""))
     api_key = str(profile.get("api_key", ""))
+    account_auth = profile.get("auth_method") == "account"
+    if account_auth and protocol == "anthropic":
+        api_key = _account_access_token(profile)
     if not model or (not base_url and protocol != "litellm"):
         raise ProviderRequestError("Provider setup is incomplete. Reopen provider setup from the main menu.")
     try:
@@ -813,7 +836,7 @@ def send_chat(profile: dict[str, Any], messages: list[dict[str, str]]) -> str:
             turn = _request_litellm_turn(profile, messages, [], None, None)
             return turn.text
         if protocol == "anthropic":
-            return _send_anthropic(base_url, model, api_key, messages)
+            return _send_anthropic(base_url, model, api_key, messages, account_auth)
         return _send_openai_compatible(
             base_url,
             model,
@@ -834,6 +857,9 @@ def test_connection(profile: dict[str, Any]) -> str:
     protocol = profile.get("protocol", "openai")
     base_url = str(profile.get("base_url", "")).rstrip("/")
     api_key = str(profile.get("api_key", ""))
+    account_auth = profile.get("auth_method") == "account"
+    if account_auth and protocol == "anthropic":
+        api_key = _account_access_token(profile)
     if protocol == "litellm":
         return _test_litellm(profile)
     if not base_url:
@@ -842,7 +868,11 @@ def test_connection(profile: dict[str, Any]) -> str:
         endpoint = f"{base_url}/models?limit=1" if base_url.endswith("/v1") else f"{base_url}/v1/models?limit=1"
         headers = {"anthropic-version": "2023-06-01"}
         if api_key:
-            headers["x-api-key"] = api_key
+            if account_auth:
+                headers["Authorization"] = f"Bearer {api_key}"
+                headers["anthropic-beta"] = "oauth-2025-04-20"
+            else:
+                headers["x-api-key"] = api_key
     else:
         endpoint = f"{base_url}/models"
         headers = {"Content-Type": "application/json"}
@@ -881,6 +911,9 @@ def list_models(profile: dict[str, Any]) -> list[str]:
     base_url = str(profile.get("base_url", "")).rstrip("/")
     api_key = str(profile.get("api_key", ""))
     provider_id = str(profile.get("provider_id", ""))
+    account_auth = profile.get("auth_method") == "account"
+    if account_auth and protocol == "anthropic":
+        api_key = _account_access_token(profile)
     if protocol == "litellm":
         return _list_litellm_models(profile)
     if not base_url:
@@ -900,7 +933,11 @@ def list_models(profile: dict[str, Any]) -> list[str]:
         endpoint = f"{base_url}/models" if base_url.endswith("/v1") else f"{base_url}/v1/models"
         headers = {"anthropic-version": "2023-06-01"}
         if api_key:
-            headers["x-api-key"] = api_key
+            if account_auth:
+                headers["Authorization"] = f"Bearer {api_key}"
+                headers["anthropic-beta"] = "oauth-2025-04-20"
+            else:
+                headers["x-api-key"] = api_key
         cursor_parameter = "after_id"
     else:
         endpoint = f"{base_url}/models"
@@ -1448,12 +1485,20 @@ def _send_anthropic(
     model: str,
     api_key: str,
     messages: list[dict[str, str]],
+    account_auth: bool = False,
 ) -> str:
     endpoint = f"{base_url}/messages" if base_url.endswith("/v1") else f"{base_url}/v1/messages"
     headers = {"Content-Type": "application/json", "anthropic-version": "2023-06-01"}
     if api_key:
-        headers["x-api-key"] = api_key
+        if account_auth:
+            headers["Authorization"] = f"Bearer {api_key}"
+            headers["anthropic-beta"] = "oauth-2025-04-20"
+            headers["User-Agent"] = "claude-cli/2.1.2 (external, cli)"
+        else:
+            headers["x-api-key"] = api_key
     system_messages = [message["content"] for message in messages if message["role"] == "system"]
+    if account_auth:
+        system_messages.insert(0, "You are Claude Code, Anthropic's official CLI for Claude.")
     conversation = [message for message in messages if message["role"] != "system"]
     payload = {"model": model, "max_tokens": 2048, "messages": conversation}
     if system_messages:
@@ -1467,6 +1512,12 @@ def _send_anthropic(
         )
     except (KeyError, TypeError) as error:
         raise ProviderRequestError("The provider returned a response Mitsu could not read.") from error
+
+
+def _account_access_token(profile: dict[str, Any]) -> str:
+    from mitsu.providers.claude_oauth import access_token
+
+    return access_token(profile)
 
 
 def _provider_http_error(error: HTTPError) -> ProviderRequestError:

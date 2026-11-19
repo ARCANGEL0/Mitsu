@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import webbrowser
 from urllib.parse import urlsplit
 
 from textual.app import ComposeResult
@@ -14,6 +15,7 @@ from textual.widgets import Input, OptionList, Static
 
 from mitsu.config import CredentialStore, PROVIDERS, PROVIDER_BY_ID
 from mitsu.providers import ProviderRequestError, apply_reasoning_default, list_models
+from mitsu.providers import claude_oauth
 
 
 class ProviderDialog(ModalScreen[dict | None]):
@@ -29,6 +31,9 @@ class ProviderDialog(ModalScreen[dict | None]):
         self.all_model_choices: list[tuple[dict, str]] = []
         self.key_prompted = False
         self.endpoint_prompted = False
+        self.oauth_verifier = ""
+        self.oauth_state = ""
+        self.auth_method_prompted = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="provider-dialog"):
@@ -57,6 +62,8 @@ class ProviderDialog(ModalScreen[dict | None]):
             self.run_worker(self._load_all_models(), name="provider-dialog-models", exclusive=True)
         elif self.stage == "retry_provider_models":
             self.run_worker(self._load_provider_models(), name="provider-dialog-models", exclusive=True)
+        elif self.stage == "auth_method":
+            await self._choose_auth_method(event.option_index)
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "provider-dialog-input" and self.stage == "model_list":
@@ -92,6 +99,32 @@ class ProviderDialog(ModalScreen[dict | None]):
                 return
             if value:
                 profile["api_key"] = value
+            profile["auth_method"] = "api_key"
+            profile["access_token"] = ""
+            profile["refresh_token"] = ""
+            profile["expires_at"] = 0
+        elif stage == "claude_oauth_code":
+            self.query_one("#provider-dialog-title", Static).update("Completing Claude sign-in…")
+            self.query_one("#provider-dialog-detail", Static).update("Validating the code and exchanging it for a session.")
+            try:
+                tokens = await asyncio.to_thread(
+                    claude_oauth.exchange_login, value, self.oauth_verifier, self.oauth_state
+                )
+            except ProviderRequestError as error:
+                self._request_input(
+                    "claude_oauth_code", "CLAUDE ACCOUNT SIGN-IN", str(error), "Paste code#state"
+                )
+                return
+            profile.update(tokens)
+            profile["auth_method"] = "account"
+            self.query_one("#provider-dialog-input", Input).display = False
+            try:
+                self.credentials.save_profile(profile)
+            except OSError as error:
+                self._show_retry(f"Could not save provider credentials: {error}", "retry_provider_models")
+                return
+            self._continue_connect()
+            return
         elif stage == "account_id":
             if not re.fullmatch(r"[A-Fa-f0-9]{32}", value):
                 self.query_one("#provider-dialog-detail", Static).update(
@@ -141,6 +174,7 @@ class ProviderDialog(ModalScreen[dict | None]):
         }
         self.key_prompted = False
         self.endpoint_prompted = False
+        self.auth_method_prompted = False
         self._continue_connect()
 
     def _continue_connect(self) -> None:
@@ -149,6 +183,17 @@ class ProviderDialog(ModalScreen[dict | None]):
             return
         provider_id = str(profile["provider_id"])
         spec = PROVIDER_BY_ID[provider_id]
+        if provider_id == "anthropic" and not self.auth_method_prompted and self.stage != "claude_oauth_code":
+            self.auth_method_prompted = True
+            self.stage = "auth_method"
+            self.query_one("#provider-dialog-title", Static).update("ANTHROPIC SIGN-IN")
+            self.query_one("#provider-dialog-detail", Static).update("Choose how to connect Anthropic.")
+            listing = self.query_one("#provider-dialog-list", OptionList)
+            listing.clear_options()
+            listing.add_options(["Sign in with account", "Sign in with API key"])
+            listing.display = True
+            listing.focus()
+            return
         if provider_id == "custom" and not self.endpoint_prompted:
             self.endpoint_prompted = True
             self._request_input(
@@ -159,7 +204,7 @@ class ProviderDialog(ModalScreen[dict | None]):
                 initial_value=str(profile.get("base_url", "")),
             )
             return
-        if spec.requires_api_key and not self.key_prompted:
+        if spec.requires_api_key and profile.get("auth_method") != "account" and not self.key_prompted:
             self.key_prompted = True
             detail = f"Please input your API key for {spec.name}."
             if profile.get("api_key"):
@@ -199,6 +244,31 @@ class ProviderDialog(ModalScreen[dict | None]):
             self._request_input("model_name", "MODEL NAME", "Enter the model ID exactly as the endpoint expects it.", "Model ID")
             return
         self.run_worker(self._load_provider_models(), name="provider-dialog-models", exclusive=True)
+
+    async def _choose_auth_method(self, index: int) -> None:
+        profile = self.pending_profile
+        if profile is None:
+            return
+        listing = self.query_one("#provider-dialog-list", OptionList)
+        listing.display = False
+        if index == 0:
+            url, self.oauth_verifier, self.oauth_state = claude_oauth.create_login()
+            profile["auth_method"] = "account"
+            webbrowser.open(url)
+            self._request_input(
+                "claude_oauth_code",
+                "CLAUDE ACCOUNT SIGN-IN",
+                f"Authorize Mitsu at {url}, then paste the code#state shown by Claude.",
+                "Paste code#state",
+            )
+            return
+        self.auth_method_prompted = True
+        profile["auth_method"] = "api_key"
+        profile["access_token"] = ""
+        profile["refresh_token"] = ""
+        profile["expires_at"] = 0
+        self.key_prompted = False
+        self._continue_connect()
 
     def _request_input(
         self,

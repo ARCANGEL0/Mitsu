@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import webbrowser
 from urllib.parse import urlsplit
 
 from rich.text import Text
@@ -15,6 +16,7 @@ from textual.widgets import Input, OptionList, Static
 from mitsu.pets import COMPANIONS, companion_by_id
 from mitsu.config import PROVIDERS, PROVIDER_BY_ID, THEMES, CredentialStore, PreferencesStore
 from mitsu.providers import ProviderRequestError, list_models
+from mitsu.providers import claude_oauth
 from mitsu.tui.branding import MOON_YELLOW
 from mitsu.tui.dialogs import SearchEnginePanel
 from mitsu.tui.widgets import CityScene, MitsuCompanion, MoonScene
@@ -49,6 +51,8 @@ class OnboardingScreen(Screen):
         self.protocol_id = str(self.profile.get("protocol", PROVIDER_BY_ID[self.provider_id].protocol))
         self.base_url = str(self.profile.get("base_url", PROVIDER_BY_ID[self.provider_id].base_url) or "")
         self.api_key = ""
+        self.oauth_verifier = ""
+        self.oauth_state = ""
         self.model_id = str(self.profile.get("model", "") or "")
         self.cloudflare_account_id = self._account_id(self.base_url)
         self.model_options: list[str] = []
@@ -119,6 +123,14 @@ class OnboardingScreen(Screen):
                     yield Static("", id="provider-key-prompt", classes="wizard-copy", markup=False)
                     yield Input(placeholder="Paste API key", password=True, id="provider-api-key")
                     yield Static("", id="provider-key-note", classes="wizard-note", markup=False)
+                with Vertical(id="wizard-page-auth-method", classes="wizard-page"):
+                    yield Static("ANTHROPIC SIGN-IN", classes="wizard-title", markup=False)
+                    yield Static("Choose an Anthropic API key or your Claude account.", classes="wizard-copy", markup=False)
+                    yield OptionList("Sign in with account", "Sign in with API key", id="auth-method-list", compact=True)
+                with Vertical(id="wizard-page-oauth-code", classes="wizard-page"):
+                    yield Static("CLAUDE ACCOUNT SIGN-IN", classes="wizard-title", markup=False)
+                    yield Static("Authorize Mitsu in the browser, then paste the code#state shown by Claude.", classes="wizard-copy", markup=False)
+                    yield Input(placeholder="Paste code#state", password=True, id="claude-oauth-code")
                 with Vertical(id="wizard-page-cloudflare-account", classes="wizard-page"):
                     yield Static("CLOUDFLARE ACCOUNT", classes="wizard-title", markup=False)
                     yield Static("Enter the account ID used by your Workers AI endpoint.", classes="wizard-copy", markup=False)
@@ -209,6 +221,8 @@ class OnboardingScreen(Screen):
         elif list_id == "protocol-list":
             self.protocol_id = "anthropic" if event.option_index == 1 else "openai"
             self._go_to("api_key")
+        elif list_id == "auth-method-list":
+            await self._select_claude_auth(event.option_index)
         elif list_id == "model-list":
             if self.loading_models:
                 return
@@ -230,6 +244,8 @@ class OnboardingScreen(Screen):
             self.query_one("#protocol-list", OptionList).focus()
         elif event.input.id == "provider-api-key" and self.stage == "api_key":
             await self._submit_api_key(event.value.strip())
+        elif event.input.id == "claude-oauth-code" and self.stage == "oauth_code":
+            await self._submit_claude_oauth(event.value.strip())
         elif event.input.id == "cloudflare-account-id" and self.stage == "cloudflare_account":
             account_id = event.value.strip()
             if not re.fullmatch(r"[A-Fa-f0-9]{32}", account_id):
@@ -294,6 +310,11 @@ class OnboardingScreen(Screen):
         elif self.stage == "provider":
             selected = self.query_one("#provider-list", OptionList).highlighted
             self._select_provider(selected if selected is not None else 0)
+        elif self.stage == "auth_method":
+            selected = self.query_one("#auth-method-list", OptionList).highlighted
+            await self._select_claude_auth(selected if selected is not None else 0)
+        elif self.stage == "oauth_code":
+            await self._submit_claude_oauth(self.query_one("#claude-oauth-code", Input).value.strip())
         elif self.stage == "custom_url":
             base_input = self.query_one("#custom-base-url", Input)
             if self.app.focused is base_input:
@@ -363,7 +384,7 @@ class OnboardingScreen(Screen):
         spec = PROVIDER_BY_ID[self.provider_id]
         saved_key = str(self.profile.get("api_key", "") or "")
         self.api_key = entered_key or saved_key
-        if spec.requires_api_key and not self.api_key:
+        if spec.requires_api_key and not self.api_key and self.profile.get("auth_method") != "account":
             self._set_status("This provider needs an API key to load its models.")
             return
         if self.provider_id == "custom":
@@ -372,6 +393,37 @@ class OnboardingScreen(Screen):
             self._go_to("cloudflare_account")
         else:
             await self._fetch_models()
+
+    async def _select_claude_auth(self, index: int) -> None:
+        if index == 0:
+            url, self.oauth_verifier, self.oauth_state = claude_oauth.create_login()
+            webbrowser.open(url)
+            self.profile["auth_method"] = "account"
+            self.query_one("#wizard-page-oauth-code .wizard-copy", Static).update(
+                f"Authorize Mitsu at {url}, then paste the code#state shown by Claude."
+            )
+            self._go_to("oauth_code")
+            return
+        self.profile["auth_method"] = "api_key"
+        self.profile["access_token"] = ""
+        self.profile["refresh_token"] = ""
+        self.profile["expires_at"] = 0
+        self._go_to("api_key")
+
+    async def _submit_claude_oauth(self, value: str) -> None:
+        if not value:
+            self._set_status("Paste the code#state returned by Claude.")
+            return
+        try:
+            tokens = await asyncio.to_thread(
+                claude_oauth.exchange_login, value, self.oauth_verifier, self.oauth_state
+            )
+        except ProviderRequestError as error:
+            self._set_status(str(error))
+            return
+        self.profile.update(tokens)
+        self.profile["auth_method"] = "account"
+        await self._fetch_models()
 
     async def _fetch_models(self) -> None:
         self.loading_models = True
@@ -385,6 +437,14 @@ class OnboardingScreen(Screen):
             "base_url": self.base_url,
             "api_key": self.api_key,
             "protocol": self.protocol_id if self.provider_id == "custom" else PROVIDER_BY_ID[self.provider_id].protocol,
+            **{
+                key: self.profile[key]
+                for key in (
+                    "auth_method", "access_token", "refresh_token", "expires_at", "id_token",
+                    "client_id", "host_id", "subject", "email", "scopes", "nonce",
+                )
+                if key in self.profile
+            },
         }
         try:
             models = await asyncio.to_thread(list_models, profile)
@@ -415,6 +475,14 @@ class OnboardingScreen(Screen):
                     "model": self.model_id,
                     "api_key": self.api_key,
                     "protocol": self.protocol_id if self.provider_id == "custom" else PROVIDER_BY_ID[self.provider_id].protocol,
+                    **{
+                        key: self.profile[key]
+                        for key in (
+                            "auth_method", "access_token", "refresh_token", "expires_at", "id_token",
+                            "client_id", "host_id", "subject", "email", "scopes", "nonce",
+                        )
+                        if key in self.profile
+                    },
                 }
             )
             if self.configuration_mode is None:
@@ -492,7 +560,7 @@ class OnboardingScreen(Screen):
             if self.provider_id == "custom":
                 steps.extend(("custom_url", "api_key", "custom_model"))
             else:
-                steps.append("api_key")
+                steps.extend(((["auth_method", "oauth_code"] if self.provider_id == "anthropic" else []) + ["api_key"]))
                 if self.provider_id == "cloudflare":
                     steps.append("cloudflare_account")
                 steps.append("models")
@@ -501,7 +569,7 @@ class OnboardingScreen(Screen):
         if self.provider_id == "custom":
             steps.extend(("custom_url", "api_key", "custom_model"))
         else:
-            steps.append("api_key")
+            steps.extend(((["auth_method", "oauth_code"] if self.provider_id == "anthropic" else []) + ["api_key"]))
             if self.provider_id == "cloudflare":
                 steps.append("cloudflare_account")
             steps.append("models")
@@ -526,12 +594,14 @@ class OnboardingScreen(Screen):
 
     def _show_step(self) -> None:
         page_ids = (
-            "welcome", "provider", "custom-url", "api-key", "cloudflare-account",
+            "welcome", "provider", "custom-url", "api-key", "auth-method", "oauth-code", "cloudflare-account",
             "models", "custom-model", "search", "style", "companion",
         )
         stage_to_page = {
             "custom_url": "custom-url",
             "api_key": "api-key",
+            "auth_method": "auth-method",
+            "oauth_code": "oauth-code",
             "cloudflare_account": "cloudflare-account",
             "custom_model": "custom-model",
         }
@@ -546,6 +616,8 @@ class OnboardingScreen(Screen):
             "provider": "provider-list",
             "custom_url": "custom-base-url",
             "api_key": "provider-api-key",
+            "auth_method": "auth-method-list",
+            "oauth_code": "claude-oauth-code",
             "cloudflare_account": "cloudflare-account-id",
             "models": "model-list",
             "custom_model": "custom-model-name",
