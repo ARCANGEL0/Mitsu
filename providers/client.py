@@ -194,6 +194,7 @@ def request_agent_turn(
             on_event,
             cancellation,
             max_tokens,
+            str(profile.get("provider_id", "")),
         )
     except ProviderRequestError as error:
         message = _hide_secret(str(error), api_key)
@@ -212,6 +213,7 @@ def _request_openai_turn(
     on_event: StreamCallback | None = None,
     cancellation: RequestCancellation | None = None,
     max_tokens: int | None = None,
+    provider_id: str = "",
 ) -> ProviderTurn:
     endpoint = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
     headers = {"Content-Type": "application/json"}
@@ -224,6 +226,8 @@ def _request_openai_turn(
     }
     if tools:
         payload["tools"] = _openai_tools(tools)
+        if provider_id == "zai":
+            payload["tool_stream"] = True
     if max_tokens is not None:
         payload["max_tokens"] = max(1, int(max_tokens))
     if reasoning_parameter == "reasoning_effort" and reasoning_enabled:
