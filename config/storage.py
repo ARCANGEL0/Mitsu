@@ -146,6 +146,8 @@ class CredentialStore:
             "email",
             "scopes",
             "nonce",
+            "project_id",
+            "location",
         ):
             if key in profile:
                 stored[key] = profile[key]

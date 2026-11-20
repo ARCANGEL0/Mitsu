@@ -27,6 +27,7 @@ from mitsu.pets import COMPANIONS, companion_by_id
 from mitsu.config import CredentialStore, PreferencesStore, PROVIDERS, PROVIDER_BY_ID, SessionStore, THEMES
 from mitsu.providers import ProviderRequestError, apply_reasoning_default, list_models, test_connection
 from mitsu.providers import codex_cli
+from mitsu.providers import google_cloud
 from mitsu.services.host_environment import HostEnvironment, load_host_environment
 from mitsu.services.redteam_armory import (
     ArmoryError,
@@ -1737,7 +1738,7 @@ class MainMenuScreen(Screen):
         self.inline_flow = "provider"
         self.panel_kind = "provider_setup"
         self.api_key_prompted = False
-        if provider_id in {"anthropic", "openai"}:
+        if provider_id in {"anthropic", "openai", "google"}:
             self._show_provider_auth_methods()
             return
         self._continue_pending_profile()
@@ -1809,6 +1810,23 @@ class MainMenuScreen(Screen):
                 )
                 return
             self.api_key_prompted = False
+            self._continue_pending_profile()
+            return
+        if provider_id == "google":
+            profile["auth_method"] = "account"
+            profile["api_key"] = ""
+            self.query_one("#menu-right-title", Static).update("GOOGLE CLOUD ACCOUNT SIGN-IN")
+            self.query_one("#menu-right-detail", Static).update(
+                "Checking gcloud authentication, project access, and Gemini model reply…"
+            )
+            self.right_items = []
+            self._render_right_list()
+            try:
+                profile.update(await asyncio.to_thread(google_cloud.account_profile, profile))
+                await asyncio.to_thread(test_connection, profile)
+            except ProviderRequestError as error:
+                self._show_provider_auth_methods(f"Google Cloud verification failed:\n{error}")
+                return
             self._continue_pending_profile()
             return
         profile["auth_method"] = "claude_code"

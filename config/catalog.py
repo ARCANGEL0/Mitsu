@@ -24,6 +24,13 @@ PROVIDERS = (
     ProviderSpec("deepseek", "DeepSeek", "https://api.deepseek.com", "openai"),
     ProviderSpec("groq", "Groq", "https://api.groq.com/openai/v1", "openai"),
     ProviderSpec("mistral", "Mistral AI", "https://api.mistral.ai/openai/v1", "openai"),
+    ProviderSpec(
+        "google",
+        "Google Gemini / Vertex AI",
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+        "openai",
+        note="API keys use Gemini Developer API; account sign-in uses Google Cloud ADC and Vertex AI.",
+    ),
     ProviderSpec("together", "Together AI", "https://api.together.ai/v1", "openai"),
     ProviderSpec("fireworks", "Fireworks AI", "https://api.fireworks.ai/inference/v1", "openai"),
     ProviderSpec("xai", "xAI", "https://api.x.ai/v1", "openai"),

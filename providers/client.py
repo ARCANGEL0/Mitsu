@@ -172,6 +172,12 @@ def request_agent_turn(
     base_url = str(profile.get("base_url", "")).rstrip("/")
     model = str(profile.get("model", ""))
     api_key = str(profile.get("api_key", ""))
+    if profile.get("provider_id") == "google" and profile.get("auth_method") == "account":
+        from mitsu.providers.google_cloud import account_profile
+
+        profile = account_profile(profile)
+        base_url = str(profile.get("base_url", "")).rstrip("/")
+        api_key = str(profile.get("api_key", ""))
     if not model or (not base_url and protocol != "litellm"):
         raise ProviderRequestError("Provider setup is incomplete. Reopen provider setup from the main menu.")
     auth_method = profile.get("auth_method")
@@ -852,6 +858,12 @@ def send_chat(profile: dict[str, Any], messages: list[dict[str, str]]) -> str:
         from mitsu.providers.codex_cli import complete
 
         return complete(profile, messages)
+    if provider_id == "google" and profile.get("auth_method") == "account":
+        from mitsu.providers.google_cloud import account_profile
+
+        profile = account_profile(profile)
+        base_url = str(profile.get("base_url", "")).rstrip("/")
+        api_key = str(profile.get("api_key", ""))
     if not model or (not base_url and protocol != "litellm"):
         raise ProviderRequestError("Provider setup is incomplete. Reopen provider setup from the main menu.")
     auth_method = profile.get("auth_method")
@@ -891,6 +903,16 @@ def test_connection(profile: dict[str, Any]) -> str:
     api_key = str(profile.get("api_key", ""))
     provider_id = str(profile.get("provider_id", ""))
     auth_method = profile.get("auth_method")
+    if provider_id == "google" and auth_method == "account":
+        from mitsu.providers.google_cloud import verify
+
+        verify(profile)
+        account_profile = dict(profile)
+        account_profile["model"] = profile.get("model") or "gemini-2.5-flash"
+        reply = send_chat(account_profile, [{"role": "user", "content": "Reply only with OK."}])
+        if not reply.strip():
+            raise ProviderRequestError("Google accepted the request but returned no model reply.")
+        return "Google Cloud account and Gemini model reply verified."
     if provider_id == "openai" and auth_method == "codex_cli":
         from mitsu.providers.codex_cli import test_connection as test_codex_cli
 
@@ -905,7 +927,7 @@ def test_connection(profile: dict[str, Any]) -> str:
         raise ProviderRequestError("OpenAI account sign-in has changed. Reconnect using the Codex CLI account option.")
     if protocol == "litellm":
         return _test_litellm(profile)
-    if provider_id in {"zai", "mistral", "vercel_gateway", "ollama_cloud", "fireworks"}:
+    if provider_id in {"zai", "mistral", "google", "vercel_gateway", "ollama_cloud", "fireworks"}:
         reply = send_chat(profile, [{"role": "user", "content": "Reply only with OK."}])
         if not reply.strip():
             raise ProviderRequestError("The provider accepted the request but returned no model reply.")
@@ -956,6 +978,13 @@ def list_models(profile: dict[str, Any]) -> list[str]:
     api_key = str(profile.get("api_key", ""))
     provider_id = str(profile.get("provider_id", ""))
     auth_method = profile.get("auth_method")
+    if provider_id == "google":
+        if auth_method == "account":
+            from mitsu.providers.google_cloud import account_profile, GOOGLE_MODELS
+
+            profile.update(account_profile(profile))
+            return [f"google/{model}" for model in GOOGLE_MODELS]
+        return ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
     if provider_id == "openai" and auth_method == "codex_cli":
         from mitsu.providers.codex_cli import DEFAULT_MODEL, account_status
 

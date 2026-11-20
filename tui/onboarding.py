@@ -16,6 +16,7 @@ from mitsu.pets import COMPANIONS, companion_by_id
 from mitsu.config import PROVIDERS, PROVIDER_BY_ID, THEMES, CredentialStore, PreferencesStore
 from mitsu.providers import ProviderRequestError, list_models, test_connection
 from mitsu.providers import codex_cli
+from mitsu.providers import google_cloud
 from mitsu.tui.branding import MOON_YELLOW
 from mitsu.tui.dialogs import SearchEnginePanel
 from mitsu.tui.widgets import CityScene, MitsuCompanion, MoonScene
@@ -410,6 +411,20 @@ class OnboardingScreen(Screen):
                     return
                 await self._fetch_models()
                 return
+            if self.provider_id == "google":
+                self.profile["auth_method"] = "account"
+                self.profile["api_key"] = ""
+                self._set_status("Checking gcloud authentication and Gemini model access…")
+                try:
+                    self.profile.update(await asyncio.to_thread(google_cloud.account_profile, self.profile))
+                    await asyncio.to_thread(test_connection, self.profile)
+                except ProviderRequestError as error:
+                    self._set_status(str(error))
+                    return
+                self.base_url = str(self.profile["base_url"])
+                self.api_key = str(self.profile["api_key"])
+                await self._fetch_models()
+                return
             self.profile["auth_method"] = "claude_code"
             self.profile["model"] = str(self.profile.get("model") or "opus")
             self.profile["api_key"] = ""
@@ -499,7 +514,7 @@ class OnboardingScreen(Screen):
                         key: self.profile[key]
                         for key in (
                             "auth_method", "access_token", "refresh_token", "expires_at", "id_token",
-                            "client_id", "host_id", "subject", "email", "scopes", "nonce",
+                            "client_id", "host_id", "subject", "email", "scopes", "nonce", "project_id", "location",
                         )
                         if key in self.profile
                     },
@@ -535,7 +550,7 @@ class OnboardingScreen(Screen):
         self._rebuild_steps()
         next_step = (
             "auth_method"
-            if self.provider_id in {"anthropic", "openai"}
+            if self.provider_id in {"anthropic", "openai", "google"}
             else self.steps[self.step_index + 1]
         )
         self._go_to(next_step)
@@ -587,7 +602,7 @@ class OnboardingScreen(Screen):
             else:
                 steps.extend(((
                     ["auth_method"]
-                    if self.provider_id in {"anthropic", "openai"}
+            if self.provider_id in {"anthropic", "openai", "google"}
                     else []
                 ) + ["api_key"]))
                 if self.provider_id == "cloudflare":
@@ -600,7 +615,7 @@ class OnboardingScreen(Screen):
         else:
             steps.extend(((
                 ["auth_method"]
-                if self.provider_id in {"anthropic", "openai"}
+                if self.provider_id in {"anthropic", "openai", "google"}
                 else []
             ) + ["api_key"]))
             if self.provider_id == "cloudflare":

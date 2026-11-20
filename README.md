@@ -402,7 +402,13 @@ Mitsu can read and update Intel through MCP during a session. Older session data
 
 ## Models and providers
 
-Mitsu connects to the OpenAI and Anthropic APIs directly. Other built-in connections include OpenRouter, NVIDIA NIM, local and cloud Ollama, DeepSeek, Groq, Mistral AI, Together AI, Fireworks AI, xAI, Amazon Bedrock through LiteLLM and local AWS credentials, Moonshot (Kimi), Z.AI, AgentRouter, Kilo Gateway, Vercel AI Gateway, and UberLLM (a marketplace of third-party sellers for open-weight and uncensored models) through OpenAI-compatible APIs, plus Cloudflare Models through a Cloudflare account endpoint. You can also configure a custom endpoint that follows either the OpenAI or Anthropic API format.
+Mitsu supports these model connections:
+
+- **Direct and account-backed:** OpenAI, Anthropic, Google Gemini, and Google Cloud Vertex AI.
+- **OpenAI-compatible APIs:** OpenRouter, Ollama local and cloud, DeepSeek, Groq, Mistral AI, Together AI, Fireworks AI, xAI, Moonshot (Kimi), Z.AI, AgentRouter, Kilo Gateway, Vercel AI Gateway, NVIDIA NIM, UberLLM, and custom endpoints.
+- **Cloud and gateway integrations:** Cloudflare Models, LiteLLM, and Amazon Bedrock through LiteLLM and local AWS credentials.
+
+Provider setup supports API keys, supported account authentication, or local credentials where the provider requires them. Custom endpoints can use either the OpenAI or Anthropic API format.
 
 Image input is supported for models that accept vision. Paste an image into chat or attach one from the session workspace; Mitsu checks the selected model’s image capability before sending it. Supported formats include PNG, JPEG, WebP, and GIF. Image support depends on the provider and specific model, so choose a vision-capable model when working from screenshots or other images.
 
