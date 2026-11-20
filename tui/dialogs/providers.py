@@ -14,7 +14,7 @@ from textual.widgets import Input, OptionList, Static
 
 from mitsu.config import CredentialStore, PROVIDERS, PROVIDER_BY_ID
 from mitsu.providers import ProviderRequestError, apply_reasoning_default, list_models, test_connection
-from mitsu.providers import codex_oauth
+from mitsu.providers import codex_cli
 
 
 class ProviderDialog(ModalScreen[dict | None]):
@@ -180,7 +180,7 @@ class ProviderDialog(ModalScreen[dict | None]):
                 initial_value=str(profile.get("base_url", "")),
             )
             return
-        if spec.requires_api_key and profile.get("auth_method") not in {"account", "claude_code"} and not self.key_prompted:
+        if spec.requires_api_key and profile.get("auth_method") not in {"account", "claude_code", "codex_cli"} and not self.key_prompted:
             self.key_prompted = True
             detail = f"Please input your API key for {spec.name}."
             if profile.get("api_key"):
@@ -272,12 +272,20 @@ class ProviderDialog(ModalScreen[dict | None]):
         provider_id = str(profile.get("provider_id"))
         if provider_id == "openai":
             if index == 0:
-                self.stage = "codex_oauth"
+                profile["auth_method"] = "codex_cli"
+                profile["model"] = "default"
+                profile["api_key"] = ""
+                for key in (
+                    "access_token", "refresh_token", "expires_at", "id_token", "client_id",
+                    "host_id", "subject", "email", "scopes", "nonce",
+                ):
+                    profile[key] = 0 if key == "expires_at" else ""
+                self.stage = "codex_cli"
                 self.query_one("#provider-dialog-title", Static).update("OPENAI ACCOUNT SIGN-IN")
                 self.query_one("#provider-dialog-detail", Static).update(
-                    "Complete sign-in in the browser. Mitsu is waiting for the local callback."
+                    "Verifying Codex CLI account sign-in and model access…"
                 )
-                self.run_worker(self._finish_codex_login(), name="provider-dialog-openai-oauth", exclusive=True)
+                self.run_worker(self._finish_codex_login(), name="provider-dialog-openai-account", exclusive=True)
                 return
         elif provider_id == "anthropic" and index == 0:
             profile["auth_method"] = "claude_code"
@@ -316,7 +324,7 @@ class ProviderDialog(ModalScreen[dict | None]):
         if profile is None:
             return
         try:
-            tokens = await asyncio.to_thread(codex_oauth.sign_in, profile)
+            await asyncio.to_thread(codex_cli.sign_in)
         except ProviderRequestError as error:
             self.stage = "auth_method"
             self.query_one("#provider-dialog-title", Static).update("OPENAI ACCOUNT SIGN-IN")
@@ -327,7 +335,6 @@ class ProviderDialog(ModalScreen[dict | None]):
             listing.display = True
             listing.focus()
             return
-        profile.update(tokens)
         self.query_one("#provider-dialog-title", Static).update("VERIFYING OPENAI ACCOUNT")
         self.query_one("#provider-dialog-detail", Static).update(
             "Checking that Mitsu can receive a model reply from this account…"

@@ -3252,6 +3252,7 @@ class SessionScreen(Screen):
                 ],
                 get_session_intel=lambda: self.intel,
                 claude_session_state=self.session,
+                codex_session_state=self.session,
             )
             async with aclosing(events):
                 async for event in events:
@@ -3268,7 +3269,13 @@ class SessionScreen(Screen):
                                 if isinstance(response_info, dict)
                                 else ""
                             )
-                            if isinstance(response_info, dict) and response_info.get("reasoning_only"):
+                            if isinstance(response_info, dict) and response_info.get("refusal"):
+                                message = (
+                                    "Claude refused this request. Your account connection is active, "
+                                    "but Claude returned no answer or tool call. Try a narrower request "
+                                    "or choose another configured provider."
+                                )
+                            elif isinstance(response_info, dict) and response_info.get("reasoning_only"):
                                 message = (
                                     "The provider sent internal reasoning but no reply or tool call. "
                                     "That private reasoning was not shown. Try again or select a model "

@@ -91,7 +91,8 @@ class CredentialStore:
                 and profile.get("access_token")
             )
             has_claude_code = spec.id == "anthropic" and profile.get("auth_method") == "claude_code"
-            if spec.requires_api_key and not profile.get("api_key") and not has_account_token and not has_claude_code:
+            has_codex_cli = spec.id == "openai" and profile.get("auth_method") == "codex_cli"
+            if spec.requires_api_key and not profile.get("api_key") and not has_account_token and not has_claude_code and not has_codex_cli:
                 continue
             if spec.id == "cloudflare" and "{account_id}" in str(profile.get("base_url", "")):
                 continue
@@ -113,7 +114,8 @@ class CredentialStore:
             and profile.get("access_token")
         )
         has_claude_code = spec.id == "anthropic" and profile.get("auth_method") == "claude_code"
-        if spec.requires_api_key and not profile.get("api_key") and not has_account_token and not has_claude_code:
+        has_codex_cli = spec.id == "openai" and profile.get("auth_method") == "codex_cli"
+        if spec.requires_api_key and not profile.get("api_key") and not has_account_token and not has_claude_code and not has_codex_cli:
             return False
         return True
 
@@ -149,7 +151,7 @@ class CredentialStore:
                 stored[key] = profile[key]
         if (
             not profile.get("api_key")
-            and profile.get("auth_method") not in {"account", "claude_code"}
+            and profile.get("auth_method") not in {"account", "claude_code", "codex_cli"}
             and isinstance(previous, dict)
             and previous.get("api_key")
         ):

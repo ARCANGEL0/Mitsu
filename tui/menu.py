@@ -26,7 +26,7 @@ from mitsu.armory import TOOLS, TOOLS_BY_CATEGORY, TOOL_BY_ID
 from mitsu.pets import COMPANIONS, companion_by_id
 from mitsu.config import CredentialStore, PreferencesStore, PROVIDERS, PROVIDER_BY_ID, SessionStore, THEMES
 from mitsu.providers import ProviderRequestError, apply_reasoning_default, list_models, test_connection
-from mitsu.providers import codex_oauth
+from mitsu.providers import codex_cli
 from mitsu.services.host_environment import HostEnvironment, load_host_environment
 from mitsu.services.redteam_armory import (
     ArmoryError,
@@ -1783,29 +1783,26 @@ class MainMenuScreen(Screen):
             return
         profile["auth_method"] = "account"
         if provider_id == "openai":
+            profile["auth_method"] = "codex_cli"
+            profile["model"] = "default"
+            profile["api_key"] = ""
+            for key in (
+                "access_token", "refresh_token", "expires_at", "id_token", "client_id",
+                "host_id", "subject", "email", "scopes", "nonce",
+            ):
+                profile[key] = 0 if key == "expires_at" else ""
             self.query_one("#menu-right-title", Static).update("OPENAI ACCOUNT SIGN-IN")
             self.query_one("#menu-right-detail", Static).update(
-                "Complete sign-in in the browser. Mitsu is waiting for the local callback."
+                "Verifying Codex CLI account sign-in and model access…"
             )
             self.right_items = []
             self._render_right_list()
             try:
-                tokens = await asyncio.to_thread(codex_oauth.sign_in, profile)
-            except ProviderRequestError as error:
-                self._show_provider_auth_methods(
-                    f"{error}\n\nChoose another sign-in method or try account sign-in again."
-                )
-                return
-            profile.update(tokens)
-            self.query_one("#menu-right-title", Static).update("VERIFYING OPENAI ACCOUNT")
-            self.query_one("#menu-right-detail", Static).update(
-                "Checking that Mitsu can receive a model reply from this account…"
-            )
-            try:
+                await asyncio.to_thread(codex_cli.sign_in)
                 await asyncio.to_thread(test_connection, profile)
             except ProviderRequestError as error:
                 self._show_provider_auth_methods(
-                    f"Account sign-in completed, but model verification failed:\n{error}"
+                    f"{error}\n\nChoose another sign-in method or try account sign-in again."
                 )
                 return
             self.api_key_prompted = False
@@ -1814,7 +1811,10 @@ class MainMenuScreen(Screen):
         profile["auth_method"] = "claude_code"
         profile["model"] = str(profile.get("model") or "opus")
         profile["api_key"] = ""
-        for key in ("access_token", "refresh_token", "expires_at", "id_token"):
+        for key in (
+            "access_token", "refresh_token", "expires_at", "id_token", "client_id",
+            "host_id", "subject", "email", "scopes", "nonce",
+        ):
             profile[key] = 0 if key == "expires_at" else ""
         self.query_one("#menu-right-title", Static).update("VERIFYING CLAUDE CODE")
         self.query_one("#menu-right-detail", Static).update(
@@ -1845,7 +1845,7 @@ class MainMenuScreen(Screen):
             return
         if (
             spec.requires_api_key
-            and profile.get("auth_method") not in {"account", "claude_code"}
+            and profile.get("auth_method") not in {"account", "claude_code", "codex_cli"}
             and not self.api_key_prompted
         ):
             prompt = f"Please input your API key for {spec.name}."
@@ -1971,7 +1971,7 @@ class MainMenuScreen(Screen):
         self.query_one("#menu-right-list", Static).update("")
         detail = (
             f"Verifying account access and loading models from {provider.name}…"
-            if profile.get("auth_method") in {"account", "claude_code"}
+            if profile.get("auth_method") in {"account", "claude_code", "codex_cli"}
             else f"Loading models from {provider.name}…"
         )
         self.query_one("#menu-right-detail", Static).update(detail)

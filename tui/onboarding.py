@@ -15,7 +15,7 @@ from textual.widgets import Input, OptionList, Static
 from mitsu.pets import COMPANIONS, companion_by_id
 from mitsu.config import PROVIDERS, PROVIDER_BY_ID, THEMES, CredentialStore, PreferencesStore
 from mitsu.providers import ProviderRequestError, list_models, test_connection
-from mitsu.providers import codex_oauth
+from mitsu.providers import codex_cli
 from mitsu.tui.branding import MOON_YELLOW
 from mitsu.tui.dialogs import SearchEnginePanel
 from mitsu.tui.widgets import CityScene, MitsuCompanion, MoonScene
@@ -373,7 +373,7 @@ class OnboardingScreen(Screen):
         spec = PROVIDER_BY_ID[self.provider_id]
         saved_key = str(self.profile.get("api_key", "") or "")
         self.api_key = entered_key or saved_key
-        if spec.requires_api_key and not self.api_key and self.profile.get("auth_method") not in {"account", "claude_code"}:
+        if spec.requires_api_key and not self.api_key and self.profile.get("auth_method") not in {"account", "claude_code", "codex_cli"}:
             self._set_status("This provider needs an API key to load its models.")
             return
         if self.provider_id == "custom":
@@ -393,18 +393,20 @@ class OnboardingScreen(Screen):
         )
         if index == 0:
             if self.provider_id == "openai":
-                self._set_status("Complete sign-in in the browser. Mitsu is waiting for the local callback.")
+                self.profile["auth_method"] = "codex_cli"
+                self.profile["model"] = "default"
+                self.profile["api_key"] = ""
+                for key in (
+                    "access_token", "refresh_token", "expires_at", "id_token", "client_id",
+                    "host_id", "subject", "email", "scopes", "nonce",
+                ):
+                    self.profile[key] = 0 if key == "expires_at" else ""
+                self._set_status("Verifying Codex CLI account sign-in and model access…")
                 try:
-                    tokens = await asyncio.to_thread(codex_oauth.sign_in, self.profile)
-                except ProviderRequestError as error:
-                    self._set_status(str(error))
-                    return
-                self.profile.update(tokens)
-                self._set_status("Checking that Mitsu can receive a model reply from this account…")
-                try:
+                    await asyncio.to_thread(codex_cli.sign_in)
                     await asyncio.to_thread(test_connection, self.profile)
                 except ProviderRequestError as error:
-                    self._set_status(f"Account sign-in completed, but model verification failed: {error}")
+                    self._set_status(str(error))
                     return
                 await self._fetch_models()
                 return
@@ -723,7 +725,7 @@ class OnboardingScreen(Screen):
 
     def _update_provider_key_title(self) -> None:
         provider = PROVIDER_BY_ID[self.provider_id]
-        if self.profile.get("auth_method") in {"account", "claude_code"}:
+        if self.profile.get("auth_method") in {"account", "claude_code", "codex_cli"}:
             self.query_one("#provider-key-title", Static).update(f"{provider.name.upper()} ACCOUNT")
             self.query_one("#provider-key-prompt", Static).update("Use the saved account session to load models.")
             self.query_one("#provider-key-note", Static).update("Your account session is stored in Mitsu's private user config.")

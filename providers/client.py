@@ -166,6 +166,8 @@ def request_agent_turn(
     cancellation: RequestCancellation | None = None,
     max_tokens: int | None = None,
 ) -> ProviderTurn:
+    if profile.get("provider_id") == "openai" and profile.get("auth_method") == "codex_cli":
+        raise ProviderRequestError("OpenAI account turns must use the Codex CLI bridge.")
     protocol = profile.get("protocol", "openai")
     base_url = str(profile.get("base_url", "")).rstrip("/")
     model = str(profile.get("model", ""))
@@ -175,9 +177,8 @@ def request_agent_turn(
     auth_method = profile.get("auth_method")
     if auth_method in {"account", "claude_code"} and str(profile.get("provider_id")) == "anthropic":
         raise ProviderRequestError("Claude account requests must use the Claude Code bridge.")
-    account_auth = auth_method == "account"
-    if account_auth and str(profile.get("provider_id")) == "openai":
-        return _request_codex_turn(profile, messages, tools, on_event, cancellation, max_tokens)
+    if auth_method == "account" and str(profile.get("provider_id")) == "openai":
+        raise ProviderRequestError("OpenAI account sign-in has changed. Reconnect using the Codex CLI account option.")
     try:
         if protocol == "litellm":
             return _request_litellm_turn(profile, messages, tools, on_event, cancellation)
@@ -259,219 +260,6 @@ def _request_openai_turn(
         return ProviderTurn("", {"role": "assistant", "content": ""}, [])
     response = _request_json(endpoint, headers, payload, cancellation)
     return _openai_turn_from_response(response, on_event)
-
-
-def _request_codex_turn(
-    profile: dict[str, Any],
-    messages: list[dict[str, Any]],
-    tools: list[dict[str, Any]],
-    on_event: StreamCallback | None,
-    cancellation: RequestCancellation | None,
-    max_tokens: int | None,
-) -> ProviderTurn:
-    from mitsu.providers.codex_oauth import access_token
-
-    token = access_token(profile)
-    payload: dict[str, Any] = {
-        "model": str(profile.get("model", "")),
-        "input": _responses_input(messages),
-        "store": False,
-        "stream": True,
-    }
-    if tools:
-        payload["tools"] = [
-            {
-                "type": "function",
-                "name": str(tool["name"]),
-                "description": str(tool.get("description", "")),
-                "parameters": tool.get("parameters", {"type": "object", "properties": {}}),
-            }
-            for tool in tools
-        ]
-    if max_tokens is not None:
-        payload["max_output_tokens"] = max(1, int(max_tokens))
-    if profile.get("reasoning_enabled") is True:
-        payload["reasoning"] = {"effort": str(profile.get("reasoning_effort", "medium"))}
-    request = Request(
-        "https://api.openai.com/v1/responses",
-        data=json.dumps(payload).encode(),
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-            "Cache-Control": "no-store",
-        },
-        method="POST",
-    )
-    try:
-        response = urlopen(request, timeout=180)
-    except HTTPError as error:
-        detail = _http_error_message(error).replace(token, "[hidden]")
-        raise ProviderRequestError(f"OpenAI request failed ({error.code}): {detail}") from error
-    except (URLError, TimeoutError, OSError) as error:
-        raise ProviderRequestError(f"Could not reach OpenAI: {error}") from error
-    if cancellation is not None:
-        cancellation.attach(response)
-    text_parts: list[str] = []
-    final_response: dict[str, Any] | None = None
-    failure: str | None = None
-    try:
-        for raw_line in response:
-            if cancellation is not None and cancellation.cancelled():
-                break
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if not line or line.startswith(":") or not line.startswith("data:"):
-                continue
-            try:
-                event = json.loads(line[5:].strip())
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(event, dict):
-                continue
-            event_type = event.get("type")
-            if event_type == "response.output_text.delta":
-                delta = event.get("delta")
-                if isinstance(delta, str):
-                    text_parts.append(delta)
-                    if on_event is not None:
-                        on_event("delta", {"text": delta})
-            elif event_type == "response.completed":
-                result = event.get("response")
-                final_response = result if isinstance(result, dict) else None
-            elif event_type in {"response.failed", "error"}:
-                result = event.get("response", {})
-                detail = result.get("error") if isinstance(result, dict) else None
-                failure = str(detail.get("message") or detail.get("code") or "OpenAI response failed") if isinstance(detail, dict) else str(event.get("message") or "OpenAI response failed")
-                break
-    except (OSError, TimeoutError) as error:
-        if cancellation is None or not cancellation.cancelled():
-            raise ProviderRequestError(f"OpenAI response stream ended unexpectedly: {error}") from error
-    finally:
-        if cancellation is not None:
-            cancellation.detach(response)
-        response.close()
-    if cancellation is not None and cancellation.cancelled():
-        return ProviderTurn("", {"role": "assistant", "content": ""}, [])
-    if failure:
-        raise ProviderRequestError(f"OpenAI response failed: {failure}")
-    if final_response is None:
-        raise ProviderRequestError("OpenAI response stream ended without response.completed.")
-    return _codex_turn_from_response(final_response, "".join(text_parts))
-
-
-def _responses_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
-    for message in messages:
-        role = str(message.get("role", "user"))
-        if role == "tool":
-            items.append(
-                {
-                    "type": "function_call_output",
-                    "call_id": str(message.get("tool_call_id", "")),
-                    "output": str(message.get("content", "")),
-                }
-            )
-            continue
-        if role == "assistant" and isinstance(message.get("tool_calls"), list):
-            content = message.get("content", "")
-            text = _openai_content_text(content)
-            if text:
-                items.append({"role": "assistant", "content": text})
-            for call in message["tool_calls"]:
-                function = call.get("function", {}) if isinstance(call, dict) else {}
-                if not isinstance(function, dict):
-                    continue
-                arguments = function.get("arguments", "{}")
-                if not isinstance(arguments, str):
-                    arguments = json.dumps(arguments, ensure_ascii=False, default=str)
-                items.append(
-                    {
-                        "type": "function_call",
-                        "call_id": str(call.get("id", "")),
-                        "name": str(function.get("name", "")),
-                        "arguments": arguments,
-                    }
-                )
-            continue
-        content = message.get("content", "")
-        item = {"role": role, "content": _responses_content(content, role)}
-        items.append(item)
-    return items
-
-
-def _responses_content(content: Any, role: str) -> Any:
-    if not isinstance(content, list):
-        return content
-    blocks: list[dict[str, Any]] = []
-    for block in content:
-        if not isinstance(block, dict):
-            continue
-        block_type = block.get("type")
-        if block_type == "mitsu_image":
-            media_type, data = _image_data(str(block.get("path", "")))
-            blocks.append({"type": "input_image", "image_url": f"data:{media_type};base64,{data}"})
-        elif block_type == "image_url":
-            image_url = block.get("image_url")
-            if isinstance(image_url, dict):
-                image_url = image_url.get("url")
-            if isinstance(image_url, str):
-                blocks.append({"type": "input_image", "image_url": image_url})
-        elif block_type in {"text", "input_text", "output_text"}:
-            blocks.append(
-                {
-                    "type": "output_text" if role == "assistant" else "input_text",
-                    "text": str(block.get("text", "")),
-                }
-            )
-        else:
-            blocks.append(block)
-    return blocks
-
-
-def _codex_turn_from_response(response: dict[str, Any], streamed_text: str) -> ProviderTurn:
-    output = response.get("output", [])
-    if not isinstance(output, list):
-        raise ProviderRequestError("OpenAI returned an unreadable Responses API result.")
-    text_parts: list[str] = []
-    calls: list[ToolInvocation] = []
-    normalized_calls: list[dict[str, Any]] = []
-    for item in output:
-        if not isinstance(item, dict):
-            continue
-        if item.get("type") == "message":
-            for block in item.get("content", []):
-                if isinstance(block, dict) and block.get("type") == "output_text":
-                    text_parts.append(str(block.get("text", "")))
-        elif item.get("type") == "function_call":
-            name = str(item.get("name", ""))
-            call_id = str(item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex}")
-            raw_arguments = item.get("arguments", "{}")
-            try:
-                arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
-            except json.JSONDecodeError:
-                arguments = raw_arguments
-            if not name:
-                raise ProviderRequestError("OpenAI returned a malformed function call.")
-            calls.append(ToolInvocation(call_id, name, arguments))
-            normalized_calls.append(
-                {
-                    "id": call_id,
-                    "type": "function",
-                    "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False, default=str)},
-                }
-            )
-    text = _visible_reply("".join(text_parts) or streamed_text)
-    assistant: dict[str, Any] = {"role": "assistant", "content": text}
-    if normalized_calls:
-        assistant["tool_calls"] = normalized_calls
-    usage = response.get("usage")
-    return ProviderTurn(
-        text,
-        assistant,
-        calls,
-        usage if isinstance(usage, dict) else {},
-        {"response_id": response.get("id", ""), "model": response.get("model", "")},
-    )
 
 
 def _openai_turn_from_response(response: dict[str, Any], on_event: StreamCallback | None = None) -> ProviderTurn:
@@ -818,7 +606,7 @@ def _request_anthropic_turn(
         headers["x-api-key"] = api_key
     system_messages = [str(message["content"]) for message in messages if message.get("role") == "system"]
     conversation = [
-        _anthropic_message(message)
+        dict(_anthropic_message(message))
         for message in messages
         if message.get("role") != "system"
     ]
@@ -875,11 +663,16 @@ def _anthropic_turn_from_response(
     if text and on_event is not None:
         on_event("delta", {"text": text})
     usage = response.get("usage")
+    stop_reason = str(response.get("stop_reason", "") or "")
+    response_info = {"finish_reason": stop_reason} if stop_reason else {}
+    if stop_reason == "refusal":
+        response_info["refusal"] = True
     return ProviderTurn(
         text,
         {"role": "assistant", "content": normalized_content},
         calls,
         usage if isinstance(usage, dict) else {},
+        response_info,
     )
 
 
@@ -946,6 +739,7 @@ def _request_anthropic_stream(
         return _anthropic_turn_from_response(decoded, on_event)
     blocks: dict[int, dict[str, Any]] = {}
     usage: dict[str, Any] = {}
+    stop_reason = ""
     reply_filter = _ReplyFilter()
     try:
         for raw_line in response:
@@ -995,6 +789,9 @@ def _request_anthropic_stream(
                 delta_usage = event.get("usage")
                 if isinstance(delta_usage, dict):
                     usage.update(delta_usage)
+                delta = event.get("delta")
+                if isinstance(delta, dict) and isinstance(delta.get("stop_reason"), str):
+                    stop_reason = delta["stop_reason"]
         if cancellation is not None and cancellation.cancelled():
             return ProviderTurn("", {"role": "assistant", "content": []}, [], usage)
     except (OSError, TimeoutError, ValueError) as error:
@@ -1038,6 +835,10 @@ def _request_anthropic_stream(
         {"role": "assistant", "content": normalized_content},
         calls,
         usage,
+        {
+            **({"finish_reason": stop_reason} if stop_reason else {}),
+            **({"refusal": True} if stop_reason == "refusal" else {}),
+        },
     )
 
 
@@ -1047,6 +848,10 @@ def send_chat(profile: dict[str, Any], messages: list[dict[str, str]]) -> str:
     model = str(profile.get("model", ""))
     api_key = str(profile.get("api_key", ""))
     provider_id = str(profile.get("provider_id", ""))
+    if provider_id == "openai" and profile.get("auth_method") == "codex_cli":
+        from mitsu.providers.codex_cli import complete
+
+        return complete(profile, messages)
     if not model or (not base_url and protocol != "litellm"):
         raise ProviderRequestError("Provider setup is incomplete. Reopen provider setup from the main menu.")
     auth_method = profile.get("auth_method")
@@ -1056,10 +861,8 @@ def send_chat(profile: dict[str, Any], messages: list[dict[str, str]]) -> str:
         return complete(profile, messages)
     if auth_method == "account" and provider_id == "anthropic":
         raise ProviderRequestError("Claude account sign-in must use the Claude Code bridge. Reconnect the provider.")
-    account_auth = auth_method == "account"
-    if account_auth and provider_id == "openai":
-        turn = _request_codex_turn(profile, messages, [], None, None, None)
-        return turn.text
+    if auth_method == "account" and provider_id == "openai":
+        raise ProviderRequestError("OpenAI account sign-in has changed. Reconnect using the Codex CLI account option.")
     try:
         if protocol == "litellm":
             turn = _request_litellm_turn(profile, messages, [], None, None)
@@ -1088,26 +891,18 @@ def test_connection(profile: dict[str, Any]) -> str:
     api_key = str(profile.get("api_key", ""))
     provider_id = str(profile.get("provider_id", ""))
     auth_method = profile.get("auth_method")
+    if provider_id == "openai" and auth_method == "codex_cli":
+        from mitsu.providers.codex_cli import test_connection as test_codex_cli
+
+        return test_codex_cli(profile)
     if auth_method == "claude_code" and provider_id == "anthropic":
         from mitsu.providers.claude_code import test_connection as test_claude_code
 
         return test_claude_code(profile)
     if auth_method == "account" and provider_id == "anthropic":
         raise ProviderRequestError("Claude account sign-in must use the Claude Code bridge. Reconnect the provider.")
-    account_auth = auth_method == "account"
-    if account_auth and provider_id == "openai":
-        turn = request_agent_turn(
-            profile,
-            [
-                {"role": "system", "content": "Reply only with OK."},
-                {"role": "user", "content": "Reply only with OK."},
-            ],
-            [],
-            max_tokens=32,
-        )
-        if not turn.text.strip():
-            raise ProviderRequestError("The account accepted the request but returned no model reply.")
-        return "Account sign-in and model reply verified."
+    if auth_method == "account" and provider_id == "openai":
+        raise ProviderRequestError("OpenAI account sign-in has changed. Reconnect using the Codex CLI account option.")
     if protocol == "litellm":
         return _test_litellm(profile)
     if provider_id in {"zai", "mistral", "vercel_gateway", "ollama_cloud", "fireworks"}:
@@ -1161,6 +956,11 @@ def list_models(profile: dict[str, Any]) -> list[str]:
     api_key = str(profile.get("api_key", ""))
     provider_id = str(profile.get("provider_id", ""))
     auth_method = profile.get("auth_method")
+    if provider_id == "openai" and auth_method == "codex_cli":
+        from mitsu.providers.codex_cli import DEFAULT_MODEL, account_status
+
+        account_status()
+        return [DEFAULT_MODEL]
     if auth_method == "claude_code" and provider_id == "anthropic":
         from mitsu.providers.claude_code import CLAUDE_MODELS, account_status
 
@@ -1168,9 +968,8 @@ def list_models(profile: dict[str, Any]) -> list[str]:
         return list(CLAUDE_MODELS)
     if auth_method == "account" and provider_id == "anthropic":
         raise ProviderRequestError("Claude account sign-in must use the Claude Code bridge. Reconnect the provider.")
-    account_auth = auth_method == "account"
-    if account_auth and provider_id == "openai":
-        api_key = _codex_access_token(profile)
+    if auth_method == "account" and provider_id == "openai":
+        raise ProviderRequestError("OpenAI account sign-in has changed. Reconnect using the Codex CLI account option.")
     if protocol == "litellm":
         return _list_litellm_models(profile)
     if provider_id in {"zai", "mistral", "vercel_gateway", "ollama_cloud", "fireworks"}:
@@ -1303,6 +1102,8 @@ def check_reasoning_support(profile: dict[str, Any]) -> str | None:
     protocol = str(profile.get("protocol", "openai"))
     provider_id = str(profile.get("provider_id", ""))
     model = str(profile.get("model", ""))
+    if provider_id == "openai" and profile.get("auth_method") == "codex_cli":
+        return None
     if protocol == "anthropic":
         return None
     if protocol == "litellm":
@@ -1318,7 +1119,7 @@ def check_reasoning_support(profile: dict[str, Any]) -> str | None:
     base_url = str(profile.get("base_url", "")).rstrip("/")
     api_key = str(profile.get("api_key", ""))
     if profile.get("auth_method") == "account" and provider_id == "openai":
-        api_key = _codex_access_token(profile)
+        raise ProviderRequestError("Reconnect OpenAI using the Codex CLI account option.")
     if not base_url or not model:
         raise ProviderRequestError("Provider setup is incomplete. Choose a provider and model first.")
     endpoint = f"{base_url}/models"
@@ -1387,8 +1188,10 @@ def check_image_input_support(profile: dict[str, Any]) -> bool | None:
     base_url = str(profile.get("base_url", "")).rstrip("/")
     model = str(profile.get("model", ""))
     api_key = str(profile.get("api_key", ""))
+    if provider_id == "openai" and profile.get("auth_method") == "codex_cli":
+        return None
     if profile.get("auth_method") == "account" and provider_id == "openai":
-        api_key = _codex_access_token(profile)
+        raise ProviderRequestError("Reconnect OpenAI using the Codex CLI account option.")
     if protocol == "litellm":
         return _litellm_capability("supports_vision", model)
     if not base_url or not model:
@@ -1707,6 +1510,9 @@ def _response_error_detail(body: Any) -> str | None:
     if isinstance(error, dict):
         message = error.get("message")
         if isinstance(message, str) and message:
+            error_type = error.get("type") or error.get("code")
+            if error_type and message.casefold() == "error":
+                return f"{error_type}: {message}"
             return message
     elif isinstance(error, str) and error:
         return error
@@ -1777,12 +1583,6 @@ def _send_anthropic(
         )
     except (KeyError, TypeError) as error:
         raise ProviderRequestError("The provider returned a response Mitsu could not read.") from error
-
-
-def _codex_access_token(profile: dict[str, Any]) -> str:
-    from mitsu.providers.codex_oauth import access_token
-
-    return access_token(profile)
 
 
 def _provider_http_error(error: HTTPError) -> ProviderRequestError:
