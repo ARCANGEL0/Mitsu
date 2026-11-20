@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import signal
+import time
 from pathlib import Path
 from typing import IO
 
@@ -22,8 +24,33 @@ def _lock_path() -> Path:
     return root / "instance.lock"
 
 
-def acquire_instance_lock() -> IO[str]:
-    """Acquire a per-user lock held for the lifetime of the Mitsu process."""
+def _lock_owner(path: Path) -> int | None:
+    try:
+        owner = int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    return owner if owner > 1 else None
+
+
+def _is_mitsu_process(pid: int) -> bool:
+    if os.name == "nt":
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+    try:
+        command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        name = Path(f"/proc/{pid}/comm").read_text(encoding="utf-8").strip().casefold()
+    except OSError:
+        return False
+    return name == "mitsu" or any(
+        part == "mitsu" or part.endswith("/mitsu") or part.endswith("/mitsu/__main__.py")
+        for part in command.split()
+    )
+
+
+def _try_acquire_instance_lock() -> IO[str]:
     path = _lock_path()
     handle = path.open("a+", encoding="utf-8")
     try:
@@ -57,6 +84,62 @@ def acquire_instance_lock() -> IO[str]:
     except BaseException:
         handle.close()
         raise
+
+
+def _wait_for_lock_release(owner: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            handle = _try_acquire_instance_lock()
+        except InstanceAlreadyRunning:
+            time.sleep(0.1)
+            continue
+        release_instance_lock(handle)
+        return True
+    return not _is_mitsu_process(owner)
+
+
+def terminate_existing_instance(timeout: float = 8.0) -> None:
+    try:
+        handle = _try_acquire_instance_lock()
+    except InstanceAlreadyRunning:
+        handle = None
+    if handle is not None:
+        release_instance_lock(handle)
+        return
+    path = _lock_path()
+    owner = _lock_owner(path)
+    if owner is None or not _is_mitsu_process(owner):
+        raise InstanceAlreadyRunning("The instance lock is held, but its owner could not be verified as Mitsu.")
+    if owner == os.getpid():
+        raise InstanceAlreadyRunning("Refusing to terminate the current Mitsu process.")
+    try:
+        os.kill(owner, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError as error:
+        raise InstanceAlreadyRunning(f"Could not stop Mitsu process {owner}: {error}") from error
+    if _wait_for_lock_release(owner, timeout):
+        return
+    try:
+        if _is_mitsu_process(owner):
+            os.kill(owner, getattr(signal, "SIGKILL", signal.SIGTERM))
+    except ProcessLookupError:
+        pass
+    except OSError as error:
+        raise InstanceAlreadyRunning(f"Could not force-stop Mitsu process {owner}: {error}") from error
+    if not _wait_for_lock_release(owner, 3.0):
+        raise InstanceAlreadyRunning(f"Mitsu process {owner} did not release its instance lock.")
+
+
+def acquire_instance_lock(terminate_existing: bool = False) -> IO[str]:
+    try:
+        return _try_acquire_instance_lock()
+    except InstanceAlreadyRunning:
+        if not terminate_existing:
+            raise
+    terminate_existing_instance()
+    return _try_acquire_instance_lock()
 
 
 def release_instance_lock(handle: IO[str]) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import argparse
 import os
 import signal
 import shutil
@@ -206,8 +207,15 @@ class MitsuApp(App):
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(prog="mitsu")
+    parser.add_argument(
+        "--terminate",
+        action="store_true",
+        help="stop the running Mitsu instance before starting a new one",
+    )
+    arguments = parser.parse_args()
     try:
-        instance_lock = acquire_instance_lock()
+        instance_lock = acquire_instance_lock(terminate_existing=arguments.terminate)
     except InstanceAlreadyRunning as error:
         print(f"{error} Close it before starting another.", file=sys.stderr)
         return
