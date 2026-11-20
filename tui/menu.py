@@ -1400,6 +1400,9 @@ class MainMenuScreen(Screen):
         self.query_one("#menu-right-title", Static).update(title)
         if kind == "sessions":
             self.right_items = [
+                {"label": "[+] CREATE NEW SESSION", "action": "create_session", "detail": "Start a fresh session."}
+            ]
+            self.right_items += [
                 {
                     "label": f"[{index}] {str(record.get('title', 'Untitled session')).splitlines()[0]}",
                     "action": "open_session",
