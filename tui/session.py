@@ -1370,6 +1370,27 @@ class SessionLogsDialog(ModalScreen[None]):
         self.dismiss(None)
 
 
+class APIDebugDialog(ModalScreen[None]):
+    BINDINGS = [
+        Binding("ctrl+u", "close", "Close", priority=True),
+        Binding("escape", "close", "Close", priority=True),
+    ]
+
+    def __init__(self, logs: str) -> None:
+        super().__init__()
+        self.logs = logs
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="api-debug-dialog"):
+            yield Static("API DEBUG LOGS", id="api-debug-title", markup=False)
+            with VerticalScroll(id="api-debug-scroll"):
+                yield Static(self.logs, id="api-debug-content", markup=False)
+            yield Static("Ctrl+U / Esc close", id="api-debug-hint", markup=False)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class VulnSearchDialog(ModalScreen[None]):
     BINDINGS = [Binding("escape", "close", "Close", priority=True)]
 
@@ -1919,6 +1940,7 @@ class SessionScreen(Screen):
         Binding("ctrl+b", "toggle_chat_history", "Chat history", priority=True),
         Binding("ctrl+f", "search_chat", "Find in chat", priority=True),
         Binding("ctrl+t", "show_logs", "Logs", priority=True),
+        Binding("ctrl+u", "show_api_debug", "API debug", priority=True),
         Binding("escape", "cancel_agent", "Stop / latest", priority=True),
         Binding("shift+tab", "cycle_mode", "Switch mode", priority=True),
         Binding("pageup", "scroll_chat_up", "Scroll chat up", priority=True),
@@ -2058,6 +2080,10 @@ class SessionScreen(Screen):
         self._map_cancel: RequestCancellation | None = None
         self._map_task: asyncio.Task[None] | None = None
         self._map_logs: list[str] = []
+        self._api_debug_logs: list[str] = []
+        for entry in self.session.get("messages", []):
+            if isinstance(entry, dict) and entry.get("role") == "error":
+                self._record_api_debug(f"Saved session error\n{entry.get('text', '')}")
         self._report_cancel: RequestCancellation | None = None
         self._report_task: asyncio.Task[None] | None = None
         self._session_cleanup_task: asyncio.Task | None = None
@@ -3304,6 +3330,10 @@ class SessionScreen(Screen):
                     elif event.kind == "usage":
                         self._record_usage(event.data.get("usage", {}))
                     elif event.kind == "api_retry":
+                        self._record_api_debug(
+                            f"Retry {event.data.get('attempt', 1)}/{event.data.get('max_attempts', 10)} "
+                            f"in {event.data.get('delay', 3)}s\n{event.data.get('error', 'Provider request failed.')}"
+                        )
                         await self._remove_stream_preview()
                         self._stream_characters = max(
                             0, self._stream_characters - self._current_request_characters
@@ -3382,6 +3412,7 @@ class SessionScreen(Screen):
                 self._set_companion("idle", "Mitsu is Ready to Pwn!")
                 await self._append_message("Stopped the current action.", "system")
         except ProviderRequestError as error:
+            self._record_api_debug(f"Request failed after retry handling\n{error}")
             await self._remove_stream_preview()
             if self._pending_redirects:
                 preserve_history()
@@ -3395,6 +3426,7 @@ class SessionScreen(Screen):
                 status.update(Text("⚠ API Error (｡•́︿•̀｡) · retries exhausted", style="bold #f07882"))
                 await self._append_message(str(error), "error")
         except Exception as error:
+            self._record_api_debug(f"Internal request error: {type(error).__name__}: {error}")
             await self._remove_stream_preview()
             if self._pending_redirects:
                 preserve_history()
@@ -4826,6 +4858,27 @@ class SessionScreen(Screen):
     def action_show_logs(self) -> None:
         logs = "\n\n".join(self._map_logs) or "No artifact errors have been logged in this session."
         self.app.push_screen(SessionLogsDialog(logs))
+
+    def action_show_api_debug(self) -> None:
+        profile = self.provider or {}
+        summary = (
+            f"Provider: {profile.get('provider_id', 'unknown')}\n"
+            f"Model: {profile.get('model', 'unknown')}\n"
+            f"Authentication: {profile.get('auth_method', 'API key')}\n\n"
+        )
+        logs = "\n\n".join(self._api_debug_logs) or "No API failures have been recorded in this session."
+        self.app.push_screen(APIDebugDialog(summary + logs))
+
+    def _record_api_debug(self, detail: str) -> None:
+        safe_detail = str(redact_value(detail))
+        profile = self.provider or {}
+        for key in ("api_key", "access_token", "refresh_token", "id_token"):
+            secret = str(profile.get(key, "") or "")
+            if secret:
+                safe_detail = safe_detail.replace(secret, "[REDACTED]")
+        stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        self._api_debug_logs.append(f"[{stamp}] {safe_detail}")
+        del self._api_debug_logs[:-50]
 
     def _record_map_error(self, artifact_type: str = "map") -> None:
         detail = traceback.format_exc()

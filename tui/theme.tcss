@@ -2969,3 +2969,44 @@ SessionLogsDialog {
     color: $foreground;
     text-align: right;
 }
+
+APIDebugDialog {
+    align: center middle;
+    background: #000000 48%;
+}
+
+#api-debug-dialog {
+    width: 72%;
+    height: 52%;
+    min-height: 12;
+    max-width: 100;
+    max-height: 24;
+    border: round $secondary;
+    background: $background;
+    padding: 1 2;
+}
+
+#api-debug-title {
+    height: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+#api-debug-scroll {
+    height: 1fr;
+    border: round $secondary;
+    background: $panel;
+}
+
+#api-debug-content {
+    width: 100%;
+    height: auto;
+    padding: 1;
+    color: $foreground;
+}
+
+#api-debug-hint {
+    height: 1;
+    color: $foreground;
+    text-align: right;
+}
