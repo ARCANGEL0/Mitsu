@@ -4,6 +4,16 @@ These versions mark development milestones in the Git history. Versions before
 1.4.21 were assigned retrospectively; skipped numbers do not represent releases.
 Each milestone has a matching Git tag and consistent runtime and package versions.
 
+## 1.5.2
+
+- Claude account sign-in now uses the installed Claude Code session.
+- ChatGPT account sign-in now uses the installed Codex CLI session.
+- Added `mitsu --terminate` to stop a running Mitsu instance before starting another.
+- Added Ctrl+U provider error logs for troubleshooting failed requests.
+- Moved “Create new session” to the top of the session list.
+- Fixed a Codex CLI exit condition that could leave Mitsu consuming CPU and appearing frozen.
+- Improved provider error and refusal handling.
+
 ## 1.5.0
 
 ### Features
